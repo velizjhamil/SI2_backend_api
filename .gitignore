@@ -1,0 +1,17 @@
+# Entorno Virtual
+venv/
+ENV/
+env/
+
+# Archivo de Configuración de Entorno (Credenciales)
+.env
+
+# Archivos de caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Base de datos local (si aplicara)
+*.db
+*.sqlite3

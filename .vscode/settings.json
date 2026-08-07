@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "${workspaceFolder}/SI2_backend_api/venv/Scripts/python.exe",
+    "pyrefly.pythonPath": "${workspaceFolder}/SI2_backend_api/venv/Scripts/python.exe"
+}
