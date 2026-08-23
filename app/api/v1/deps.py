@@ -38,3 +38,31 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user
+
+
+ROL_SUPERADMIN = "SUPERADMIN"
+
+
+def require_superadmin(usuario: Usuario = Depends(get_current_user)) -> Usuario:
+    rol_nombre = usuario.rol.nombre if usuario.rol else None
+    if rol_nombre != ROL_SUPERADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operación reservada al Super Administrador SaaS",
+        )
+    return usuario
+
+
+ROL_ADMINISTRADOR = "ADMINISTRADOR"
+ROLES_ADMIN = {ROL_SUPERADMIN, ROL_ADMINISTRADOR}
+
+
+def require_admin(usuario: Usuario = Depends(get_current_user)) -> Usuario:
+    """Permite acceso a SUPERADMIN y ADMINISTRADOR de cooperativa."""
+    rol_nombre = usuario.rol.nombre if usuario.rol else None
+    if rol_nombre not in ROLES_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operación reservada a administradores",
+        )
+    return usuario

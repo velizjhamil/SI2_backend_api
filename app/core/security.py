@@ -17,7 +17,11 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
-def create_access_token(subject: str | int, role: str) -> tuple[str, int]:
+def create_access_token(
+    subject: str | int,
+    role: str,
+    cooperativa_id: int | None = None,
+) -> tuple[str, int]:
     expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     expire = datetime.now(timezone.utc) + expires_delta
     payload = {
@@ -26,6 +30,8 @@ def create_access_token(subject: str | int, role: str) -> tuple[str, int]:
         "exp": expire,
         "iat": datetime.now(timezone.utc),
     }
+    if cooperativa_id is not None:
+        payload["coop"] = cooperativa_id
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return token, settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
 

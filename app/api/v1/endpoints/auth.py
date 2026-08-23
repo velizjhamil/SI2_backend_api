@@ -35,7 +35,9 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
             detail="Usuario inactivo o bloqueado",
         )
 
-    token, expires_in = create_access_token(subject=usuario.id, role=usuario.rol.nombre)
+    token, expires_in = create_access_token(
+        subject=usuario.id, role=usuario.rol.nombre, cooperativa_id=usuario.cooperativa_id
+    )
     return TokenResponse(access_token=token, expires_in=expires_in)
 
 

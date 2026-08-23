@@ -20,16 +20,37 @@ CREATE TABLE rol_permiso (
     PRIMARY KEY (rol_id, permiso_id)
 );
 
+CREATE TABLE cooperativa (
+    id             BIGSERIAL    PRIMARY KEY,
+    uuid           UUID         NOT NULL DEFAULT gen_random_uuid(),
+    nombre         VARCHAR(150) NOT NULL,
+    razon_social   VARCHAR(200),
+    nit            VARCHAR(20),
+    correo         VARCHAR(150),
+    telefono       VARCHAR(20),
+    direccion      TEXT,
+    estado         VARCHAR(20)  NOT NULL DEFAULT 'ACTIVO',
+    fecha_creacion TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    fecha_baja     TIMESTAMPTZ,
+    CONSTRAINT uq_cooperativa_uuid   UNIQUE (uuid),
+    CONSTRAINT uq_cooperativa_nit    UNIQUE (nit),
+    CONSTRAINT chk_cooperativa_estado CHECK (estado IN ('ACTIVO','INACTIVO'))
+);
+
+CREATE INDEX idx_cooperativa_estado ON cooperativa(estado);
+CREATE INDEX idx_cooperativa_nombre ON cooperativa(nombre);
+
 CREATE TABLE usuario (
-    id             BIGSERIAL    PRIMARY KEY,                    
+    id             BIGSERIAL    PRIMARY KEY,
     uuid           UUID         NOT NULL DEFAULT gen_random_uuid(),
     rol_id         SMALLINT     NOT NULL REFERENCES rol(id),
+    cooperativa_id BIGINT       REFERENCES cooperativa(id),
     nombre         VARCHAR(100) NOT NULL,
-    contrasena     VARCHAR(255)  NOT NULL,                        
+    contrasena     VARCHAR(255)  NOT NULL,
     correo         VARCHAR(150) NOT NULL,
     estado         VARCHAR(20)  NOT NULL DEFAULT 'ACTIVO',
-    fecha_creacion TIMESTAMPTZ  NOT NULL DEFAULT NOW(),          
-    fecha_baja     TIMESTAMPTZ,                                  
+    fecha_creacion TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    fecha_baja     TIMESTAMPTZ,
     CONSTRAINT uq_usuario_correo UNIQUE (correo),
     CONSTRAINT uq_usuario_uuid   UNIQUE (uuid),
     CONSTRAINT chk_usuario_estado CHECK (estado IN ('ACTIVO','INACTIVO','BLOQUEADO')),
@@ -37,8 +58,9 @@ CREATE TABLE usuario (
 );
 
 CREATE INDEX idx_usuario_uuid   ON usuario(uuid);
-CREATE INDEX idx_usuario_correo ON usuario(correo) WHERE fecha_baja IS NULL;  
+CREATE INDEX idx_usuario_correo ON usuario(correo) WHERE fecha_baja IS NULL;
 CREATE INDEX idx_usuario_rol    ON usuario(rol_id);
+CREATE INDEX idx_usuario_cooperativa ON usuario(cooperativa_id);
 
 CREATE TABLE bitacora (
     id          BIGSERIAL   PRIMARY KEY,
@@ -361,7 +383,8 @@ INSERT INTO rol (nombre, descripcion) VALUES
     ('ASESOR_CREDITO', 'Gestión y evaluación de créditos'),
     ('CAJERO',         'Manejo de cajas y transacciones'),
     ('CONTADOR',       'Acceso al módulo contable'),
-    ('SOCIO',          'Acceso limitado a su propia información');
+    ('SOCIO',          'Acceso limitado a su propia información'),
+    ('SUPERADMIN',     'Super Administrador SaaS: gestiona cooperativas (tenants)');
 
 INSERT INTO rol_permiso (rol_id, permiso_id)
 SELECT 1, id FROM permiso;
@@ -409,6 +432,18 @@ INSERT INTO usuario (rol_id, nombre, contrasena, correo, estado) VALUES
     (6, 'Roberto Chavez',  '$2b$12$KIXqZ2Z6v3R4T5Y7U8I9O.abcdefghijklmnopqrstuvwxyzABCDEF', 'rchavez@gmail.com',        'ACTIVO'),
     (6, 'Elena Flores',    '$2b$12$KIXqZ2Z6v3R4T5Y7U8I9O.abcdefghijklmnopqrstuvwxyzABCDEF', 'eflores@gmail.com',        'ACTIVO'),
     (6, 'Diego Vargas',    '$2b$12$KIXqZ2Z6v3R4T5Y7U8I9O.abcdefghijklmnopqrstuvwxyzABCDEF', 'dvargas@gmail.com',        'INACTIVO');
+
+-- Tenant demo y vinculación de usuarios de ejemplo a su cooperativa
+INSERT INTO cooperativa (nombre, razon_social, nit, correo, telefono, direccion) VALUES
+    ('Cooperativa Demo SI2', 'Cooperativa Demo SI2 Ltda.', '1020304050',
+     'contacto@coopdemo.bo', '+591 3 1234567', 'Av. Principal #123, Santa Cruz');
+
+UPDATE usuario
+SET cooperativa_id = (SELECT id FROM cooperativa WHERE nombre = 'Cooperativa Demo SI2')
+WHERE correo NOT LIKE '%@si2.com';
+
+INSERT INTO usuario (rol_id, nombre, contrasena, correo, estado) VALUES
+    (7, 'Valeria Rojas', '$2b$12$KIXqZ2Z6v3R4T5Y7U8I9O.abcdefghijklmnopqrstuvwxyzABCDEF', 'superadmin@si2.com', 'ACTIVO');
 
 INSERT INTO socio (ci, nombre, apellido, direccion, telefono, correo, estado) VALUES
     ('1234567', 'Roberto',   'Chavez',   'Av. 6 de Agosto 123, La Paz',      '76543210', 'rchavez@gmail.com',   'ACTIVO'),

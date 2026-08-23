@@ -9,10 +9,12 @@ app = FastAPI(
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
 
-# Permitir peticiones desde tu Frontend Angular
+# Permitir peticiones desde tu Frontend (Vite dev server y builds locales)
 origins = [
-    "http://localhost:4200",
-    "http://127.0.0.1:4200",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
 ]
 
 app.add_middleware(
