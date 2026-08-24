@@ -43,3 +43,30 @@ def decode_access_token(token: str) -> dict | None:
         )
     except JWTError:
         return None
+
+
+# ── Tokens de recuperación de contraseña ──────────────────────────────────
+RESET_TOKEN_TYPE = "password_reset"
+
+
+def create_password_reset_token(user_id: str | int) -> str:
+    """Crea un JWT de un solo uso para restablecer la contraseña."""
+    expires_delta = timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES)
+    payload = {
+        "sub": str(user_id),
+        "type": RESET_TOKEN_TYPE,
+        "exp": datetime.now(timezone.utc) + expires_delta,
+        "iat": datetime.now(timezone.utc),
+    }
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_password_reset_token(token: str) -> str | None:
+    """Valida un token de recuperación y devuelve el user_id, o None si es inválido."""
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("type") != RESET_TOKEN_TYPE:
+        return None
+    return payload.get("sub")

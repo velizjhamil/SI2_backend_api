@@ -10,6 +10,33 @@ class LoginRequest(BaseModel):
     contrasena: str = Field(..., min_length=1)
 
 
+class PasswordResetRequest(BaseModel):
+    correo: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(..., min_length=1)
+    nueva_contrasena: str = Field(..., min_length=6, max_length=128)
+
+
+class MessageResponse(BaseModel):
+    message: str
+
+
+class PasswordResetRequestResponse(BaseModel):
+    """Respuesta al solicitar recuperación.
+
+    `delivered` indica si el correo se entregó a SMTP (no si el receptor lo
+    recibió en bandeja — eso depende de filtros del proveedor destino).
+    Si el servidor está sin SMTP configurado (modo desarrollo), `debug_token`
+    contiene el token generado para que el equipo pueda probar el flujo
+    end-to-end sin esperar al correo.
+    """
+    message: str
+    delivered: bool
+    debug_token: str | None = None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

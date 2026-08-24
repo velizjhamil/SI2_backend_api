@@ -3,11 +3,18 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.db.session import init_db
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json"
 )
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    """Alinea el esquema de la BD con el modelo al arrancar (sin migraciones manuales)."""
+    init_db()
 
 # Permitir peticiones desde tu Frontend (Vite dev server y builds locales)
 origins = [
