@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
 
     # URL base del frontend para construir enlaces de recuperación
-    APP_FRONTEND_URL: str = "http://localhost:5173"
+    APP_FRONTEND_URL: str = "https://si2frontendweb.vercel.app"
 
     class Config:
         env_file = ".env"
