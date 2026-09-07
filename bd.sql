@@ -54,15 +54,16 @@ create table usuario (
 create index idx_usuario_estado on usuario(estado);
 create index idx_usuario_cooperativa on usuario(cooperativa_id);
 
-create table bitacora (
-    id bigserial primary key,
-    usuario_id bigint not null references usuario(id),
-    modulo varchar(50) not null,
-    accion varchar(100) not null,
-    descripcion text,
-    ip varchar(45),
-    user_agent text,
-    fecha_hora timestamptz not null default now()
+CREATE TABLE BITACORA (
+    id BIGSERIAL PRIMARY KEY,
+    usuario_id BIGINT NOT NULL REFERENCES USUARIO(id),
+    cooperativa_id BIGINT REFERENCES COOPERATIVA(id),
+    modulo VARCHAR(50) NOT NULL,
+    accion VARCHAR(100) NOT NULL,
+    descripcion TEXT,
+    ip VARCHAR(45),
+    user_agent TEXT,
+    fecha_hora TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 create table reporte (
@@ -90,21 +91,22 @@ create table tipo_de_cambio (
     moneda_id int not null references moneda(id)
 );
 
-create table socio (
-    id bigserial primary key,
-    uuid uuid not null default gen_random_uuid(),
-    ci varchar(20) unique not null,
-    nombre varchar(100) not null,
-    apellido varchar(100) not null,
-    direccion text,
-    telefono varchar(20),
-    correo varchar(150),
-    estado varchar(20) not null default 'ACTIVO',
-    fecha_registro date not null default current_date,
-    fecha_baja date,
-    usuario_id bigint references usuario(id),
-    constraint uq_socio_ci unique (ci),
-    constraint chk_socio_estado check (estado in ('ACTIVO','INACTIVO'))
+CREATE TABLE SOCIO (
+    id BIGSERIAL PRIMARY KEY,
+    uuid UUID NOT NULL DEFAULT gen_random_uuid(),
+    cooperativa_id BIGINT REFERENCES COOPERATIVA(id),
+    ci VARCHAR(20) UNIQUE NOT NULL,
+    nombre VARCHAR(100) NOT NULL,
+    apellido VARCHAR(100) NOT NULL,
+    direccion TEXT,
+    telefono VARCHAR(20),
+    correo VARCHAR(150),
+    estado VARCHAR(20) NOT NULL DEFAULT 'ACTIVO',
+    fecha_registro DATE NOT NULL DEFAULT CURRENT_DATE,
+    fecha_baja DATE,
+    usuario_id BIGINT REFERENCES USUARIO(id),
+    CONSTRAINT uq_socio_ci UNIQUE (ci),
+    CONSTRAINT chk_socio_estado CHECK (estado IN ('ACTIVO','INACTIVO'))
 );
 
 create table certificado_aportacion (
@@ -295,9 +297,11 @@ create table detalle_asiento (
 create index idx_bitacora_usuario_fecha on bitacora(usuario_id, fecha_hora);
 create index idx_reporte_usuario_fecha on reporte(usuario_id, fecha_generacion);
 
-create index idx_socio_ci on socio(ci);
-create index idx_socio_estado on socio(estado);
-create index idx_socio_nombres on socio(apellido, nombre);
+CREATE INDEX idx_socio_ci ON SOCIO(ci);
+CREATE INDEX idx_socio_cooperativa ON SOCIO(cooperativa_id);
+CREATE INDEX idx_socio_usuario ON SOCIO(usuario_id);
+CREATE INDEX idx_socio_estado ON SOCIO(estado);
+CREATE INDEX idx_socio_nombres ON SOCIO(apellido, nombre);
 
 create index idx_cuenta_socio on cuenta_ahorro(socio_id);
 create index idx_cuenta_numero on cuenta_ahorro(numero);

@@ -70,13 +70,25 @@ def init_db() -> None:
 
         # --- socio ---
         conn.execute(text(
+            "ALTER TABLE socio ADD COLUMN IF NOT EXISTS cooperativa_id BIGINT REFERENCES cooperativa(id)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE socio ADD COLUMN IF NOT EXISTS usuario_id BIGINT REFERENCES usuario(id)"
+        ))
+        conn.execute(text(
             "ALTER TABLE socio ADD COLUMN IF NOT EXISTS uuid UUID NOT NULL DEFAULT gen_random_uuid()"
         ))
         conn.execute(text(
             "ALTER TABLE socio ADD COLUMN IF NOT EXISTS fecha_baja DATE"
         ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_socio_cooperativa ON socio(cooperativa_id)"
+        ))
 
         # --- bitacora: columnas del esquema ampliado ---
+        conn.execute(text(
+            "ALTER TABLE bitacora ADD COLUMN IF NOT EXISTS cooperativa_id BIGINT REFERENCES cooperativa(id)"
+        ))
         conn.execute(text(
             "ALTER TABLE bitacora ADD COLUMN IF NOT EXISTS user_agent TEXT"
         ))

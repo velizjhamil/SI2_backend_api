@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # Expiración del token de recuperación de contraseña (minutos)
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
 
-    DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/cooperativa_db"
+    DATABASE_URL: str = "postgresql://yimysito:tarqui231B@localhost:5433/cooperativa_db"
 
     # ── Envío de correo (Brevo, API HTTPS) ──
     # SMTP directo no funciona desde Render: el hosting bloquea el tráfico

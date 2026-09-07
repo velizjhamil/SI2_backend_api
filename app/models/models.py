@@ -3,6 +3,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Date,
+    Numeric,
     ForeignKey,
     SmallInteger,
     String,
@@ -149,6 +150,9 @@ class Bitacora(Base):
     usuario_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("usuario.id"), nullable=False
     )
+    cooperativa_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id"), nullable=True
+    )
     modulo: Mapped[str] = mapped_column(String(50), nullable=False)
     accion: Mapped[str] = mapped_column(String(100), nullable=False)
     descripcion: Mapped[str | None] = mapped_column(Text)
@@ -165,8 +169,8 @@ class Socio(Base):
     """
     Persona natural afiliada a la cooperativa (tabla KYC real en la BD).
 
-    Nota: No tiene cooperativa_id en la BD actual. El tenant se gestiona
-    a nivel de la sesión del administrador que registra al socio.
+    Cada socio pertenece a una cooperativa; los registros legacy sin tenant
+    solo son visibles para SUPERADMIN hasta ser asignados.
     """
 
     __tablename__ = "socio"
@@ -174,6 +178,9 @@ class Socio(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     uuid: Mapped[str] = mapped_column(
         UUID(as_uuid=True), nullable=False, server_default=func.gen_random_uuid()
+    )
+    cooperativa_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id"), nullable=True
     )
     ci: Mapped[str] = mapped_column(String(20), nullable=False)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -184,6 +191,9 @@ class Socio(Base):
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVO")
     fecha_registro = mapped_column(Date, nullable=False, server_default=func.current_date())
     fecha_baja = mapped_column(Date, nullable=True)
+    usuario_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("usuario.id"), nullable=True
+    )
 
     __table_args__ = (
         UniqueConstraint("ci", name="uq_socio_ci"),
@@ -192,3 +202,46 @@ class Socio(Base):
             name="chk_socio_estado",
         ),
     )
+
+    cuentas_ahorro: Mapped[list["CuentaAhorro"]] = relationship(back_populates="socio")
+    certificados_aportacion: Mapped[list["CertificadoAportacion"]] = relationship(back_populates="socio")
+
+
+class Moneda(Base):
+    __tablename__ = "moneda"
+
+    id: Mapped[int] = mapped_column(SmallInteger, primary_key=True, autoincrement=True)
+    codigo_iso: Mapped[str] = mapped_column(String(3), nullable=False, unique=True)
+    nombre: Mapped[str] = mapped_column(String(50), nullable=False)
+    simbolo: Mapped[str] = mapped_column(String(5), nullable=False)
+    es_moneda_base: Mapped[bool] = mapped_column(default=False)
+
+
+class CuentaAhorro(Base):
+    __tablename__ = "cuenta_ahorro"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    numero: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
+    saldo_disponible = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    saldo_bloqueado = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVA")
+    fecha_registro = mapped_column(Date, nullable=False, server_default=func.current_date())
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("moneda.id"), nullable=False)
+
+    socio: Mapped["Socio"] = relationship(back_populates="cuentas_ahorro")
+    moneda: Mapped["Moneda"] = relationship()
+
+
+class CertificadoAportacion(Base):
+    __tablename__ = "certificado_aportacion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    monto = mapped_column(Numeric(12, 2), nullable=False)
+    fecha_emision = mapped_column(Date, nullable=False)
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="EMITIDO")
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("moneda.id"), nullable=False)
+
+    socio: Mapped["Socio"] = relationship(back_populates="certificados_aportacion")
+    moneda: Mapped["Moneda"] = relationship()

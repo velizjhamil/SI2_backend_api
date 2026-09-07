@@ -5,9 +5,10 @@ Estructura real de la tabla bitacora en la BD:
 """
 
 from fastapi import Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.models import Bitacora
+from app.models.models import Bitacora, Usuario
 
 
 def registrar_accion(
@@ -16,6 +17,7 @@ def registrar_accion(
     accion: str,
     modulo: str,
     usuario_id: int,
+    cooperativa_id: int | None = None,
     descripcion: str | None = None,
     request: Request | None = None,
 ) -> Bitacora:
@@ -41,10 +43,16 @@ def registrar_accion(
         ip = forwarded.split(",")[0].strip() if forwarded else request.client.host
         user_agent = request.headers.get("User-Agent")
 
+    if cooperativa_id is None:
+        cooperativa_id = db.execute(
+            select(Usuario.cooperativa_id).where(Usuario.id == usuario_id)
+        ).scalar_one_or_none()
+
     registro = Bitacora(
         accion=accion,
         modulo=modulo,
         usuario_id=usuario_id,
+        cooperativa_id=cooperativa_id,
         descripcion=descripcion,
         ip=ip,
         user_agent=user_agent,

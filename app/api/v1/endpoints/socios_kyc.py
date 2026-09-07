@@ -1,5 +1,6 @@
 """Endpoints del módulo Socios — KYC (registro e identidad de miembros)."""
 
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -7,9 +8,13 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_db, require_admin
 from app.core.bitacora import registrar_accion
 from app.models.models import Socio, Usuario
-from app.schemas.schemas import SocioCreate, SocioOut, SocioRegistroResponse
+from app.schemas.schemas import SocioCreate, SocioOut, SocioRegistroResponse, SocioUpdate
 
 router = APIRouter()
+
+
+def _socio_visible(admin: Usuario, socio: Socio) -> bool:
+    return admin.rol.nombre == "SUPERADMIN" or socio.cooperativa_id == admin.cooperativa_id
 
 
 @router.post(
@@ -54,6 +59,7 @@ def registrar_socio(
 
     # Crear el socio
     nuevo_socio = Socio(
+        cooperativa_id=admin.cooperativa_id,
         ci=body.ci,
         nombre=body.nombre,
         apellido=body.apellido,
@@ -88,20 +94,60 @@ def registrar_socio(
     )
 
 
+@router.put("/{socio_id}", response_model=SocioOut, summary="Actualizar socio")
+def actualizar_socio(
+    socio_id: int,
+    body: SocioUpdate,
+    request: Request,
+    admin: Usuario = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    socio = db.get(Socio, socio_id)
+    if socio is None or not _socio_visible(admin, socio):
+        raise HTTPException(status_code=404, detail="Socio no encontrado")
+    for campo, valor in body.model_dump(exclude_unset=True).items():
+        setattr(socio, campo, valor)
+    registrar_accion(db, accion="ACTUALIZAR", modulo="SOCIO", usuario_id=admin.id, descripcion=f"Socio actualizado: {socio.id}", request=request)
+    db.commit()
+    db.refresh(socio)
+    return socio
+
+
+@router.delete("/{socio_id}", response_model=SocioOut, summary="Dar de baja socio")
+def desactivar_socio(
+    socio_id: int,
+    request: Request,
+    admin: Usuario = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    socio = db.get(Socio, socio_id)
+    if socio is None or not _socio_visible(admin, socio):
+        raise HTTPException(status_code=404, detail="Socio no encontrado")
+    socio.estado = "INACTIVO"
+    socio.fecha_baja = date.today()
+    registrar_accion(db, accion="BAJA", modulo="SOCIO", usuario_id=admin.id, descripcion=f"Socio dado de baja: {socio.id}", request=request)
+    db.commit()
+    db.refresh(socio)
+    return socio
+
+
 @router.get(
     "/",
     response_model=list[SocioOut],
     summary="Listar socios",
 )
 def listar_socios(
-    _admin: Usuario = Depends(require_admin),
+    admin: Usuario = Depends(require_admin),
     db: Session = Depends(get_db),
     limite: int = 50,
     offset: int = 0,
 ):
     """Lista todos los socios registrados, del más reciente al más antiguo."""
+    query = select(Socio)
+    if admin.rol.nombre != "SUPERADMIN":
+        query = query.where(Socio.cooperativa_id == admin.cooperativa_id)
     socios = db.execute(
-        select(Socio)
+        query
         .order_by(Socio.fecha_registro.desc(), Socio.id.desc())
         .limit(limite)
         .offset(offset)

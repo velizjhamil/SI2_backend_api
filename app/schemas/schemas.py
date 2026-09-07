@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -72,6 +73,34 @@ class UserOut(BaseModel):
     cooperativa_id: int | None = None
 
 
+class UsuarioCreate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=100)
+    correo: EmailStr
+    contrasena: str = Field(..., min_length=8, max_length=128)
+    rol: str = Field(..., min_length=2, max_length=50)
+    cooperativa_id: int | None = None
+
+
+class UsuarioUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=100)
+    correo: EmailStr | None = None
+    contrasena: str | None = Field(None, min_length=8, max_length=128)
+    rol: str | None = Field(None, min_length=2, max_length=50)
+    estado: str | None = Field(None, pattern="^(ACTIVO|INACTIVO|BLOQUEADO)$")
+
+
+class RolCreate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=50)
+    descripcion: str | None = None
+    permiso_ids: list[int] = []
+
+
+class RolUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=50)
+    descripcion: str | None = None
+    permiso_ids: list[int] | None = None
+
+
 class LogoutResponse(BaseModel):
     message: str
 
@@ -142,11 +171,21 @@ class SocioCreate(BaseModel):
     correo: EmailStr | None = None
 
 
+class SocioUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=100)
+    apellido: str | None = Field(None, min_length=2, max_length=100)
+    direccion: str | None = Field(None, max_length=500)
+    telefono: str | None = Field(None, max_length=20)
+    correo: EmailStr | None = None
+    estado: str | None = Field(None, pattern="^(ACTIVO|INACTIVO)$")
+
+
 class SocioOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     uuid: UUID
+    cooperativa_id: int | None = None
     ci: str
     nombre: str
     apellido: str
@@ -162,3 +201,59 @@ class SocioRegistroResponse(BaseModel):
     socio: SocioOut
     mensaje: str = "Socio registrado correctamente"
     bitacora_id: int | None = None
+
+
+class MonedaOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    codigo_iso: str
+    nombre: str
+    simbolo: str
+
+
+class CuentaAhorroCreate(BaseModel):
+    socio_id: int
+    moneda_id: int
+
+
+class CuentaAhorroOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    numero: str
+    saldo_disponible: Decimal
+    saldo_bloqueado: Decimal
+    estado: str
+    fecha_registro: date
+    socio_id: int
+    moneda: MonedaOut
+
+
+class CertificadoAportacionCreate(BaseModel):
+    socio_id: int
+    moneda_id: int
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+
+
+class CertificadoAportacionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    monto: Decimal
+    fecha_emision: date
+    estado: str
+    socio_id: int
+    moneda: MonedaOut
+
+
+class MovimientoCuentaCreate(BaseModel):
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+
+
+class MovimientoCuentaOut(BaseModel):
+    cuenta_id: int
+    tipo: str
+    monto: Decimal
+    saldo_disponible: Decimal
+    moneda: MonedaOut
