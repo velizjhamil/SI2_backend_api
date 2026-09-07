@@ -54,6 +54,7 @@ def registrar_socio(
 
     # Crear el socio
     nuevo_socio = Socio(
+        cooperativa_id=admin.cooperativa_id,
         ci=body.ci,
         nombre=body.nombre,
         apellido=body.apellido,
@@ -94,14 +95,17 @@ def registrar_socio(
     summary="Listar socios",
 )
 def listar_socios(
-    _admin: Usuario = Depends(require_admin),
+    admin: Usuario = Depends(require_admin),
     db: Session = Depends(get_db),
     limite: int = 50,
     offset: int = 0,
 ):
     """Lista todos los socios registrados, del más reciente al más antiguo."""
+    query = select(Socio)
+    if admin.rol.nombre != "SUPERADMIN":
+        query = query.where(Socio.cooperativa_id == admin.cooperativa_id)
     socios = db.execute(
-        select(Socio)
+        query
         .order_by(Socio.fecha_registro.desc(), Socio.id.desc())
         .limit(limite)
         .offset(offset)

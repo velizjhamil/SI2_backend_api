@@ -72,6 +72,34 @@ class UserOut(BaseModel):
     cooperativa_id: int | None = None
 
 
+class UsuarioCreate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=100)
+    correo: EmailStr
+    contrasena: str = Field(..., min_length=8, max_length=128)
+    rol: str = Field(..., min_length=2, max_length=50)
+    cooperativa_id: int | None = None
+
+
+class UsuarioUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=100)
+    correo: EmailStr | None = None
+    contrasena: str | None = Field(None, min_length=8, max_length=128)
+    rol: str | None = Field(None, min_length=2, max_length=50)
+    estado: str | None = Field(None, pattern="^(ACTIVO|INACTIVO|BLOQUEADO)$")
+
+
+class RolCreate(BaseModel):
+    nombre: str = Field(..., min_length=2, max_length=50)
+    descripcion: str | None = None
+    permiso_ids: list[int] = []
+
+
+class RolUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=50)
+    descripcion: str | None = None
+    permiso_ids: list[int] | None = None
+
+
 class LogoutResponse(BaseModel):
     message: str
 

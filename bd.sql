@@ -57,6 +57,7 @@ CREATE INDEX idx_usuario_cooperativa ON USUARIO(cooperativa_id);
 CREATE TABLE BITACORA (
     id BIGSERIAL PRIMARY KEY,
     usuario_id BIGINT NOT NULL REFERENCES USUARIO(id),
+    cooperativa_id BIGINT REFERENCES COOPERATIVA(id),
     modulo VARCHAR(50) NOT NULL,
     accion VARCHAR(100) NOT NULL,
     descripcion TEXT,
@@ -93,6 +94,7 @@ CREATE TABLE TIPO_DE_CAMBIO (
 CREATE TABLE SOCIO (
     id BIGSERIAL PRIMARY KEY,
     uuid UUID NOT NULL DEFAULT gen_random_uuid(),
+    cooperativa_id BIGINT REFERENCES COOPERATIVA(id),
     ci VARCHAR(20) UNIQUE NOT NULL,
     nombre VARCHAR(100) NOT NULL,
     apellido VARCHAR(100) NOT NULL,
@@ -295,6 +297,7 @@ CREATE INDEX idx_bitacora_usuario_fecha ON BITACORA(usuario_id, fecha_hora);
 CREATE INDEX idx_reporte_usuario_fecha ON REPORTE(usuario_id, fecha_generacion);
 
 CREATE INDEX idx_socio_ci ON SOCIO(ci);
+CREATE INDEX idx_socio_cooperativa ON SOCIO(cooperativa_id);
 CREATE INDEX idx_socio_estado ON SOCIO(estado);
 CREATE INDEX idx_socio_nombres ON SOCIO(apellido, nombre);
 
