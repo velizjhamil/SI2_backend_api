@@ -58,16 +58,21 @@ def send_email(
         return
 
     msg = _build_message(to_email, subject, body, html_body)
+    logger.info(
+        "Conectando a %s:%s (tls=%s) para enviar correo a %s",
+        settings.SMTP_HOST, settings.SMTP_PORT, settings.SMTP_USE_TLS, to_email,
+    )
     try:
         if settings.SMTP_USE_TLS:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
                 server.starttls()
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
         else:
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
                 server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
                 server.send_message(msg)
+        logger.info("Correo enviado correctamente a %s", to_email)
     except Exception as exc:  # noqa: BLE001
         # Imprimimos la traza completa para que sea diagnosticable desde logs
         logger.exception(

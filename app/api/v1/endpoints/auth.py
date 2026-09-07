@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -77,6 +77,7 @@ def me(
 @router.post("/password-reset/request", response_model=PasswordResetRequestResponse)
 def request_password_reset(
     body: PasswordResetRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """Solicita el envío del correo de recuperación.
@@ -122,21 +123,16 @@ def request_password_reset(
             debug_token=token,
         )
 
-    try:
-        send_password_reset_email(correo_norm, token)
-        return PasswordResetRequestResponse(
-            message=neutral_message,
-            delivered=True,
-            debug_token=None,
-        )
-    except Exception:  # noqa: BLE001
-        # SMTP aceptó el envío según el debug (250 OK), pero podría fallar
-        # por timeout/red. Logueamos la traza y devolvemos delivered=False.
-        return PasswordResetRequestResponse(
-            message=neutral_message,
-            delivered=False,
-            debug_token=None,
-        )
+    # El envío se dispara en background: smtplib puede tardar/colgarse (ver
+    # timeout en app/core/email.py) y no queremos bloquear la respuesta HTTP
+    # esperando a Gmail. `delivered` aquí solo indica que quedó encolado, no
+    # que Gmail ya lo entregó (los errores reales quedan en los logs).
+    background_tasks.add_task(send_password_reset_email, correo_norm, token)
+    return PasswordResetRequestResponse(
+        message=neutral_message,
+        delivered=True,
+        debug_token=None,
+    )
 
 
 @router.post("/password-reset/confirm", response_model=MessageResponse)

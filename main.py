@@ -1,3 +1,19 @@
+import logging
+import sys
+
+# Render (y otros hosts que capturan stdout via pipe) usan buffering por
+# bloques en vez de por línea: los logs pueden quedar atrapados en memoria y
+# nunca aparecer en el visor de logs si el proceso no escribe lo suficiente
+# para llenar el buffer. Forzamos line-buffering para que cada línea salga
+# de inmediato, igual que en una terminal local.
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True,
+)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,6 +38,7 @@ origins = [
     "http://127.0.0.1:5173",
     "http://localhost:4173",
     "http://127.0.0.1:4173",
+    "https://si2frontendweb.vercel.app",
 ]
 
 app.add_middleware(
