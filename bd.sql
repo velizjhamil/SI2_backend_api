@@ -298,6 +298,7 @@ CREATE INDEX idx_reporte_usuario_fecha ON REPORTE(usuario_id, fecha_generacion);
 
 CREATE INDEX idx_socio_ci ON SOCIO(ci);
 CREATE INDEX idx_socio_cooperativa ON SOCIO(cooperativa_id);
+CREATE INDEX idx_socio_usuario ON SOCIO(usuario_id);
 CREATE INDEX idx_socio_estado ON SOCIO(estado);
 CREATE INDEX idx_socio_nombres ON SOCIO(apellido, nombre);
 

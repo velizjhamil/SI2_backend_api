@@ -73,6 +73,9 @@ def init_db() -> None:
             "ALTER TABLE socio ADD COLUMN IF NOT EXISTS cooperativa_id BIGINT REFERENCES cooperativa(id)"
         ))
         conn.execute(text(
+            "ALTER TABLE socio ADD COLUMN IF NOT EXISTS usuario_id BIGINT REFERENCES usuario(id)"
+        ))
+        conn.execute(text(
             "ALTER TABLE socio ADD COLUMN IF NOT EXISTS uuid UUID NOT NULL DEFAULT gen_random_uuid()"
         ))
         conn.execute(text(

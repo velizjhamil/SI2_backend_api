@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -190,3 +191,47 @@ class SocioRegistroResponse(BaseModel):
     socio: SocioOut
     mensaje: str = "Socio registrado correctamente"
     bitacora_id: int | None = None
+
+
+class MonedaOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    codigo_iso: str
+    nombre: str
+    simbolo: str
+
+
+class CuentaAhorroCreate(BaseModel):
+    socio_id: int
+    moneda_id: int
+
+
+class CuentaAhorroOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    numero: str
+    saldo_disponible: Decimal
+    saldo_bloqueado: Decimal
+    estado: str
+    fecha_registro: date
+    socio_id: int
+    moneda: MonedaOut
+
+
+class CertificadoAportacionCreate(BaseModel):
+    socio_id: int
+    moneda_id: int
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+
+
+class CertificadoAportacionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    monto: Decimal
+    fecha_emision: date
+    estado: str
+    socio_id: int
+    moneda: MonedaOut
