@@ -17,11 +17,13 @@ class Settings(BaseSettings):
     # El usuario debe generar una "contraseña de aplicación" en su cuenta de
     # Google y ponerla en SMTP_PASSWORD (ver .env).
     SMTP_HOST: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
+    # 465 (SSL directo) en vez de 587 (STARTTLS): algunos hosts cloud
+    # bloquean/degradan 587 y dejan pasar 465 sin problema.
+    SMTP_PORT: int = 465
     SMTP_USER: str = ""            # correo remitente, ej. coopia@gmail.com
     SMTP_PASSWORD: str = ""        # contraseña de aplicación de Google
     SMTP_FROM: str = ""            # nombre/dirección visible del remitente
-    SMTP_USE_TLS: bool = True
+    SMTP_USE_TLS: bool = False
 
     # URL base del frontend para construir enlaces de recuperación
     APP_FRONTEND_URL: str = "https://si2frontendweb.vercel.app"
