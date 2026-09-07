@@ -68,9 +68,10 @@ def cleanup_socio(socio_id):
                 CertificadoAportacion.socio_id == socio_id
             )
         )
-        db.execute(
-            delete(CuentaAhorro).where(CuentaAhorro.socio_id == socio_id)
-        )
+        account_ids = list(db.execute(select(CuentaAhorro.id).where(CuentaAhorro.socio_id == socio_id)).scalars())
+        if account_ids:
+            db.execute(text("DELETE FROM transaccion WHERE cuenta_ahorro_id = ANY(:account_ids)"), {"account_ids": account_ids})
+            db.execute(delete(CuentaAhorro).where(CuentaAhorro.id.in_(account_ids)))
         db.execute(delete(Socio).where(Socio.id == socio_id))
         db.commit()
 
@@ -139,6 +140,79 @@ def test_emitir_y_listar_certificado_aportacion(client):
         )
         assert response.status_code == 200
         assert len(response.json()) == 1
+    finally:
+        cleanup_socio(socio_id)
+
+
+def test_deposito_retiro_y_saldo_insuficiente(client):
+    token = login(client, ADMIN)
+    ci = generate_ci("SP15M-")
+    response = client.post(
+        "/api/v1/socios/registro",
+        json={"ci": ci, "nombre": "Socio", "apellido": "Movimiento"},
+        headers=headers(token),
+    )
+    assert response.status_code == 201, response.text
+    socio_id = response.json()["socio"]["id"]
+    try:
+        response = client.post(
+            "/api/v1/ahorros/cuentas",
+            json={"socio_id": socio_id, "moneda_id": 1},
+            headers=headers(token),
+        )
+        account_id = response.json()["id"]
+        response = client.post(
+            f"/api/v1/ahorros/cuentas/{account_id}/depositos",
+            json={"monto": "100.00"},
+            headers=headers(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["saldo_disponible"] == "100.00"
+
+        response = client.post(
+            f"/api/v1/ahorros/cuentas/{account_id}/retiros",
+            json={"monto": "40.00"},
+            headers=headers(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["saldo_disponible"] == "60.00"
+
+        response = client.post(
+            f"/api/v1/ahorros/cuentas/{account_id}/retiros",
+            json={"monto": "61.00"},
+            headers=headers(token),
+        )
+        assert response.status_code == 400
+        assert "Saldo insuficiente" in response.json()["detail"]
+    finally:
+        cleanup_socio(socio_id)
+
+
+def test_actualizar_y_dar_de_baja_socio(client):
+    token = login(client, ADMIN)
+    ci = generate_ci("SP15K-")
+    response = client.post(
+        "/api/v1/socios/registro",
+        json={"ci": ci, "nombre": "Socio", "apellido": "Kyc"},
+        headers=headers(token),
+    )
+    assert response.status_code == 201
+    socio_id = response.json()["socio"]["id"]
+    try:
+        response = client.put(
+            f"/api/v1/socios/{socio_id}",
+            json={"telefono": "70000000", "nombre": "Socio Editado"},
+            headers=headers(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["nombre"] == "Socio Editado"
+
+        response = client.delete(
+            f"/api/v1/socios/{socio_id}",
+            headers=headers(token),
+        )
+        assert response.status_code == 200
+        assert response.json()["estado"] == "INACTIVO"
     finally:
         cleanup_socio(socio_id)
 

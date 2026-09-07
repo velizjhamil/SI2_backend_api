@@ -171,11 +171,21 @@ class SocioCreate(BaseModel):
     correo: EmailStr | None = None
 
 
+class SocioUpdate(BaseModel):
+    nombre: str | None = Field(None, min_length=2, max_length=100)
+    apellido: str | None = Field(None, min_length=2, max_length=100)
+    direccion: str | None = Field(None, max_length=500)
+    telefono: str | None = Field(None, max_length=20)
+    correo: EmailStr | None = None
+    estado: str | None = Field(None, pattern="^(ACTIVO|INACTIVO)$")
+
+
 class SocioOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     uuid: UUID
+    cooperativa_id: int | None = None
     ci: str
     nombre: str
     apellido: str
@@ -234,4 +244,16 @@ class CertificadoAportacionOut(BaseModel):
     fecha_emision: date
     estado: str
     socio_id: int
+    moneda: MonedaOut
+
+
+class MovimientoCuentaCreate(BaseModel):
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+
+
+class MovimientoCuentaOut(BaseModel):
+    cuenta_id: int
+    tipo: str
+    monto: Decimal
+    saldo_disponible: Decimal
     moneda: MonedaOut

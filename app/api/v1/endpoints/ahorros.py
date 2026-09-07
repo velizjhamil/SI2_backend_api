@@ -4,7 +4,7 @@ from datetime import date
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.v1.deps import get_current_user, get_db, require_admin
@@ -15,6 +15,8 @@ from app.schemas.schemas import (
     CertificadoAportacionOut,
     CuentaAhorroCreate,
     CuentaAhorroOut,
+    MovimientoCuentaCreate,
+    MovimientoCuentaOut,
     MonedaOut,
 )
 
@@ -39,6 +41,40 @@ def _get_moneda(db: Session, moneda_id: int) -> Moneda:
     if moneda is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Moneda no encontrada")
     return moneda
+
+
+def _get_cuenta_visible(db: Session, admin: Usuario, cuenta_id: int) -> CuentaAhorro:
+    cuenta = db.execute(
+        select(CuentaAhorro)
+        .join(Socio, CuentaAhorro.socio_id == Socio.id)
+        .options(joinedload(CuentaAhorro.moneda, innerjoin=True))
+        .where(CuentaAhorro.id == cuenta_id)
+        .with_for_update()
+    ).unique().scalar_one_or_none()
+    if cuenta is None or not _socio_visible(admin, cuenta.socio):
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    if cuenta.estado != "ACTIVA":
+        raise HTTPException(status_code=400, detail="La cuenta no está activa")
+    return cuenta
+
+
+def _registrar_movimiento(db: Session, cuenta: CuentaAhorro, tipo: str, monto, admin: Usuario, request: Request):
+    db.execute(
+        text("""
+            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id)
+            VALUES (:tipo, :monto, 'WEB', :moneda_id, :cuenta_id)
+        """),
+        {"tipo": tipo, "monto": monto, "moneda_id": cuenta.moneda_id, "cuenta_id": cuenta.id},
+    )
+    registrar_accion(
+        db,
+        accion=tipo,
+        modulo="AHORROS",
+        usuario_id=admin.id,
+        cooperativa_id=cuenta.socio.cooperativa_id,
+        descripcion=f"{tipo} de {monto} en cuenta {cuenta.numero}",
+        request=request,
+    )
 
 
 def _numero_cuenta(cooperativa_id: int | None) -> str:
@@ -105,6 +141,40 @@ def abrir_cuenta(
     return db.execute(
         select(CuentaAhorro).options(joinedload(CuentaAhorro.moneda)).where(CuentaAhorro.id == cuenta.id)
     ).scalar_one()
+
+
+@router.post("/cuentas/{cuenta_id}/depositos", response_model=MovimientoCuentaOut, summary="Depositar en cuenta")
+def depositar(
+    cuenta_id: int,
+    body: MovimientoCuentaCreate,
+    request: Request,
+    admin: Usuario = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    cuenta = _get_cuenta_visible(db, admin, cuenta_id)
+    cuenta.saldo_disponible = cuenta.saldo_disponible + body.monto
+    _registrar_movimiento(db, cuenta, "DEPOSITO", body.monto, admin, request)
+    db.commit()
+    db.refresh(cuenta)
+    return MovimientoCuentaOut(cuenta_id=cuenta.id, tipo="DEPOSITO", monto=body.monto, saldo_disponible=cuenta.saldo_disponible, moneda=cuenta.moneda)
+
+
+@router.post("/cuentas/{cuenta_id}/retiros", response_model=MovimientoCuentaOut, summary="Retirar de cuenta")
+def retirar(
+    cuenta_id: int,
+    body: MovimientoCuentaCreate,
+    request: Request,
+    admin: Usuario = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    cuenta = _get_cuenta_visible(db, admin, cuenta_id)
+    if cuenta.saldo_disponible < body.monto:
+        raise HTTPException(status_code=400, detail="Saldo insuficiente")
+    cuenta.saldo_disponible = cuenta.saldo_disponible - body.monto
+    _registrar_movimiento(db, cuenta, "RETIRO", body.monto, admin, request)
+    db.commit()
+    db.refresh(cuenta)
+    return MovimientoCuentaOut(cuenta_id=cuenta.id, tipo="RETIRO", monto=body.monto, saldo_disponible=cuenta.saldo_disponible, moneda=cuenta.moneda)
 
 
 @router.get("/certificados", response_model=list[CertificadoAportacionOut], summary="Listar certificados")
