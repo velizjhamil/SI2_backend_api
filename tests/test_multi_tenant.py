@@ -35,8 +35,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-SUPERADMIN = {"correo": "superadmin@si2.com", "contrasena": "SuperAdmin123!"}
-ADMIN_COOP = {"correo": "admin@cooperativa.com", "contrasena": "Admin123!"}
+SUPERADMIN = {"correo": "superadmin@test.com", "contrasena": "Password123"}
+ADMIN_COOP = {"correo": "admin@test.com", "contrasena": "Password123"}
 
 
 @pytest.fixture(scope="module")
@@ -91,8 +91,8 @@ def test_cooperativas_exige_token(client):
     "credenciales",
     [
         ADMIN_COOP,
-        {"correo": "asesor1@cooperativa.com", "contrasena": "Asesor123!"},
-        {"correo": "socio1@cooperativa.com", "contrasena": "Socio123!"},
+        {"correo": "oficial.credito@test.com", "contrasena": "Password123"},
+        {"correo": "socio@test.com", "contrasena": "Password123"},
     ],
 )
 def test_roles_de_cooperativa_sin_acceso_a_tenants(client, credenciales):
@@ -127,7 +127,11 @@ def test_detalle_inexistente_404(client):
 
 def test_nit_duplicado_rechazado_409(client):
     token = _login(client, SUPERADMIN)
-    creada = _crear_cooperativa(client, nit=f"NIT-{datetime.now(timezone.utc).timestamp()}", token=token)
+    creada = _crear_cooperativa(
+        client,
+        nit=f"NIT-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
+        token=token,
+    )
 
     duplicada = {
         "nombre": "Otra Coop",
