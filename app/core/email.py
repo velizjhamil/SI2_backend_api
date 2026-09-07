@@ -1,41 +1,24 @@
-"""Servicio de correo saliente usando SMTP (Gmail + contraseña de aplicación).
+"""Servicio de correo saliente usando la API HTTPS de Resend.
 
-No introduce dependencias externas: usa únicamente `smtplib` y `email` de la
-stdlib. La configuración (host, puerto, usuario, contraseña de aplicación de
-Google) proviene de `settings` / variables de entorno.
+Se usa una API HTTPS (https://api.resend.com) en vez de SMTP porque hosts
+como Render bloquean el tráfico saliente hacia puertos SMTP (465/587) a
+nivel de red — el error visto en logs era `OSError: [Errno 101] Network is
+unreachable`, no un problema de credenciales ni de Gmail. HTTPS (443) sí
+está permitido.
 
-Si `SMTP_USER` o `SMTP_PASSWORD` no están configurados, el envío real se omite
-y solo se loguea el enlace de recuperación, de modo que el sistema no falla en
-entornos de desarrollo sin SMTP.
-
-Los mensajes se envían como `multipart/alternative` con versión HTML además
-del texto plano, lo que mejora la deliverability (los filtros antispam penalizan
-correo de "una sola parte" sin estructura MIME estándar).
+Si `RESEND_API_KEY` no está configurada, el envío real se omite y solo se
+loguea el enlace de recuperación, de modo que el sistema no falla en
+entornos de desarrollo sin la API key.
 """
 import logging
-import smtplib
-from email.message import EmailMessage
+
+import httpx
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-
-def _build_message(
-    to_email: str,
-    subject: str,
-    text_body: str,
-    html_body: str | None = None,
-) -> EmailMessage:
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = settings.SMTP_FROM or settings.SMTP_USER
-    msg["To"] = to_email
-    # multipart/alternative: clientes modernos prefieren HTML, fallback a texto
-    msg.set_content(text_body)
-    if html_body:
-        msg.add_alternative(html_body, subtype="html")
-    return msg
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 def send_email(
@@ -44,37 +27,48 @@ def send_email(
     body: str,
     html_body: str | None = None,
 ) -> None:
-    """Envía un correo (texto plano + versión HTML opcional).
+    """Envía un correo (texto plano + versión HTML opcional) vía Resend.
 
-    Si no hay credenciales SMTP configuradas, se loguea el contenido en lugar
-    de enviarlo realmente (útil para desarrollo).
+    Si no hay API key configurada, se loguea el contenido en lugar de
+    enviarlo realmente (útil para desarrollo).
     """
-    if not settings.SMTP_USER or not settings.SMTP_PASSWORD:
+    if not settings.RESEND_API_KEY:
         logger.warning(
-            "SMTP no configurado. No se envió correo real a %s. "
+            "RESEND_API_KEY no configurada. No se envió correo real a %s. "
             "Asunto: %s | Cuerpo: %s",
             to_email, subject, body,
         )
         return
 
-    msg = _build_message(to_email, subject, body, html_body)
-    logger.info(
-        "Conectando a %s:%s (tls=%s) para enviar correo a %s",
-        settings.SMTP_HOST, settings.SMTP_PORT, settings.SMTP_USE_TLS, to_email,
-    )
+    payload = {
+        "from": settings.RESEND_FROM,
+        "to": [to_email],
+        "subject": subject,
+        "text": body,
+    }
+    if html_body:
+        payload["html"] = html_body
+
+    logger.info("Enviando correo a %s vía Resend", to_email)
     try:
-        if settings.SMTP_USE_TLS:
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
-                server.starttls()
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.send_message(msg)
-        else:
-            with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as server:
-                server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
-                server.send_message(msg)
-        logger.info("Correo enviado correctamente a %s", to_email)
+        response = httpx.post(
+            RESEND_API_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {settings.RESEND_API_KEY}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        logger.info(
+            "Correo enviado correctamente a %s (id=%s)",
+            to_email, response.json().get("id"),
+        )
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "Resend rechazó el correo a %s (asunto=%s): %s %s",
+            to_email, subject, exc.response.status_code, exc.response.text,
+        )
+        raise
     except Exception as exc:  # noqa: BLE001
-        # Imprimimos la traza completa para que sea diagnosticable desde logs
         logger.exception(
             "Fallo enviando correo a %s (asunto=%s): %s",
             to_email, subject, exc,
@@ -132,4 +126,3 @@ def send_password_reset_email(to_email: str, reset_token: str) -> None:
 </html>
 """
     send_email(to_email, subject, text_body, html_body)
-

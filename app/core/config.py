@@ -13,17 +13,13 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/cooperativa_db"
 
-    # ── Envío de correo (SMTP Gmail con contraseña de aplicación) ──
-    # El usuario debe generar una "contraseña de aplicación" en su cuenta de
-    # Google y ponerla en SMTP_PASSWORD (ver .env).
-    SMTP_HOST: str = "smtp.gmail.com"
-    # 465 (SSL directo) en vez de 587 (STARTTLS): algunos hosts cloud
-    # bloquean/degradan 587 y dejan pasar 465 sin problema.
-    SMTP_PORT: int = 465
-    SMTP_USER: str = ""            # correo remitente, ej. coopia@gmail.com
-    SMTP_PASSWORD: str = ""        # contraseña de aplicación de Google
-    SMTP_FROM: str = ""            # nombre/dirección visible del remitente
-    SMTP_USE_TLS: bool = False
+    # ── Envío de correo (Resend, API HTTPS) ──
+    # SMTP directo no funciona desde Render: el hosting bloquea el tráfico
+    # saliente hacia puertos SMTP (465/587) a nivel de red ("Network is
+    # unreachable"), sin importar el proveedor. Resend se consume por HTTPS
+    # (puerto 443), que sí está permitido.
+    RESEND_API_KEY: str = ""       # API key de https://resend.com
+    RESEND_FROM: str = "CoopIA <onboarding@resend.dev>"  # remitente verificado en Resend
 
     # URL base del frontend para construir enlaces de recuperación
     APP_FRONTEND_URL: str = "https://si2frontendweb.vercel.app"
