@@ -13,13 +13,15 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql://postgres:postgres@localhost:5432/cooperativa_db"
 
-    # ── Envío de correo (Resend, API HTTPS) ──
+    # ── Envío de correo (Brevo, API HTTPS) ──
     # SMTP directo no funciona desde Render: el hosting bloquea el tráfico
     # saliente hacia puertos SMTP (465/587) a nivel de red ("Network is
-    # unreachable"), sin importar el proveedor. Resend se consume por HTTPS
-    # (puerto 443), que sí está permitido.
-    RESEND_API_KEY: str = ""       # API key de https://resend.com
-    RESEND_FROM: str = "CoopIA <onboarding@resend.dev>"  # remitente verificado en Resend
+    # unreachable"), sin importar el proveedor. Brevo se consume por HTTPS
+    # (puerto 443), que sí está permitido. A diferencia de Resend, Brevo deja
+    # enviar a cualquier destinatario verificando solo el remitente (sin DNS).
+    BREVO_API_KEY: str = ""                    # API key de https://app.brevo.com
+    BREVO_SENDER_EMAIL: str = ""               # remitente verificado en Brevo
+    BREVO_SENDER_NAME: str = "CoopIA"
 
     # URL base del frontend para construir enlaces de recuperación
     APP_FRONTEND_URL: str = "https://si2frontendweb.vercel.app"

@@ -102,18 +102,18 @@ def request_password_reset(
         # Correo inexistente o inactivo — respuesta neutra, sin token.
         return PasswordResetRequestResponse(
             message=neutral_message,
-            delivered=settings.RESEND_API_KEY != "",
+            delivered=settings.BREVO_API_KEY != "",
             debug_token=None,
         )
 
     token = create_password_reset_token(usuario.id)
-    email_configured = bool(settings.RESEND_API_KEY)
+    email_configured = bool(settings.BREVO_API_KEY)
 
     if not email_configured:
         # Modo "log only": no llega correo real. Devolvemos el token en la
         # respuesta solo en este caso, para que el equipo pueda probar.
         logger.warning(
-            "PASSWORD RESET solicitados en modo sin RESEND_API_KEY. "
+            "PASSWORD RESET solicitados en modo sin BREVO_API_KEY. "
             "Usuario=%s token=%s",
             correo_norm, token,
         )
