@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -215,6 +216,12 @@ class MonedaOut(BaseModel):
 class CuentaAhorroCreate(BaseModel):
     socio_id: int
     moneda_id: int
+    tipo_producto: Literal["VISTA", "PROGRAMADO"] = "VISTA"
+    monto_apertura: Decimal = Field(..., ge=0, max_digits=12, decimal_places=2)
+
+
+class CuentaAhorroEstadoUpdate(BaseModel):
+    estado: Literal["ACTIVA", "BLOQUEADA", "CANCELADA"]
 
 
 class CuentaAhorroOut(BaseModel):
@@ -222,6 +229,7 @@ class CuentaAhorroOut(BaseModel):
 
     id: int
     numero: str
+    tipo_producto: str
     saldo_disponible: Decimal
     saldo_bloqueado: Decimal
     estado: str
@@ -233,13 +241,18 @@ class CuentaAhorroOut(BaseModel):
 class CertificadoAportacionCreate(BaseModel):
     socio_id: int
     moneda_id: int
-    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    numero_titulos: int = Field(..., gt=0)
+    valor_unitario: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    fecha_emision: date = Field(default_factory=date.today)
 
 
 class CertificadoAportacionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    correlativo: int
+    numero_titulos: int
+    valor_unitario: Decimal
     monto: Decimal
     fecha_emision: date
     estado: str

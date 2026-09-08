@@ -66,3 +66,19 @@ def require_admin(usuario: Usuario = Depends(get_current_user)) -> Usuario:
             detail="Operación reservada a administradores",
         )
     return usuario
+
+
+ROL_CAJERO = "CAJERO"
+ROL_OFICIAL_CREDITO = "OFICIAL_CREDITO"
+ROLES_OPERACIONES = ROLES_ADMIN | {ROL_CAJERO, ROL_OFICIAL_CREDITO}
+
+
+def require_operaciones(usuario: Usuario = Depends(get_current_user)) -> Usuario:
+    """Permite acceso a administradores y al personal de ventanilla (cajero/oficial de servicios)."""
+    rol_nombre = usuario.rol.nombre if usuario.rol else None
+    if rol_nombre not in ROLES_OPERACIONES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operación reservada al personal de ventanilla",
+        )
+    return usuario

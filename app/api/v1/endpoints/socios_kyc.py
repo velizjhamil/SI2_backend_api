@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import get_db, require_admin
+from app.api.v1.deps import get_db, require_admin, require_operaciones
 from app.core.bitacora import registrar_accion
 from app.models.models import Socio, Usuario
 from app.schemas.schemas import SocioCreate, SocioOut, SocioRegistroResponse, SocioUpdate
@@ -137,7 +137,7 @@ def desactivar_socio(
     summary="Listar socios",
 )
 def listar_socios(
-    admin: Usuario = Depends(require_admin),
+    admin: Usuario = Depends(require_operaciones),
     db: Session = Depends(get_db),
     limite: int = 50,
     offset: int = 0,

@@ -222,6 +222,7 @@ class CuentaAhorro(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     numero: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
+    tipo_producto: Mapped[str] = mapped_column(String(20), nullable=False, default="VISTA")
     saldo_disponible = mapped_column(Numeric(12, 2), nullable=False, default=0)
     saldo_bloqueado = mapped_column(Numeric(12, 2), nullable=False, default=0)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVA")
@@ -237,6 +238,9 @@ class CertificadoAportacion(Base):
     __tablename__ = "certificado_aportacion"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    correlativo: Mapped[int] = mapped_column(nullable=False)
+    numero_titulos: Mapped[int] = mapped_column(nullable=False, default=1)
+    valor_unitario = mapped_column(Numeric(12, 2), nullable=False, default=0)
     monto = mapped_column(Numeric(12, 2), nullable=False)
     fecha_emision = mapped_column(Date, nullable=False)
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="EMITIDO")
