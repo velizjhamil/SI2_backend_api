@@ -141,11 +141,14 @@ def listar_socios(
     db: Session = Depends(get_db),
     limite: int = 50,
     offset: int = 0,
+    estado: str | None = None,
 ):
     """Lista todos los socios registrados, del más reciente al más antiguo."""
     query = select(Socio)
     if admin.rol.nombre != "SUPERADMIN":
         query = query.where(Socio.cooperativa_id == admin.cooperativa_id)
+    if estado:
+        query = query.where(Socio.estado == estado)
     socios = db.execute(
         query
         .order_by(Socio.fecha_registro.desc(), Socio.id.desc())

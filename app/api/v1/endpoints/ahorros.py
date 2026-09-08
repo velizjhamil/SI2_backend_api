@@ -132,11 +132,12 @@ def listar_cuentas(
     db: Session = Depends(get_db),
     socio_id: int | None = Query(None, ge=1),
     estado: str | None = Query(None, pattern="^(ACTIVA|BLOQUEADA|CANCELADA)$"),
+    limite: int | None = Query(None, ge=1, le=200),
 ):
     query = (
         select(CuentaAhorro)
         .join(Socio, CuentaAhorro.socio_id == Socio.id)
-        .options(joinedload(CuentaAhorro.moneda))
+        .options(joinedload(CuentaAhorro.moneda), joinedload(CuentaAhorro.socio))
         .order_by(CuentaAhorro.id.desc())
     )
     if admin.rol.nombre != "SUPERADMIN":
@@ -145,7 +146,15 @@ def listar_cuentas(
         query = query.where(CuentaAhorro.socio_id == socio_id)
     if estado:
         query = query.where(CuentaAhorro.estado == estado)
-    return list(db.execute(query).unique().scalars())
+    if limite:
+        query = query.limit(limite)
+    cuentas = list(db.execute(query).unique().scalars())
+    return [
+        CuentaAhorroOut.model_validate(c).model_copy(
+            update={"socio_nombre": f"{c.socio.nombre} {c.socio.apellido}"}
+        )
+        for c in cuentas
+    ]
 
 
 @router.post("/cuentas", response_model=CuentaAhorroOut, status_code=status.HTTP_201_CREATED, summary="Abrir cuenta de ahorro")

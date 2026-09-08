@@ -235,6 +235,7 @@ class CuentaAhorroOut(BaseModel):
     estado: str
     fecha_registro: date
     socio_id: int
+    socio_nombre: str | None = None
     moneda: MonedaOut
 
 

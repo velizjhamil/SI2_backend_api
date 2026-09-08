@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.v1.deps import get_db, require_admin
 from app.core.bitacora import registrar_accion
 from app.core.security import hash_password
-from app.models.models import Bitacora, Cooperativa, Permiso, Rol, Socio, Usuario
+from app.models.models import Bitacora, Cooperativa, CuentaAhorro, Permiso, Rol, Socio, Usuario
 from app.schemas.schemas import (
     AdminStatsOut,
     BitacoraOut,
@@ -248,7 +248,15 @@ def crear_usuario(
             detail="Un administrador de cooperativa no puede crear SUPERADMIN",
         )
 
-    cooperativa_id = body.cooperativa_id if es_superadmin else admin.cooperativa_id
+    # El admin puede elegir la cooperativa del nuevo usuario si es SUPERADMIN,
+    # o si él mismo todavía no tiene una cooperativa asignada (bootstrap del
+    # primer administrador de una cooperativa). Un ADMINISTRADOR que ya
+    # pertenece a una cooperativa queda forzado a la suya para no romper el
+    # aislamiento entre tenants.
+    if es_superadmin or admin.cooperativa_id is None:
+        cooperativa_id = body.cooperativa_id
+    else:
+        cooperativa_id = admin.cooperativa_id
     if rol_nombre != "SUPERADMIN" and cooperativa_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -293,26 +301,30 @@ def get_stats(
     """
     Devuelve métricas de resumen reales para las tarjetas del Dashboard.
     Lee directamente de las tablas `socio` y `cuenta_ahorro`.
+
+    El filtro por cooperativa se hace con comparaciones ORM (`==`), que
+    SQLAlchemy traduce a `IS NULL` cuando corresponde — igual que el resto
+    de endpoints (listado de socios, listado de usuarios). Usar SQL crudo
+    con `= :cooperativa_id` aquí rompía las tarjetas para cooperativas con
+    `cooperativa_id IS NULL`, porque `columna = NULL` nunca es verdadero.
     """
     # Total socios (tabla socio real)
-    socio_query = select(func.count()).select_from(text("socio"))
-    socio_active_query = select(func.count()).select_from(text("socio")).where(text("estado = 'ACTIVO'"))
+    socio_query = select(func.count(Socio.id))
+    socio_active_query = select(func.count(Socio.id)).where(Socio.estado == "ACTIVO")
     if admin.rol.nombre != "SUPERADMIN":
-        socio_query = socio_query.where(text("cooperativa_id = :cooperativa_id")).params(cooperativa_id=admin.cooperativa_id)
-        socio_active_query = socio_active_query.where(text("cooperativa_id = :cooperativa_id")).params(cooperativa_id=admin.cooperativa_id)
+        socio_query = socio_query.where(Socio.cooperativa_id == admin.cooperativa_id)
+        socio_active_query = socio_active_query.where(Socio.cooperativa_id == admin.cooperativa_id)
     total_socios: int = db.execute(socio_query).scalar_one()
     socios_activos: int = db.execute(socio_active_query).scalar_one()
 
     # Cuentas de ahorro activas
-    if admin.rol.nombre == "SUPERADMIN":
-        cuenta_query = select(func.count()).select_from(text("cuenta_ahorro")).where(text("estado = 'ACTIVA'"))
-    else:
-        cuenta_query = (
-            select(func.count())
-            .select_from(text("cuenta_ahorro ca JOIN socio s ON s.id = ca.socio_id"))
-            .where(text("ca.estado = 'ACTIVA' AND s.cooperativa_id = :cooperativa_id"))
-            .params(cooperativa_id=admin.cooperativa_id)
-        )
+    cuenta_query = (
+        select(func.count(CuentaAhorro.id))
+        .join(Socio, Socio.id == CuentaAhorro.socio_id)
+        .where(CuentaAhorro.estado == "ACTIVA")
+    )
+    if admin.rol.nombre != "SUPERADMIN":
+        cuenta_query = cuenta_query.where(Socio.cooperativa_id == admin.cooperativa_id)
     cuentas_activas: int = db.execute(cuenta_query).scalar_one()
 
     # Total usuarios del sistema

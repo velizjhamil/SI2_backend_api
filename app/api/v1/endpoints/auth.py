@@ -1,10 +1,11 @@
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.v1.deps import get_current_user
+from app.core.bitacora import registrar_accion
 from app.core.email import send_password_reset_email
 from app.core.security import (
     create_access_token,
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     usuario = db.execute(
         select(Usuario)
         .options(joinedload(Usuario.rol))
@@ -53,11 +54,37 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     token, expires_in = create_access_token(
         subject=usuario.id, role=usuario.rol.nombre, cooperativa_id=usuario.cooperativa_id
     )
+
+    registrar_accion(
+        db,
+        accion="LOGIN",
+        modulo="USUARIO",
+        usuario_id=usuario.id,
+        cooperativa_id=usuario.cooperativa_id,
+        descripcion=f"Inicio de sesión: {usuario.correo}",
+        request=request,
+    )
+    db.commit()
+
     return TokenResponse(access_token=token, expires_in=expires_in)
 
 
 @router.post("/logout", response_model=LogoutResponse)
-def logout(_: Usuario = Depends(get_current_user)):
+def logout(
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    registrar_accion(
+        db,
+        accion="LOGOUT",
+        modulo="USUARIO",
+        usuario_id=usuario.id,
+        cooperativa_id=usuario.cooperativa_id,
+        descripcion=f"Cierre de sesión: {usuario.correo}",
+        request=request,
+    )
+    db.commit()
     return LogoutResponse(message="Sesión cerrada correctamente")
 
 

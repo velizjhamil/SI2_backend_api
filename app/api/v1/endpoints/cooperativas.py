@@ -3,7 +3,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import require_superadmin
+from app.api.v1.deps import require_admin, require_superadmin
 from app.db.session import get_db
 from app.models.models import Cooperativa, Usuario
 from app.schemas.schemas import (
@@ -12,7 +12,7 @@ from app.schemas.schemas import (
     CooperativaUpdate,
 )
 
-router = APIRouter(dependencies=[Depends(require_superadmin)])
+router = APIRouter()
 
 
 def _get_cooperativa_or_404(db: Session, cooperativa_id: int) -> Cooperativa:
@@ -44,12 +44,21 @@ def _ensure_nit_disponible(
 @router.get("", response_model=list[CooperativaOut])
 def listar_cooperativas(
     estado: str | None = Query(None, pattern="^(ACTIVO|INACTIVO)$"),
-    _: Usuario = Depends(require_superadmin),
+    admin: Usuario = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    """
+    Lista cooperativas. SUPERADMIN ve todas (con filtro `estado` opcional).
+    Un ADMINISTRADOR solo puede ver el listado de cooperativas activas — lo
+    necesita, por ejemplo, para elegir una al registrar el primer usuario de
+    su tenant, antes de tener `cooperativa_id` asignado.
+    """
     query = select(Cooperativa).order_by(Cooperativa.id)
-    if estado:
-        query = query.where(Cooperativa.estado == estado)
+    if admin.rol.nombre == "SUPERADMIN":
+        if estado:
+            query = query.where(Cooperativa.estado == estado)
+    else:
+        query = query.where(Cooperativa.estado == "ACTIVO")
     return list(db.execute(query).scalars().all())
 
 
