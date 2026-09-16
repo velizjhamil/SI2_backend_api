@@ -19,3 +19,5 @@ __pycache__/
 # Paquete de deploy para Lambda (armar acá, nunca en la raíz del repo)
 build/
 package/
+.codegraph
+.engram
