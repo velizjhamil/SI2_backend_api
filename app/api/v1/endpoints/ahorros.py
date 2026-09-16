@@ -8,7 +8,7 @@ from fpdf import FPDF
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.v1.deps import get_current_user, get_db, require_operaciones
+from app.api.v1.deps import get_current_socio, get_current_user, get_db, require_operaciones
 from app.core.bitacora import registrar_accion
 from app.models.models import CertificadoAportacion, CuentaAhorro, Moneda, Socio, Usuario
 from app.schemas.schemas import (
@@ -20,6 +20,8 @@ from app.schemas.schemas import (
     MovimientoCuentaCreate,
     MovimientoCuentaOut,
     MonedaOut,
+    TransferenciaCreate,
+    TransferenciaOut,
 )
 
 router = APIRouter()
@@ -381,3 +383,154 @@ def mis_certificados(usuario: Usuario = Depends(get_current_user), db: Session =
         .order_by(CertificadoAportacion.id.desc())
     )
     return list(db.execute(query).unique().scalars())
+
+
+def _lock_cuentas_propias(
+    db: Session, socio: Socio, cuenta_origen_id: int, cuenta_destino_id: int
+) -> tuple[CuentaAhorro, CuentaAhorro]:
+    """Bloquea (`FOR UPDATE`) las dos cuentas de una transferencia, en orden
+    ascendente por `id`, para evitar deadlocks entre transferencias
+    concurrentes que involucren el mismo par de cuentas en cualquier orden.
+
+    La propiedad se valida en el propio `WHERE` (`socio_id == socio.id`):
+    cuenta inexistente y cuenta ajena producen el mismo `None` → 404, sin
+    distinguir los dos casos. No usa `joinedload`: `moneda` se carga después
+    del lock, fuera de esta función. No reutiliza `_get_cuenta_visible()`
+    (autorización de staff, con 3 llamadores que no deben cambiar).
+    """
+    cuentas: dict[int, CuentaAhorro] = {}
+    for cuenta_id in sorted([cuenta_origen_id, cuenta_destino_id]):
+        cuenta = db.execute(
+            select(CuentaAhorro)
+            .where(CuentaAhorro.id == cuenta_id, CuentaAhorro.socio_id == socio.id)
+            .with_for_update(of=CuentaAhorro)
+        ).scalar_one_or_none()
+        if cuenta is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cuenta no encontrada")
+        cuentas[cuenta_id] = cuenta
+    return cuentas[cuenta_origen_id], cuentas[cuenta_destino_id]
+
+
+def _registrar_transferencia(
+    db: Session,
+    *,
+    cuenta_origen: CuentaAhorro,
+    cuenta_destino: CuentaAhorro,
+    monto: Decimal,
+    glosa: str | None,
+    usuario: Usuario,
+    request: Request,
+) -> tuple[int, int, object]:
+    """Registra las dos patas de la transferencia en `transaccion`, vinculadas
+    por `transaccion_contraparte_id`, más una entrada de bitácora. Todo dentro
+    de la misma transacción del llamador (sin `commit` propio).
+    """
+    salida = db.execute(
+        text("""
+            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id)
+            VALUES ('TRANSFERENCIA_SALIDA', :monto, 'MOVIL', :moneda_id, :cuenta_id)
+            RETURNING id, fecha_hora
+        """),
+        {"monto": monto, "moneda_id": cuenta_origen.moneda_id, "cuenta_id": cuenta_origen.id},
+    ).one()
+    salida_id, fecha_hora = salida
+
+    entrada_id = db.execute(
+        text("""
+            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id, transaccion_contraparte_id)
+            VALUES ('TRANSFERENCIA_ENTRADA', :monto, 'MOVIL', :moneda_id, :cuenta_id, :contraparte)
+            RETURNING id
+        """),
+        {
+            "monto": monto,
+            "moneda_id": cuenta_destino.moneda_id,
+            "cuenta_id": cuenta_destino.id,
+            "contraparte": salida_id,
+        },
+    ).scalar_one()
+
+    db.execute(
+        text("UPDATE transaccion SET transaccion_contraparte_id = :entrada WHERE id = :salida"),
+        {"entrada": entrada_id, "salida": salida_id},
+    )
+
+    descripcion = f"Transferencia de {monto} de cuenta {cuenta_origen.numero} a {cuenta_destino.numero}"
+    if glosa:
+        descripcion += f" — {glosa}"
+    registrar_accion(
+        db,
+        accion="TRANSFERENCIA",
+        modulo="AHORROS",
+        usuario_id=usuario.id,
+        cooperativa_id=cuenta_origen.socio.cooperativa_id,
+        descripcion=descripcion,
+        request=request,
+    )
+    return salida_id, entrada_id, fecha_hora
+
+
+@router.post(
+    "/transferencias",
+    response_model=TransferenciaOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="Transferir saldo entre cuentas propias",
+)
+def transferir_entre_cuentas_propias(
+    body: TransferenciaCreate,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    socio: Socio = Depends(get_current_socio),
+    db: Session = Depends(get_db),
+):
+    """Autoservicio: el socio autenticado mueve saldo entre dos cuentas
+    propias, sin comisión ni conversión de moneda en v1."""
+    if body.cuenta_origen_id == body.cuenta_destino_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La cuenta de origen y la de destino deben ser distintas",
+        )
+
+    cuenta_origen, cuenta_destino = _lock_cuentas_propias(
+        db, socio, body.cuenta_origen_id, body.cuenta_destino_id
+    )
+
+    if cuenta_origen.estado != "ACTIVA" or cuenta_destino.estado != "ACTIVA":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Ambas cuentas deben estar activas")
+    if cuenta_origen.moneda_id != cuenta_destino.moneda_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Las cuentas deben tener la misma moneda; no se realiza conversión",
+        )
+    if body.monto > cuenta_origen.saldo_disponible:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Saldo insuficiente")
+
+    cuenta_origen.saldo_disponible = cuenta_origen.saldo_disponible - body.monto
+    cuenta_destino.saldo_disponible = cuenta_destino.saldo_disponible + body.monto
+
+    salida_id, entrada_id, fecha_hora = _registrar_transferencia(
+        db,
+        cuenta_origen=cuenta_origen,
+        cuenta_destino=cuenta_destino,
+        monto=body.monto,
+        glosa=body.glosa,
+        usuario=usuario,
+        request=request,
+    )
+    db.commit()
+
+    cuenta_origen_out = db.execute(
+        select(CuentaAhorro).options(joinedload(CuentaAhorro.moneda)).where(CuentaAhorro.id == cuenta_origen.id)
+    ).scalar_one()
+    cuenta_destino_out = db.execute(
+        select(CuentaAhorro).options(joinedload(CuentaAhorro.moneda)).where(CuentaAhorro.id == cuenta_destino.id)
+    ).scalar_one()
+
+    return TransferenciaOut(
+        transaccion_salida_id=salida_id,
+        transaccion_entrada_id=entrada_id,
+        cuenta_origen=CuentaAhorroOut.model_validate(cuenta_origen_out),
+        cuenta_destino=CuentaAhorroOut.model_validate(cuenta_destino_out),
+        monto=body.monto,
+        glosa=body.glosa,
+        fecha_hora=fecha_hora,
+    )

@@ -1,10 +1,11 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
-from app.models.models import Usuario
+from app.models.models import Socio, Usuario
 
 bearer_scheme = HTTPBearer(auto_error=True)
 
@@ -82,3 +83,26 @@ def require_operaciones(usuario: Usuario = Depends(get_current_user)) -> Usuario
             detail="Operación reservada al personal de ventanilla",
         )
     return usuario
+
+
+def get_current_socio(
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Socio:
+    """Dependencia de autoservicio: resuelve el `Socio` propio del usuario autenticado.
+
+    Distinta de `require_operaciones` — no otorga el acceso que otorgan los
+    roles de staff. Un usuario sin `Socio` vinculado (p. ej. personal de
+    ventanilla) o cuyo `Socio` no está `ACTIVO` recibe 403 sin detalle interno.
+    La propiedad de recursos concretos (p. ej. cuentas) se valida aparte, en
+    el `WHERE` del endpoint que la consume — no aquí.
+    """
+    socio = db.execute(
+        select(Socio).where(Socio.usuario_id == usuario.id)
+    ).scalar_one_or_none()
+    if socio is None or socio.estado != "ACTIVO":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operación disponible solo para socios",
+        )
+    return socio

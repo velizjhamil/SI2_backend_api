@@ -271,3 +271,20 @@ class MovimientoCuentaOut(BaseModel):
     monto: Decimal
     saldo_disponible: Decimal
     moneda: MonedaOut
+
+
+class TransferenciaCreate(BaseModel):
+    cuenta_origen_id: int = Field(..., ge=1)
+    cuenta_destino_id: int = Field(..., ge=1)
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    glosa: str | None = Field(None, max_length=255)
+
+
+class TransferenciaOut(BaseModel):
+    transaccion_salida_id: int
+    transaccion_entrada_id: int
+    cuenta_origen: CuentaAhorroOut
+    cuenta_destino: CuentaAhorroOut
+    monto: Decimal
+    glosa: str | None = None
+    fecha_hora: datetime

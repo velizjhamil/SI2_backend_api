@@ -15,3 +15,7 @@ __pycache__/
 # Base de datos local (si aplicara)
 *.db
 *.sqlite3
+
+# Paquete de deploy para Lambda (armar acá, nunca en la raíz del repo)
+build/
+package/
