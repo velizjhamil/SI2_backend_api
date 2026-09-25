@@ -6,14 +6,30 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_db, require_operaciones
 from app.api.v1.endpoints.ahorros import _registrar_transferencia
 from app.core.bitacora import registrar_accion
-from app.models.models import Caja, ControlCaja, CuentaAhorro, Socio, Usuario
+from app.core.security import verify_password
+from app.models.models import (
+    ArqueoCaja,
+    ArqueoCajaDetalle,
+    ArqueoCajaMoneda,
+    Caja,
+    ControlCaja,
+    CuentaAhorro,
+    Moneda,
+    Rol,
+    Socio,
+    Usuario,
+)
 from app.schemas.schemas import (
     AperturaCajaCreate,
+    ArqueoCajaCreate,
+    ArqueoCajaOut,
+    DetalleArqueoOut,
+    MonedaArqueoOut,
     CajaOut,
     CuentaOrigenTransferenciaPreviewOut,
     CuentaCajaOut,
@@ -21,14 +37,42 @@ from app.schemas.schemas import (
     DepositoVentanillaCreate,
     DepositoVentanillaOut,
     MonedaOut,
+    ArqueoResumenOut,
+    MonedaArqueoResumenOut,
+    DenominacionArqueoOut,
     SesionCajaOut,
     TitularCajaOut,
+    UsuarioArqueoOut,
     TransferenciaPreviewOut,
     TransferenciaVentanillaCreate,
     TransferenciaVentanillaOut,
 )
 
 router = APIRouter()
+
+DENOMINACIONES_ARQUEO = {
+    "BOB": (
+        ("BILLETE", Decimal("200.00")),
+        ("BILLETE", Decimal("100.00")),
+        ("BILLETE", Decimal("50.00")),
+        ("BILLETE", Decimal("20.00")),
+        ("BILLETE", Decimal("10.00")),
+        ("MONEDA", Decimal("5.00")),
+        ("MONEDA", Decimal("2.00")),
+        ("MONEDA", Decimal("1.00")),
+        ("MONEDA", Decimal("0.50")),
+        ("MONEDA", Decimal("0.20")),
+        ("MONEDA", Decimal("0.10")),
+    ),
+    "USD": (
+        ("BILLETE", Decimal("100.00")),
+        ("BILLETE", Decimal("50.00")),
+        ("BILLETE", Decimal("20.00")),
+        ("BILLETE", Decimal("10.00")),
+        ("BILLETE", Decimal("5.00")),
+        ("BILLETE", Decimal("1.00")),
+    ),
+}
 
 
 def _validar_operador(usuario: Usuario) -> int:
@@ -49,6 +93,367 @@ def _sesion_out(control: ControlCaja) -> SesionCajaOut:
         saldo_sistema=control.saldo_sistema,
         fecha_apertura=control.fecha_apertura,
         estado=control.estado,
+    )
+
+
+@router.get("/arqueos/resumen", response_model=ArqueoResumenOut)
+def obtener_resumen_arqueo(
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    _validar_operador(usuario)
+    control = db.execute(
+        select(ControlCaja)
+        .options(joinedload(ControlCaja.caja))
+        .where(
+            ControlCaja.usuario_id == usuario.id,
+            ControlCaja.estado == "ABIERTA",
+        )
+    ).unique().scalar_one_or_none()
+    if control is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No hay una sesión de caja abierta",
+        )
+
+    rows = db.execute(
+        text("""
+            SELECT moneda_id,
+                   COALESCE(SUM(CASE WHEN tipo = 'DEPOSITO' THEN monto ELSE 0 END), 0) AS depositos,
+                   COALESCE(SUM(CASE WHEN tipo = 'RETIRO' THEN monto ELSE 0 END), 0) AS retiros,
+                   COUNT(*) AS cantidad
+            FROM transaccion
+            WHERE control_caja_id = :control_caja_id
+              AND canal = 'VENTANILLA'
+              AND tipo IN ('DEPOSITO', 'RETIRO')
+            GROUP BY moneda_id
+        """),
+        {"control_caja_id": control.id},
+    ).all()
+    movimientos = {
+        moneda_id: (Decimal(depositos), Decimal(retiros), int(cantidad))
+        for moneda_id, depositos, retiros, cantidad in rows
+    }
+    moneda_bob = db.execute(
+        select(Moneda).where(Moneda.codigo_iso == "BOB")
+    ).scalar_one_or_none()
+    if moneda_bob is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="No se encontró la moneda BOB",
+        )
+
+    moneda_ids = set(movimientos)
+    moneda_ids.add(moneda_bob.id)
+    monedas = db.execute(
+        select(Moneda).where(Moneda.id.in_(moneda_ids)).order_by(Moneda.id)
+    ).scalars().all()
+    resumen_monedas = []
+    for moneda in monedas:
+        depositos, retiros, cantidad = movimientos.get(
+            moneda.id, (Decimal("0.00"), Decimal("0.00"), 0)
+        )
+        monto_apertura = (
+            control.monto_apertura
+            if moneda.codigo_iso == "BOB"
+            else Decimal("0.00")
+        )
+        resumen_monedas.append(
+            MonedaArqueoResumenOut(
+                moneda=MonedaOut.model_validate(moneda),
+                saldo_teorico=monto_apertura + depositos - retiros,
+                monto_apertura=monto_apertura,
+                total_depositos=depositos,
+                total_retiros=retiros,
+                cantidad_movimientos=cantidad,
+                denominaciones=[
+                    DenominacionArqueoOut(tipo=tipo, valor=valor)
+                    for tipo, valor in DENOMINACIONES_ARQUEO.get(
+                        moneda.codigo_iso, ()
+                    )
+                ],
+            )
+        )
+    return ArqueoResumenOut(
+        control_caja_id=control.id,
+        caja_nombre=control.caja.nombre,
+        fecha_apertura=control.fecha_apertura,
+        umbral_diferencia=control.caja.umbral_diferencia_arqueo,
+        monedas=resumen_monedas,
+    )
+
+
+@router.post(
+    "/arqueos",
+    response_model=ArqueoCajaOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def registrar_arqueo(
+    body: ArqueoCajaCreate,
+    request: Request,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_operador(usuario)
+    control = _sesion_abierta(db, usuario, bloquear=True)
+    resumen = obtener_resumen_arqueo(usuario=usuario, db=db)
+    esperadas = {moneda.moneda.id: moneda for moneda in resumen.monedas}
+
+    ids_recibidos = [moneda.moneda_id for moneda in body.monedas]
+    if len(ids_recibidos) != len(set(ids_recibidos)) or set(ids_recibidos) != set(esperadas):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Debe incluir exactamente todas las monedas del resumen",
+        )
+
+    diferencias = []
+    for moneda_body in body.monedas:
+        moneda_resumen = esperadas[moneda_body.moneda_id]
+        codigo = moneda_resumen.moneda.codigo_iso
+        definidas = set(DENOMINACIONES_ARQUEO.get(codigo, ()))
+        detalle_ids = [
+            (tipo, Decimal(detalle.denominacion))
+            for detalle in moneda_body.detalle
+            for tipo, valor in definidas
+            if valor == Decimal(detalle.denominacion)
+        ]
+        if any(detalle.cantidad < 0 for detalle in moneda_body.detalle):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La cantidad de cada denominación no puede ser negativa",
+            )
+        if len(detalle_ids) != len(moneda_body.detalle):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Denominación no válida para {codigo}",
+            )
+        total_contado = sum(
+            (
+                Decimal(detalle.denominacion) * detalle.cantidad
+                for detalle in moneda_body.detalle
+            ),
+            Decimal("0.00"),
+        )
+        diferencia = total_contado - moneda_resumen.saldo_teorico
+        resultado = (
+            "CUADRADO"
+            if diferencia == 0
+            else "SOBRANTE"
+            if diferencia > 0
+            else "FALTANTE"
+        )
+        diferencias.append(
+            (moneda_body, moneda_resumen, total_contado, diferencia, resultado)
+        )
+
+    requiere_supervisor = any(
+        abs(diferencia) > control.caja.umbral_diferencia_arqueo
+        for _, _, _, diferencia, _ in diferencias
+    )
+    if requiere_supervisor and body.supervisor is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Diferencia significativa: se requiere autorización del supervisor",
+        )
+
+    supervisor = None
+    if body.supervisor is not None:
+        supervisor = db.execute(
+            select(Usuario)
+            .join(Rol, Usuario.rol_id == Rol.id)
+            .where(
+                Usuario.correo == body.supervisor.correo,
+                Usuario.estado == "ACTIVO",
+                Usuario.cooperativa_id == cooperativa_id,
+                Usuario.id != usuario.id,
+                Rol.nombre == "ADMINISTRADOR",
+            )
+        ).scalar_one_or_none()
+        if supervisor is None or not verify_password(
+            body.supervisor.contrasena, supervisor.contrasena
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Las credenciales del supervisor no son válidas",
+            )
+
+    arqueo = ArqueoCaja(
+        control_caja_id=control.id,
+        usuario_id=usuario.id,
+        supervisor_id=supervisor.id if supervisor else None,
+        fecha_autorizacion=datetime.now().astimezone() if supervisor else None,
+        cierre=body.cerrar_caja,
+        requiere_supervisor=requiere_supervisor,
+        observacion=body.observacion,
+    )
+    db.add(arqueo)
+    db.flush()
+    monedas_out = []
+    total_bob_contado = Decimal("0.00")
+    for moneda_body, resumen_moneda, total, diferencia, resultado in diferencias:
+        arqueo_moneda = ArqueoCajaMoneda(
+            arqueo_id=arqueo.id,
+            moneda_id=moneda_body.moneda_id,
+            saldo_teorico=resumen_moneda.saldo_teorico,
+            total_contado=total,
+            diferencia=diferencia,
+            resultado=resultado,
+        )
+        db.add(arqueo_moneda)
+        db.flush()
+        detalle_out = []
+        for detalle in moneda_body.detalle:
+            tipo = next(
+                tipo
+                for tipo, valor in DENOMINACIONES_ARQUEO[resumen_moneda.moneda.codigo_iso]
+                if valor == Decimal(detalle.denominacion)
+            )
+            subtotal = Decimal(detalle.denominacion) * detalle.cantidad
+            db.add(
+                ArqueoCajaDetalle(
+                    arqueo_moneda_id=arqueo_moneda.id,
+                    tipo=tipo,
+                    denominacion=detalle.denominacion,
+                    cantidad=detalle.cantidad,
+                    subtotal=subtotal,
+                )
+            )
+            detalle_out.append(
+                DetalleArqueoOut(
+                    tipo=tipo,
+                    denominacion=detalle.denominacion,
+                    cantidad=detalle.cantidad,
+                    subtotal=subtotal,
+                )
+            )
+        monedas_out.append(
+            MonedaArqueoOut(
+                moneda=resumen_moneda.moneda,
+                saldo_teorico=resumen_moneda.saldo_teorico,
+                total_contado=total,
+                diferencia=diferencia,
+                resultado=resultado,
+                detalle=detalle_out,
+            )
+        )
+        if resumen_moneda.moneda.codigo_iso == "BOB":
+            total_bob_contado = total
+
+    nombre_usuario = usuario.nombre
+    supervisor_out = (
+        UsuarioArqueoOut(id=supervisor.id, nombre=supervisor.nombre)
+        if supervisor
+        else None
+    )
+    fecha = arqueo.fecha or datetime.now().astimezone()
+    response = ArqueoCajaOut(
+        id=arqueo.id,
+        fecha=fecha,
+        caja_nombre=control.caja.nombre,
+        cajero=UsuarioArqueoOut(id=usuario.id, nombre=nombre_usuario),
+        supervisor=supervisor_out,
+        fecha_autorizacion=arqueo.fecha_autorizacion,
+        requiere_supervisor=requiere_supervisor,
+        cierre=body.cerrar_caja,
+        observacion=body.observacion,
+        monedas=monedas_out,
+    )
+    registrar_accion(
+        db,
+        accion="ARQUEO",
+        modulo="CAJA",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Arqueo de caja {control.caja.nombre}",
+        request=request,
+    )
+    if body.cerrar_caja:
+        control.estado = "CERRADA"
+        control.fecha_cierre = datetime.now()
+        control.monto_cierre = total_bob_contado
+        control.caja.estado = "CERRADA"
+        registrar_accion(
+            db,
+            accion="CIERRE",
+            modulo="CAJA",
+            usuario_id=usuario.id,
+            cooperativa_id=cooperativa_id,
+            descripcion=f"Cierre de caja {control.caja.nombre} por arqueo",
+            request=request,
+        )
+    db.commit()
+    return response
+
+
+@router.get("/arqueos/{arqueo_id}", response_model=ArqueoCajaOut)
+def obtener_arqueo(
+    arqueo_id: int,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_operador(usuario)
+    arqueo = db.execute(
+        select(ArqueoCaja)
+        .join(ControlCaja, ArqueoCaja.control_caja_id == ControlCaja.id)
+        .join(Caja, ControlCaja.caja_id == Caja.id)
+        .options(
+            joinedload(ArqueoCaja.control_caja).joinedload(ControlCaja.caja),
+            joinedload(ArqueoCaja.usuario),
+            joinedload(ArqueoCaja.supervisor),
+            selectinload(ArqueoCaja.monedas).joinedload(ArqueoCajaMoneda.moneda),
+            selectinload(ArqueoCaja.monedas)
+            .selectinload(ArqueoCajaMoneda.detalle),
+        )
+        .where(
+            ArqueoCaja.id == arqueo_id,
+            Caja.cooperativa_id == cooperativa_id,
+        )
+    ).unique().scalar_one_or_none()
+    if arqueo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Arqueo no encontrado",
+        )
+
+    return ArqueoCajaOut(
+        id=arqueo.id,
+        fecha=arqueo.fecha,
+        caja_nombre=arqueo.control_caja.caja.nombre,
+        cajero=UsuarioArqueoOut(
+            id=arqueo.usuario.id,
+            nombre=arqueo.usuario.nombre,
+        ),
+        supervisor=(
+            UsuarioArqueoOut(
+                id=arqueo.supervisor.id,
+                nombre=arqueo.supervisor.nombre,
+            )
+            if arqueo.supervisor
+            else None
+        ),
+        fecha_autorizacion=arqueo.fecha_autorizacion,
+        requiere_supervisor=arqueo.requiere_supervisor,
+        cierre=arqueo.cierre,
+        observacion=arqueo.observacion,
+        monedas=[
+            MonedaArqueoOut(
+                moneda=MonedaOut.model_validate(moneda_arqueo.moneda),
+                saldo_teorico=moneda_arqueo.saldo_teorico,
+                total_contado=moneda_arqueo.total_contado,
+                diferencia=moneda_arqueo.diferencia,
+                resultado=moneda_arqueo.resultado,
+                detalle=[
+                    DetalleArqueoOut(
+                        tipo=detalle.tipo,
+                        denominacion=detalle.denominacion,
+                        cantidad=detalle.cantidad,
+                        subtotal=detalle.subtotal,
+                    )
+                    for detalle in moneda_arqueo.detalle
+                ],
+            )
+            for moneda_arqueo in arqueo.monedas
+        ],
     )
 
 

@@ -1,5 +1,6 @@
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     Date,
@@ -247,6 +248,9 @@ class Caja(Base):
     monto_maximo_efectivo = mapped_column(
         Numeric(12, 2), nullable=False, default=50000.00, server_default="50000.00"
     )
+    umbral_diferencia_arqueo = mapped_column(
+        Numeric(12, 2), nullable=False, default=50.00, server_default="50.00"
+    )
 
     cooperativa: Mapped["Cooperativa | None"] = relationship()
     controles: Mapped[list["ControlCaja"]] = relationship(back_populates="caja")
@@ -267,6 +271,78 @@ class ControlCaja(Base):
 
     caja: Mapped["Caja"] = relationship(back_populates="controles")
     usuario: Mapped["Usuario"] = relationship()
+
+
+class ArqueoCaja(Base):
+    __tablename__ = "arqueo_caja"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    control_caja_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("control_caja.id"), nullable=False
+    )
+    usuario_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("usuario.id"), nullable=False
+    )
+    supervisor_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("usuario.id"), nullable=True
+    )
+    fecha = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    fecha_autorizacion = mapped_column(TIMESTAMP(timezone=True))
+    cierre: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    requiere_supervisor: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    observacion: Mapped[str | None] = mapped_column(Text)
+
+    control_caja: Mapped["ControlCaja"] = relationship()
+    usuario: Mapped["Usuario"] = relationship(foreign_keys=[usuario_id])
+    supervisor: Mapped["Usuario | None"] = relationship(foreign_keys=[supervisor_id])
+    monedas: Mapped[list["ArqueoCajaMoneda"]] = relationship(
+        back_populates="arqueo", cascade="all, delete-orphan"
+    )
+
+
+class ArqueoCajaMoneda(Base):
+    __tablename__ = "arqueo_caja_moneda"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    arqueo_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("arqueo_caja.id", ondelete="CASCADE"), nullable=False
+    )
+    moneda_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("moneda.id"), nullable=False
+    )
+    saldo_teorico = mapped_column(Numeric(12, 2), nullable=False)
+    total_contado = mapped_column(Numeric(12, 2), nullable=False)
+    diferencia = mapped_column(Numeric(12, 2), nullable=False)
+    resultado: Mapped[str] = mapped_column(String(10), nullable=False)
+
+    arqueo: Mapped["ArqueoCaja"] = relationship(back_populates="monedas")
+    moneda: Mapped["Moneda"] = relationship()
+    detalle: Mapped[list["ArqueoCajaDetalle"]] = relationship(
+        back_populates="arqueo_moneda", cascade="all, delete-orphan"
+    )
+
+
+class ArqueoCajaDetalle(Base):
+    __tablename__ = "arqueo_caja_detalle"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    arqueo_moneda_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("arqueo_caja_moneda.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    tipo: Mapped[str] = mapped_column(String(10), nullable=False)
+    denominacion = mapped_column(Numeric(12, 2), nullable=False)
+    cantidad: Mapped[int] = mapped_column(Integer, nullable=False)
+    subtotal = mapped_column(Numeric(12, 2), nullable=False)
+
+    arqueo_moneda: Mapped["ArqueoCajaMoneda"] = relationship(
+        back_populates="detalle"
+    )
 
 
 class CertificadoAportacion(Base):
