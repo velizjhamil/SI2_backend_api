@@ -252,11 +252,25 @@ class CuentaCajaOut(BaseModel):
     titular: TitularCajaOut
 
 
+class DeclaracionUifIn(BaseModel):
+    origen: str = Field("", max_length=255)
+    origen_detalle: str | None = None
+    destino: str = Field("", max_length=255)
+    destino_detalle: str | None = None
+    actividad_economica: str = Field("", max_length=150)
+    realizado_por: str = ""
+    tercero_nombre: str | None = Field(None, max_length=150)
+    tercero_ci: str | None = Field(None, max_length=20)
+    tercero_parentesco: str | None = Field(None, max_length=50)
+    declara_bajo_juramento: bool = False
+
+
 class DepositoVentanillaCreate(BaseModel):
     cuenta_id: int = Field(..., ge=1)
     monto: Decimal = Field(..., max_digits=12, decimal_places=2)
     depositante_nombre: str = Field(..., min_length=1, max_length=150)
     depositante_ci: str = Field(..., min_length=1, max_length=20)
+    declaracion_uif: DeclaracionUifIn | None = None
 
 
 class DepositoVentanillaOut(BaseModel):
@@ -270,6 +284,7 @@ class DepositoVentanillaOut(BaseModel):
     depositante_nombre: str
     depositante_ci: str
     caja_nombre: str
+    declaracion_uif_id: int | None = None
 
 
 class TransferenciaVentanillaCreate(BaseModel):
@@ -400,6 +415,7 @@ class RetiroVentanillaCreate(BaseModel):
     cuenta_id: int = Field(..., ge=1)
     monto: Decimal
     retirante: RetiranteCreate
+    declaracion_uif: DeclaracionUifIn | None = None
 
 
 class RetiranteOut(BaseModel):
@@ -420,6 +436,7 @@ class RetiroVentanillaOut(BaseModel):
     retirante: RetiranteOut
     caja_nombre: str
     efectivo_caja_restante: Decimal
+    declaracion_uif_id: int | None = None
 
 
 class MonedaCierreVerificacionOut(BaseModel):
@@ -547,3 +564,29 @@ class TransferenciaOut(BaseModel):
     monto: Decimal
     glosa: str | None = None
     fecha_hora: datetime
+
+
+class DPFCreate(BaseModel):
+    socio_id: int = Field(..., ge=1)
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    moneda_id: int = Field(..., ge=1)
+    plazo_dias: int = Field(..., ge=30)
+    modalidad_pago_interes: Literal["VENCIMIENTO", "MENSUAL"]
+    origen_fondos: Literal["CUENTA", "EFECTIVO"]
+    cuenta_origen_id: int | None = Field(None, ge=1)
+    cuenta_abono_id: int = Field(..., ge=1)
+    declaracion_uif: DeclaracionUifIn | None = None
+
+
+class DPFSimulacionIn(BaseModel):
+    monto: Decimal = Field(..., gt=0, max_digits=12, decimal_places=2)
+    moneda_id: int = Field(..., ge=1)
+    plazo_dias: int = Field(..., ge=1)
+    modalidad_pago_interes: Literal["VENCIMIENTO", "MENSUAL"]
+
+
+class DPFLiquidacionIn(BaseModel):
+    tipo: Literal["LIQUIDACION", "CANCELACION", "RENOVACION"]
+    capitalizar: bool = False
+    plazo_dias: int | None = Field(None, ge=30)
+    modalidad_pago_interes: Literal["VENCIMIENTO", "MENSUAL"] | None = None

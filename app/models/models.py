@@ -45,6 +45,12 @@ class Cooperativa(Base):
         TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
     )
     fecha_baja = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    dpf_permite_cancelacion_anticipada: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    dpf_tasa_penalizacion = mapped_column(
+        Numeric(5, 2), nullable=False, default=1.00, server_default="1.00"
+    )
 
     __table_args__ = (
         UniqueConstraint("uuid", name="uq_cooperativa_uuid"),
@@ -411,3 +417,99 @@ class CertificadoAportacion(Base):
 
     socio: Mapped["Socio"] = relationship(back_populates="certificados_aportacion")
     moneda: Mapped["Moneda"] = relationship()
+
+
+class DeclaracionJuradaUIF(Base):
+    __tablename__ = "declaracion_jurada_uif"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    origen: Mapped[str] = mapped_column(String(255), nullable=False)
+    destino: Mapped[str] = mapped_column(String(255), nullable=False)
+    tipo_operacion: Mapped[str | None] = mapped_column(String(30))
+    monto = mapped_column(Numeric(14, 2))
+    moneda_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("moneda.id"))
+    socio_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("socio.id"))
+    realizado_por: Mapped[str | None] = mapped_column(String(10))
+    tercero_nombre: Mapped[str | None] = mapped_column(String(150))
+    tercero_ci: Mapped[str | None] = mapped_column(String(20))
+    tercero_parentesco: Mapped[str | None] = mapped_column(String(50))
+    actividad_economica: Mapped[str | None] = mapped_column(String(150))
+    origen_detalle: Mapped[str | None] = mapped_column(Text)
+    destino_detalle: Mapped[str | None] = mapped_column(Text)
+    declara_bajo_juramento: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    fraccionada: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
+class DepositoPlazoFijo(Base):
+    __tablename__ = "deposito_plazo_fijo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto = mapped_column(Numeric(12, 2), nullable=False)
+    tasa_interes_anual = mapped_column(Numeric(5, 2), nullable=False)
+    plazo_dias: Mapped[int] = mapped_column(Integer, nullable=False)
+    fecha_inicio = mapped_column(Date, nullable=False)
+    fecha_vencimiento = mapped_column(Date, nullable=False)
+    interes_calculado = mapped_column(Numeric(12, 2), nullable=False)
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="VIGENTE")
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
+    numero_certificado: Mapped[str | None] = mapped_column(String(30), unique=True)
+    modalidad_pago_interes: Mapped[str | None] = mapped_column(String(12), default="VENCIMIENTO")
+    interes_bruto = mapped_column(Numeric(12, 2))
+    retencion_rciva = mapped_column(Numeric(12, 2))
+    interes_neto = mapped_column(Numeric(12, 2))
+    origen_fondos: Mapped[str | None] = mapped_column(String(10))
+    cuenta_origen_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cuenta_ahorro.id"))
+    cuenta_abono_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cuenta_ahorro.id"))
+    codigo_verificacion: Mapped[str | None] = mapped_column(String(16))
+    dpf_origen_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id"))
+    declaracion_jurada_uif_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("declaracion_jurada_uif.id"))
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    fecha_emision = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+
+class TasaDPF(Base):
+    __tablename__ = "tasa_dpf"
+    __table_args__ = (UniqueConstraint("cooperativa_id", "moneda_id", "plazo_min_dias", name="uq_tasa_dpf_banda"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
+    plazo_min_dias: Mapped[int] = mapped_column(Integer, nullable=False)
+    plazo_max_dias: Mapped[int | None] = mapped_column(Integer)
+    tna = mapped_column(Numeric(5, 2), nullable=False)
+
+
+class DPFCronograma(Base):
+    __tablename__ = "dpf_cronograma"
+    __table_args__ = (UniqueConstraint("deposito_plazo_fijo_id", "numero", name="uq_dpf_cronograma_numero"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    deposito_plazo_fijo_id: Mapped[int] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id", ondelete="CASCADE"), nullable=False)
+    numero: Mapped[int] = mapped_column(Integer, nullable=False)
+    fecha_pago = mapped_column(Date, nullable=False)
+    dias: Mapped[int] = mapped_column(Integer, nullable=False)
+    interes_bruto = mapped_column(Numeric(12, 2), nullable=False)
+    retencion_rciva = mapped_column(Numeric(12, 2), nullable=False)
+    interes_neto = mapped_column(Numeric(12, 2), nullable=False)
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDIENTE")
+
+
+class Liquidacion(Base):
+    __tablename__ = "liquidacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto_capital_retornado = mapped_column(Numeric(12, 2), nullable=False)
+    monto_interes_pagado = mapped_column(Numeric(12, 2), nullable=False)
+    tipo_operacion: Mapped[str] = mapped_column(String(50), nullable=False)
+    fecha = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+    deposito_plazo_fijo_id: Mapped[int] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id"), nullable=False, unique=True)
+    tipo: Mapped[str | None] = mapped_column(String(20))
+    retencion_rciva = mapped_column(Numeric(12, 2))
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    cuenta_abono_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cuenta_ahorro.id"))
+    dpf_renovado_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id"))

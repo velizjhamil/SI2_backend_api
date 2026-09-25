@@ -12,6 +12,7 @@ from app.api.v1.deps import get_db, require_operaciones
 from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _registrar_transferencia
 from app.core.bitacora import registrar_accion
 from app.core.security import verify_password
+from app.services.uif import exigir_declaracion_si_corresponde, registrar_declaracion
 from app.models.models import (
     ArqueoCaja,
     ArqueoCajaDetalle,
@@ -271,6 +272,26 @@ def registrar_retiro(
                 detail="El nombre y CI del apoderado son obligatorios",
             )
 
+    fraccionada = exigir_declaracion_si_corresponde(
+        db,
+        declaracion=body.declaracion_uif,
+        socio_id=cuenta.socio_id,
+        moneda_id=cuenta.moneda_id,
+        moneda_iso=cuenta.moneda.codigo_iso,
+        monto=body.monto,
+    )
+    declaracion_id = registrar_declaracion(
+        db,
+        declaracion=body.declaracion_uif,
+        tipo_operacion="RETIRO",
+        monto=body.monto,
+        moneda_id=cuenta.moneda_id,
+        socio_id=cuenta.socio_id,
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        fraccionada=fraccionada,
+    )
+
     resumen = _resumen_sesion_arqueo(db, control)
     efectivo = next(
         (
@@ -292,11 +313,13 @@ def registrar_retiro(
         text("""
             INSERT INTO transaccion (
                 tipo, monto, canal, control_caja_id, moneda_id,
-                cuenta_ahorro_id, retirante_tipo, retirante_nombre, retirante_ci
+                cuenta_ahorro_id, retirante_tipo, retirante_nombre, retirante_ci,
+                declaracion_jurada_uif_id
             )
             VALUES (
                 'RETIRO', :monto, 'VENTANILLA', :control_caja_id, :moneda_id,
-                :cuenta_id, :retirante_tipo, :retirante_nombre, :retirante_ci
+                :cuenta_id, :retirante_tipo, :retirante_nombre, :retirante_ci,
+                :declaracion_id
             )
             RETURNING id, fecha_hora
         """),
@@ -308,6 +331,7 @@ def registrar_retiro(
             "retirante_tipo": body.retirante.tipo,
             "retirante_nombre": retirante_nombre,
             "retirante_ci": retirante_ci,
+            "declaracion_id": declaracion_id,
         },
     ).one()
     registrar_accion(
@@ -336,6 +360,7 @@ def registrar_retiro(
         ),
         caja_nombre=control.caja.nombre,
         efectivo_caja_restante=efectivo - body.monto,
+        declaracion_uif_id=declaracion_id,
     )
 
 
@@ -1185,17 +1210,38 @@ def registrar_deposito(
             detail="El monto debe ser mayor a cero",
         )
 
+    fraccionada = exigir_declaracion_si_corresponde(
+        db,
+        declaracion=body.declaracion_uif,
+        socio_id=cuenta.socio_id,
+        moneda_id=cuenta.moneda_id,
+        moneda_iso=cuenta.moneda.codigo_iso,
+        monto=body.monto,
+    )
+    declaracion_id = registrar_declaracion(
+        db,
+        declaracion=body.declaracion_uif,
+        tipo_operacion="DEPOSITO",
+        monto=body.monto,
+        moneda_id=cuenta.moneda_id,
+        socio_id=cuenta.socio_id,
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        fraccionada=fraccionada,
+    )
+
     cuenta.saldo_disponible += body.monto
     control.saldo_sistema += body.monto
     transaccion = db.execute(
         text("""
             INSERT INTO transaccion (
                 tipo, monto, canal, control_caja_id, moneda_id,
-                cuenta_ahorro_id, depositante_nombre, depositante_ci
+                cuenta_ahorro_id, depositante_nombre, depositante_ci,
+                declaracion_jurada_uif_id
             )
             VALUES (
                 'DEPOSITO', :monto, 'VENTANILLA', :control_caja_id, :moneda_id,
-                :cuenta_id, :depositante_nombre, :depositante_ci
+                :cuenta_id, :depositante_nombre, :depositante_ci, :declaracion_id
             )
             RETURNING id, fecha_hora
         """),
@@ -1206,6 +1252,7 @@ def registrar_deposito(
             "cuenta_id": cuenta.id,
             "depositante_nombre": body.depositante_nombre,
             "depositante_ci": body.depositante_ci,
+            "declaracion_id": declaracion_id,
         },
     ).one()
     registrar_accion(
@@ -1229,6 +1276,7 @@ def registrar_deposito(
         depositante_nombre=body.depositante_nombre,
         depositante_ci=body.depositante_ci,
         caja_nombre=control.caja.nombre,
+        declaracion_uif_id=declaracion_id,
     )
 
 
