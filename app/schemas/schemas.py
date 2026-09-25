@@ -213,6 +213,104 @@ class MonedaOut(BaseModel):
     simbolo: str
 
 
+class CajaOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    nombre: str
+    estado: str
+    monto_maximo_efectivo: Decimal
+
+
+class SesionCajaOut(BaseModel):
+    id: int
+    caja_id: int
+    caja_nombre: str
+    monto_apertura: Decimal
+    saldo_sistema: Decimal
+    fecha_apertura: datetime
+    estado: str
+
+
+class AperturaCajaCreate(BaseModel):
+    caja_id: int = Field(..., ge=1)
+    monto_apertura: Decimal = Field(..., max_digits=12, decimal_places=2)
+
+
+class TitularCajaOut(BaseModel):
+    socio_id: int
+    nombre_completo: str
+    ci: str
+
+
+class CuentaCajaOut(BaseModel):
+    id: int
+    numero: str
+    estado: str
+    saldo_disponible: Decimal
+    moneda: MonedaOut
+    titular: TitularCajaOut
+
+
+class DepositoVentanillaCreate(BaseModel):
+    cuenta_id: int = Field(..., ge=1)
+    monto: Decimal = Field(..., max_digits=12, decimal_places=2)
+    depositante_nombre: str = Field(..., min_length=1, max_length=150)
+    depositante_ci: str = Field(..., min_length=1, max_length=20)
+
+
+class DepositoVentanillaOut(BaseModel):
+    numero_operacion: int
+    fecha_hora: datetime
+    cuenta_numero: str
+    titular: TitularCajaOut
+    monto: Decimal
+    moneda: MonedaOut
+    saldo_actualizado: Decimal
+    depositante_nombre: str
+    depositante_ci: str
+    caja_nombre: str
+
+
+class TransferenciaVentanillaCreate(BaseModel):
+    cuenta_origen_id: int = Field(..., ge=1)
+    cuenta_destino_id: int = Field(..., ge=1)
+    monto: Decimal = Field(..., max_digits=12, decimal_places=2)
+    glosa: str | None = Field(None, max_length=255)
+
+
+class CuentaTransferenciaPreviewOut(BaseModel):
+    cuenta_id: int
+    numero: str
+    titular: TitularCajaOut
+    moneda: MonedaOut
+
+
+class CuentaOrigenTransferenciaPreviewOut(CuentaTransferenciaPreviewOut):
+    saldo_disponible: Decimal
+
+
+class TransferenciaPreviewOut(BaseModel):
+    origen: CuentaOrigenTransferenciaPreviewOut
+    destino: CuentaTransferenciaPreviewOut
+
+
+class CuentaTransferenciaReceiptOut(BaseModel):
+    numero: str
+    titular: TitularCajaOut
+
+
+class TransferenciaVentanillaOut(BaseModel):
+    numero_operacion: int
+    fecha_hora: datetime
+    origen: CuentaTransferenciaReceiptOut
+    destino: CuentaTransferenciaReceiptOut
+    monto: Decimal
+    moneda: MonedaOut
+    saldo_origen_actualizado: Decimal
+    glosa: str | None = None
+
+
 class CuentaAhorroCreate(BaseModel):
     socio_id: int
     moneda_id: int

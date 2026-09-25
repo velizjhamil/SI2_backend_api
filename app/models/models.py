@@ -5,6 +5,7 @@ from sqlalchemy import (
     Date,
     Numeric,
     ForeignKey,
+    Integer,
     SmallInteger,
     String,
     Table,
@@ -232,6 +233,40 @@ class CuentaAhorro(Base):
 
     socio: Mapped["Socio"] = relationship(back_populates="cuentas_ahorro")
     moneda: Mapped["Moneda"] = relationship()
+
+
+class Caja(Base):
+    __tablename__ = "caja"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    nombre: Mapped[str] = mapped_column(String(50), nullable=False)
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="CERRADA")
+    cooperativa_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id"), nullable=True
+    )
+    monto_maximo_efectivo = mapped_column(
+        Numeric(12, 2), nullable=False, default=50000.00, server_default="50000.00"
+    )
+
+    cooperativa: Mapped["Cooperativa | None"] = relationship()
+    controles: Mapped[list["ControlCaja"]] = relationship(back_populates="caja")
+
+
+class ControlCaja(Base):
+    __tablename__ = "control_caja"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto_apertura = mapped_column(Numeric(12, 2), nullable=False)
+    monto_cierre = mapped_column(Numeric(12, 2))
+    saldo_sistema = mapped_column(Numeric(12, 2), nullable=False)
+    fecha_apertura = mapped_column(TIMESTAMP(timezone=False), nullable=False)
+    fecha_cierre = mapped_column(TIMESTAMP(timezone=False))
+    estado: Mapped[str] = mapped_column(String(20), nullable=False, default="ABIERTA")
+    caja_id: Mapped[int] = mapped_column(Integer, ForeignKey("caja.id"), nullable=False)
+    usuario_id: Mapped[int] = mapped_column(Integer, ForeignKey("usuario.id"), nullable=False)
+
+    caja: Mapped["Caja"] = relationship(back_populates="controles")
+    usuario: Mapped["Usuario"] = relationship()
 
 
 class CertificadoAportacion(Base):

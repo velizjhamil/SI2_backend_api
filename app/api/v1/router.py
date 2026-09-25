@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, ahorros, auth, cooperativas, socios_kyc
+from app.api.v1.endpoints import admin, ahorros, auth, caja, cooperativas, socios_kyc
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -8,4 +8,4 @@ api_router.include_router(cooperativas.router, prefix="/cooperativas", tags=["co
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
 api_router.include_router(socios_kyc.router, prefix="/socios", tags=["socios-kyc"])
 api_router.include_router(ahorros.router, prefix="/ahorros", tags=["ahorros"])
-
+api_router.include_router(caja.router, prefix="/caja", tags=["caja"])

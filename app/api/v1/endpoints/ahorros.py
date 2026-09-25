@@ -420,6 +420,9 @@ def _registrar_transferencia(
     glosa: str | None,
     usuario: Usuario,
     request: Request,
+    canal: str = "MOVIL",
+    control_caja_id: int | None = None,
+    modulo: str = "AHORROS",
 ) -> tuple[int, int, object]:
     """Registra las dos patas de la transferencia en `transaccion`, vinculadas
     por `transaccion_contraparte_id`, más una entrada de bitácora. Todo dentro
@@ -427,22 +430,35 @@ def _registrar_transferencia(
     """
     salida = db.execute(
         text("""
-            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id)
-            VALUES ('TRANSFERENCIA_SALIDA', :monto, 'MOVIL', :moneda_id, :cuenta_id)
+            INSERT INTO transaccion (
+                tipo, monto, canal, control_caja_id, moneda_id, cuenta_ahorro_id
+            )
+            VALUES ('TRANSFERENCIA_SALIDA', :monto, :canal, :control_caja_id, :moneda_id, :cuenta_id)
             RETURNING id, fecha_hora
         """),
-        {"monto": monto, "moneda_id": cuenta_origen.moneda_id, "cuenta_id": cuenta_origen.id},
+        {
+            "monto": monto,
+            "canal": canal,
+            "control_caja_id": control_caja_id,
+            "moneda_id": cuenta_origen.moneda_id,
+            "cuenta_id": cuenta_origen.id,
+        },
     ).one()
     salida_id, fecha_hora = salida
 
     entrada_id = db.execute(
         text("""
-            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id, transaccion_contraparte_id)
-            VALUES ('TRANSFERENCIA_ENTRADA', :monto, 'MOVIL', :moneda_id, :cuenta_id, :contraparte)
+            INSERT INTO transaccion (
+                tipo, monto, canal, control_caja_id, moneda_id, cuenta_ahorro_id,
+                transaccion_contraparte_id
+            )
+            VALUES ('TRANSFERENCIA_ENTRADA', :monto, :canal, :control_caja_id, :moneda_id, :cuenta_id, :contraparte)
             RETURNING id
         """),
         {
             "monto": monto,
+            "canal": canal,
+            "control_caja_id": control_caja_id,
             "moneda_id": cuenta_destino.moneda_id,
             "cuenta_id": cuenta_destino.id,
             "contraparte": salida_id,
@@ -460,7 +476,7 @@ def _registrar_transferencia(
     registrar_accion(
         db,
         accion="TRANSFERENCIA",
-        modulo="AHORROS",
+        modulo=modulo,
         usuario_id=usuario.id,
         cooperativa_id=cuenta_origen.socio.cooperativa_id,
         descripcion=descripcion,

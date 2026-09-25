@@ -14,7 +14,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select, text
 
-from main import app
 from app.core.security import decode_access_token
 from app.db.session import SessionLocal, engine
 from app.models.models import Cooperativa, Usuario
@@ -30,9 +29,17 @@ def _db_disponible() -> bool:
         return False
 
 
+_DB_DISPONIBLE = _db_disponible()
 pytestmark = pytest.mark.skipif(
-    not _db_disponible(), reason="PostgreSQL no disponible"
+    not _DB_DISPONIBLE, reason="PostgreSQL no disponible"
 )
+
+# `main.py` runs `init_db()` on import, so guard that import before pytest
+# applies the module-level skip when PostgreSQL is unavailable.
+if _DB_DISPONIBLE:
+    from main import app
+else:
+    app = None
 
 
 SUPERADMIN = {"correo": "superadmin@test.com", "contrasena": "Password123"}
