@@ -409,7 +409,7 @@ def test_supervisor_administrador_autoriza_diferencia_significativa(client):
         _limpiar_arqueo_fixture(operador_id, caja_id, control_id)
 
 
-def test_cerrar_caja_registra_arqueo_y_cierra_sesion(client):
+def test_cerrar_caja_desde_arqueo_se_rechaza_sin_persistir(client):
     operador_id, caja_id, _, _, control_id, token = _crear_operador_y_caja(client)
     try:
         response = client.post(
@@ -425,17 +425,15 @@ def test_cerrar_caja_registra_arqueo_y_cierra_sesion(client):
             },
             headers=_auth(token),
         )
-        assert response.status_code == 201, response.text
-        assert response.json()["cierre"] is True
+        assert response.status_code == 400
+        assert response.json()["detail"] == "El cierre de caja se realiza desde el cierre de turno"
         with SessionLocal() as db:
             control = db.get(models.ControlCaja, control_id)
             caja = db.get(models.Caja, caja_id)
-            assert control.estado == "CERRADA"
-            assert control.fecha_cierre is not None
-            assert control.monto_cierre == 200.00
-            assert caja.estado == "CERRADA"
-        actual = client.get("/api/v1/caja/sesion-actual", headers=_auth(token))
-        assert actual.status_code == 404
+            assert control.estado == "ABIERTA"
+            assert control.fecha_cierre is None
+            assert caja.estado == "ABIERTA"
+            assert _arqueos_persistidos(control_id) == 0
     finally:
         _limpiar_arqueo_fixture(operador_id, caja_id, control_id)
 

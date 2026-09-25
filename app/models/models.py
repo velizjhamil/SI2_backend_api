@@ -345,6 +345,57 @@ class ArqueoCajaDetalle(Base):
     )
 
 
+class CierreCaja(Base):
+    __tablename__ = "cierre_caja"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    control_caja_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("control_caja.id"), nullable=False, unique=True
+    )
+    arqueo_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("arqueo_caja.id"), nullable=False
+    )
+    usuario_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("usuario.id"), nullable=False
+    )
+    fecha = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    observacion: Mapped[str | None] = mapped_column(Text)
+
+    control_caja: Mapped["ControlCaja"] = relationship()
+    arqueo: Mapped["ArqueoCaja"] = relationship()
+    usuario: Mapped["Usuario"] = relationship()
+    monedas: Mapped[list["CierreCajaMoneda"]] = relationship(
+        back_populates="cierre", cascade="all, delete-orphan"
+    )
+
+
+class CierreCajaMoneda(Base):
+    __tablename__ = "cierre_caja_moneda"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cierre_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("cierre_caja.id", ondelete="CASCADE"), nullable=False
+    )
+    moneda_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("moneda.id"), nullable=False
+    )
+    monto_apertura = mapped_column(Numeric(12, 2), nullable=False)
+    total_depositos = mapped_column(Numeric(12, 2), nullable=False)
+    cantidad_depositos: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_retiros = mapped_column(Numeric(12, 2), nullable=False)
+    cantidad_retiros: Mapped[int] = mapped_column(Integer, nullable=False)
+    cantidad_transferencias: Mapped[int] = mapped_column(Integer, nullable=False)
+    saldo_teorico = mapped_column(Numeric(12, 2), nullable=False)
+    total_contado = mapped_column(Numeric(12, 2), nullable=False)
+    diferencia = mapped_column(Numeric(12, 2), nullable=False)
+    traspaso_boveda = mapped_column(Numeric(12, 2), nullable=False)
+
+    cierre: Mapped["CierreCaja"] = relationship(back_populates="monedas")
+    moneda: Mapped["Moneda"] = relationship()
+
+
 class CertificadoAportacion(Base):
     __tablename__ = "certificado_aportacion"
 

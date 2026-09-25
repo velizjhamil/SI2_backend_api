@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_db, require_operaciones
-from app.api.v1.endpoints.ahorros import _registrar_transferencia
+from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _registrar_transferencia
 from app.core.bitacora import registrar_accion
 from app.core.security import verify_password
 from app.models.models import (
@@ -17,6 +17,8 @@ from app.models.models import (
     ArqueoCajaDetalle,
     ArqueoCajaMoneda,
     Caja,
+    CierreCaja,
+    CierreCajaMoneda,
     ControlCaja,
     CuentaAhorro,
     Moneda,
@@ -28,14 +30,23 @@ from app.schemas.schemas import (
     AperturaCajaCreate,
     ArqueoCajaCreate,
     ArqueoCajaOut,
+    ArqueoCierreVerificacionOut,
+    CierreCajaCreate,
+    CierreCajaOut,
+    CierreVerificacionOut,
     DetalleArqueoOut,
     MonedaArqueoOut,
+    MonedaCierreCajaOut,
+    MonedaCierreVerificacionOut,
     CajaOut,
     CuentaOrigenTransferenciaPreviewOut,
     CuentaCajaOut,
     CuentaTransferenciaPreviewOut,
     DepositoVentanillaCreate,
     DepositoVentanillaOut,
+    RetiroVentanillaCreate,
+    RetiroVentanillaOut,
+    RetiranteOut,
     MonedaOut,
     ArqueoResumenOut,
     MonedaArqueoResumenOut,
@@ -116,6 +127,13 @@ def obtener_resumen_arqueo(
             detail="No hay una sesión de caja abierta",
         )
 
+    return _resumen_sesion_arqueo(db, control)
+
+
+def _resumen_sesion_arqueo(
+    db: Session, control: ControlCaja
+) -> ArqueoResumenOut:
+    """Return one session's theoretical cash balance, grouped by currency."""
     rows = db.execute(
         text("""
             SELECT moneda_id,
@@ -184,6 +202,144 @@ def obtener_resumen_arqueo(
 
 
 @router.post(
+    "/retiros",
+    response_model=RetiroVentanillaOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def registrar_retiro(
+    body: RetiroVentanillaCreate,
+    request: Request,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_operador(usuario)
+    control = _sesion_abierta(db, usuario, bloquear=True)
+    cuenta = db.execute(
+        select(CuentaAhorro)
+        .join(Socio, CuentaAhorro.socio_id == Socio.id)
+        .options(
+            joinedload(CuentaAhorro.moneda),
+            joinedload(CuentaAhorro.socio),
+        )
+        .where(
+            CuentaAhorro.id == body.cuenta_id,
+            Socio.cooperativa_id == cooperativa_id,
+        )
+        .with_for_update(of=CuentaAhorro)
+    ).unique().scalar_one_or_none()
+    if cuenta is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cuenta no encontrada",
+        )
+    if cuenta.estado != "ACTIVA":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="La cuenta no está activa",
+        )
+    if body.monto <= Decimal("0.00"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El monto debe ser mayor a cero",
+        )
+
+    saldo_minimo = MONTO_MINIMO_APERTURA[cuenta.tipo_producto]
+    if cuenta.saldo_disponible - body.monto < saldo_minimo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Saldo insuficiente: debe mantener un saldo mínimo de "
+                f"{saldo_minimo:.2f}"
+            ),
+        )
+    if body.retirante.tipo == "TITULAR":
+        if body.retirante.ci != cuenta.socio.ci:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El CI del titular no coincide con la cuenta",
+            )
+        retirante_nombre = body.retirante.nombre or (
+            f"{cuenta.socio.nombre} {cuenta.socio.apellido}".strip()
+        )
+        retirante_ci = body.retirante.ci
+    else:
+        retirante_nombre = (body.retirante.nombre or "").strip()
+        retirante_ci = (body.retirante.ci or "").strip()
+        if not retirante_nombre or not retirante_ci:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="El nombre y CI del apoderado son obligatorios",
+            )
+
+    resumen = _resumen_sesion_arqueo(db, control)
+    efectivo = next(
+        (
+            moneda.saldo_teorico
+            for moneda in resumen.monedas
+            if moneda.moneda.id == cuenta.moneda_id
+        ),
+        Decimal("0.00"),
+    )
+    if body.monto > efectivo:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Efectivo insuficiente en caja",
+        )
+
+    cuenta.saldo_disponible -= body.monto
+    control.saldo_sistema -= body.monto
+    transaccion = db.execute(
+        text("""
+            INSERT INTO transaccion (
+                tipo, monto, canal, control_caja_id, moneda_id,
+                cuenta_ahorro_id, retirante_tipo, retirante_nombre, retirante_ci
+            )
+            VALUES (
+                'RETIRO', :monto, 'VENTANILLA', :control_caja_id, :moneda_id,
+                :cuenta_id, :retirante_tipo, :retirante_nombre, :retirante_ci
+            )
+            RETURNING id, fecha_hora
+        """),
+        {
+            "monto": body.monto,
+            "control_caja_id": control.id,
+            "moneda_id": cuenta.moneda_id,
+            "cuenta_id": cuenta.id,
+            "retirante_tipo": body.retirante.tipo,
+            "retirante_nombre": retirante_nombre,
+            "retirante_ci": retirante_ci,
+        },
+    ).one()
+    registrar_accion(
+        db,
+        accion="RETIRO",
+        modulo="CAJA",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Retiro de {body.monto} en cuenta {cuenta.numero} por ventanilla",
+        request=request,
+    )
+    db.commit()
+    return RetiroVentanillaOut(
+        numero_operacion=transaccion.id,
+        fecha_hora=transaccion.fecha_hora,
+        cuenta_numero=cuenta.numero,
+        titular=_titular_out(cuenta.socio),
+        monto=body.monto,
+        moneda=MonedaOut.model_validate(cuenta.moneda),
+        saldo_actualizado=cuenta.saldo_disponible,
+        saldo_minimo=saldo_minimo,
+        retirante=RetiranteOut(
+            tipo=body.retirante.tipo,
+            nombre=retirante_nombre,
+            ci=retirante_ci,
+        ),
+        caja_nombre=control.caja.nombre,
+        efectivo_caja_restante=efectivo - body.monto,
+    )
+
+
+@router.post(
     "/arqueos",
     response_model=ArqueoCajaOut,
     status_code=status.HTTP_201_CREATED,
@@ -195,6 +351,11 @@ def registrar_arqueo(
     db: Session = Depends(get_db),
 ):
     cooperativa_id = _validar_operador(usuario)
+    if body.cerrar_caja:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="El cierre de caja se realiza desde el cierre de turno",
+        )
     control = _sesion_abierta(db, usuario, bloquear=True)
     resumen = obtener_resumen_arqueo(usuario=usuario, db=db)
     esperadas = {moneda.moneda.id: moneda for moneda in resumen.monedas}
@@ -289,7 +450,6 @@ def registrar_arqueo(
     db.add(arqueo)
     db.flush()
     monedas_out = []
-    total_bob_contado = Decimal("0.00")
     for moneda_body, resumen_moneda, total, diferencia, resultado in diferencias:
         arqueo_moneda = ArqueoCajaMoneda(
             arqueo_id=arqueo.id,
@@ -336,8 +496,6 @@ def registrar_arqueo(
                 detalle=detalle_out,
             )
         )
-        if resumen_moneda.moneda.codigo_iso == "BOB":
-            total_bob_contado = total
 
     nombre_usuario = usuario.nombre
     supervisor_out = (
@@ -367,20 +525,6 @@ def registrar_arqueo(
         descripcion=f"Arqueo de caja {control.caja.nombre}",
         request=request,
     )
-    if body.cerrar_caja:
-        control.estado = "CERRADA"
-        control.fecha_cierre = datetime.now()
-        control.monto_cierre = total_bob_contado
-        control.caja.estado = "CERRADA"
-        registrar_accion(
-            db,
-            accion="CIERRE",
-            modulo="CAJA",
-            usuario_id=usuario.id,
-            cooperativa_id=cooperativa_id,
-            descripcion=f"Cierre de caja {control.caja.nombre} por arqueo",
-            request=request,
-        )
     db.commit()
     return response
 
@@ -738,6 +882,267 @@ def _sesion_abierta(
     return control
 
 
+def _verificar_cierre(db: Session, control: ControlCaja):
+    arqueo = db.execute(
+        select(ArqueoCaja)
+        .options(
+            joinedload(ArqueoCaja.supervisor),
+            selectinload(ArqueoCaja.monedas).joinedload(ArqueoCajaMoneda.moneda),
+        )
+        .where(ArqueoCaja.control_caja_id == control.id)
+        .order_by(ArqueoCaja.fecha.desc(), ArqueoCaja.id.desc())
+        .limit(1)
+    ).unique().scalar_one_or_none()
+    if arqueo is None:
+        return CierreVerificacionOut(
+            puede_cerrar=False,
+            alertas=["No hay un arqueo registrado para esta sesión"],
+            arqueo=None,
+        ), None
+
+    alertas = []
+    tiene_diferencia_no_autorizada = any(
+        moneda.resultado != "CUADRADO" for moneda in arqueo.monedas
+    ) and arqueo.supervisor_id is None
+    if tiene_diferencia_no_autorizada:
+        alertas.append(
+            "El último arqueo tiene diferencias sin autorización del supervisor"
+        )
+    hay_movimiento_posterior = db.execute(
+        text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM transaccion
+                WHERE control_caja_id = :control_caja_id
+                  AND canal = 'VENTANILLA'
+                  AND fecha_hora > :fecha_arqueo
+            )
+        """),
+        {"control_caja_id": control.id, "fecha_arqueo": arqueo.fecha},
+    ).scalar_one()
+    if hay_movimiento_posterior:
+        alertas.append("Hay transacciones posteriores al último arqueo")
+
+    response = CierreVerificacionOut(
+        puede_cerrar=not alertas,
+        alertas=alertas,
+        arqueo=ArqueoCierreVerificacionOut(
+            id=arqueo.id,
+            fecha=arqueo.fecha,
+            requiere_supervisor=arqueo.requiere_supervisor,
+            supervisor=(
+                UsuarioArqueoOut(id=arqueo.supervisor.id, nombre=arqueo.supervisor.nombre)
+                if arqueo.supervisor
+                else None
+            ),
+            monedas=[
+                MonedaCierreVerificacionOut(
+                    moneda=MonedaOut.model_validate(item.moneda),
+                    resultado=item.resultado,
+                    diferencia=item.diferencia,
+                )
+                for item in arqueo.monedas
+            ],
+        ),
+    )
+    return response, arqueo
+
+
+@router.get("/cierres/verificacion", response_model=CierreVerificacionOut)
+def verificar_cierre_turno(
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    _validar_operador(usuario)
+    control = db.execute(
+        select(ControlCaja)
+        .options(joinedload(ControlCaja.caja))
+        .where(
+            ControlCaja.usuario_id == usuario.id,
+            ControlCaja.estado == "ABIERTA",
+        )
+    ).unique().scalar_one_or_none()
+    if control is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No hay una sesión de caja abierta",
+        )
+    response, _ = _verificar_cierre(db, control)
+    return response
+
+
+@router.post(
+    "/cierres",
+    response_model=CierreCajaOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def cerrar_turno(
+    body: CierreCajaCreate,
+    request: Request,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_operador(usuario)
+    control = _sesion_abierta(db, usuario, bloquear=True)
+    verificacion, arqueo = _verificar_cierre(db, control)
+    if not verificacion.puede_cerrar:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=verificacion.alertas[0],
+        )
+    assert arqueo is not None
+
+    resumen = _resumen_sesion_arqueo(db, control)
+    movimientos = db.execute(
+        text("""
+            SELECT moneda_id,
+                   COUNT(*) FILTER (WHERE tipo = 'DEPOSITO') AS cantidad_depositos,
+                   COUNT(*) FILTER (WHERE tipo = 'RETIRO') AS cantidad_retiros,
+                   COUNT(*) FILTER (WHERE tipo = 'TRANSFERENCIA_SALIDA') AS cantidad_transferencias
+            FROM transaccion
+            WHERE control_caja_id = :control_caja_id
+              AND canal = 'VENTANILLA'
+            GROUP BY moneda_id
+        """),
+        {"control_caja_id": control.id},
+    ).all()
+    conteos = {
+        moneda_id: (int(depositos), int(retiros), int(transferencias))
+        for moneda_id, depositos, retiros, transferencias in movimientos
+    }
+    contados = {item.moneda_id: item for item in arqueo.monedas}
+
+    cierre = CierreCaja(
+        control_caja_id=control.id,
+        arqueo_id=arqueo.id,
+        usuario_id=usuario.id,
+        observacion=body.observacion,
+    )
+    db.add(cierre)
+    db.flush()
+    monedas_out = []
+    for resumen_moneda in resumen.monedas:
+        arqueo_moneda = contados[resumen_moneda.moneda.id]
+        cantidades = conteos.get(resumen_moneda.moneda.id, (0, 0, 0))
+        values = {
+            "cierre_id": cierre.id,
+            "moneda_id": resumen_moneda.moneda.id,
+            "monto_apertura": resumen_moneda.monto_apertura,
+            "total_depositos": resumen_moneda.total_depositos,
+            "cantidad_depositos": cantidades[0],
+            "total_retiros": resumen_moneda.total_retiros,
+            "cantidad_retiros": cantidades[1],
+            "cantidad_transferencias": cantidades[2],
+            "saldo_teorico": resumen_moneda.saldo_teorico,
+            "total_contado": arqueo_moneda.total_contado,
+            "diferencia": arqueo_moneda.diferencia,
+            "traspaso_boveda": arqueo_moneda.total_contado,
+        }
+        db.add(CierreCajaMoneda(**values))
+        monedas_out.append(
+            MonedaCierreCajaOut(
+                moneda=resumen_moneda.moneda,
+                monto_apertura=values["monto_apertura"],
+                total_depositos=values["total_depositos"],
+                cantidad_depositos=values["cantidad_depositos"],
+                total_retiros=values["total_retiros"],
+                cantidad_retiros=values["cantidad_retiros"],
+                cantidad_transferencias=values["cantidad_transferencias"],
+                saldo_teorico=values["saldo_teorico"],
+                total_contado=values["total_contado"],
+                diferencia=values["diferencia"],
+                traspaso_boveda=values["traspaso_boveda"],
+            )
+        )
+
+    fecha_cierre = datetime.now()
+    control.estado = "CERRADA"
+    control.fecha_cierre = fecha_cierre
+    control.monto_cierre = contados[
+        next(item.moneda.id for item in resumen.monedas if item.moneda.codigo_iso == "BOB")
+    ].total_contado
+    control.caja.estado = "CERRADA"
+    registrar_accion(
+        db,
+        accion="CIERRE",
+        modulo="CAJA",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Cierre de turno de caja {control.caja.nombre}",
+        request=request,
+    )
+    response = CierreCajaOut(
+        id=cierre.id,
+        fecha=cierre.fecha,
+        caja_nombre=control.caja.nombre,
+        cajero=UsuarioArqueoOut(id=usuario.id, nombre=usuario.nombre),
+        fecha_apertura=control.fecha_apertura,
+        fecha_cierre=fecha_cierre,
+        arqueo_id=arqueo.id,
+        observacion=body.observacion,
+        monedas=monedas_out,
+    )
+    db.commit()
+    return response
+
+
+@router.get("/cierres/{cierre_id}", response_model=CierreCajaOut)
+def obtener_cierre_turno(
+    cierre_id: int,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_operador(usuario)
+    cierre = db.execute(
+        select(CierreCaja)
+        .join(ControlCaja, CierreCaja.control_caja_id == ControlCaja.id)
+        .join(Caja, ControlCaja.caja_id == Caja.id)
+        .options(
+            joinedload(CierreCaja.control_caja).joinedload(ControlCaja.caja),
+            joinedload(CierreCaja.usuario),
+            selectinload(CierreCaja.monedas).joinedload(CierreCajaMoneda.moneda),
+        )
+        .where(
+            CierreCaja.id == cierre_id,
+            Caja.cooperativa_id == cooperativa_id,
+        )
+    ).unique().scalar_one_or_none()
+    if cierre is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cierre no encontrado",
+        )
+    return CierreCajaOut(
+        id=cierre.id,
+        fecha=cierre.fecha,
+        caja_nombre=cierre.control_caja.caja.nombre,
+        cajero=UsuarioArqueoOut(
+            id=cierre.usuario.id,
+            nombre=cierre.usuario.nombre,
+        ),
+        fecha_apertura=cierre.control_caja.fecha_apertura,
+        fecha_cierre=cierre.control_caja.fecha_cierre,
+        arqueo_id=cierre.arqueo_id,
+        observacion=cierre.observacion,
+        monedas=[
+            MonedaCierreCajaOut(
+                moneda=MonedaOut.model_validate(item.moneda),
+                monto_apertura=item.monto_apertura,
+                total_depositos=item.total_depositos,
+                cantidad_depositos=item.cantidad_depositos,
+                total_retiros=item.total_retiros,
+                cantidad_retiros=item.cantidad_retiros,
+                cantidad_transferencias=item.cantidad_transferencias,
+                saldo_teorico=item.saldo_teorico,
+                total_contado=item.total_contado,
+                diferencia=item.diferencia,
+                traspaso_boveda=item.traspaso_boveda,
+            )
+            for item in cierre.monedas
+        ],
+    )
+
+
 @router.post(
     "/depositos",
     response_model=DepositoVentanillaOut,
@@ -866,7 +1271,7 @@ def transferir_en_ventanilla(
     db: Session = Depends(get_db),
 ):
     cooperativa_id = _validar_operador(usuario)
-    control = _sesion_abierta(db, usuario)
+    control = _sesion_abierta(db, usuario, bloquear=True)
     if body.cuenta_origen_id == body.cuenta_destino_id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -390,6 +390,88 @@ class ArqueoCajaOut(BaseModel):
     monedas: list[MonedaArqueoOut]
 
 
+class RetiranteCreate(BaseModel):
+    tipo: Literal["TITULAR", "APODERADO"]
+    nombre: str | None = None
+    ci: str | None = None
+
+
+class RetiroVentanillaCreate(BaseModel):
+    cuenta_id: int = Field(..., ge=1)
+    monto: Decimal
+    retirante: RetiranteCreate
+
+
+class RetiranteOut(BaseModel):
+    tipo: Literal["TITULAR", "APODERADO"]
+    nombre: str
+    ci: str
+
+
+class RetiroVentanillaOut(BaseModel):
+    numero_operacion: int
+    fecha_hora: datetime
+    cuenta_numero: str
+    titular: TitularCajaOut
+    monto: Decimal
+    moneda: MonedaOut
+    saldo_actualizado: Decimal
+    saldo_minimo: Decimal
+    retirante: RetiranteOut
+    caja_nombre: str
+    efectivo_caja_restante: Decimal
+
+
+class MonedaCierreVerificacionOut(BaseModel):
+    moneda: MonedaOut
+    resultado: Literal["CUADRADO", "SOBRANTE", "FALTANTE"]
+    diferencia: Decimal
+
+
+class ArqueoCierreVerificacionOut(BaseModel):
+    id: int
+    fecha: datetime
+    requiere_supervisor: bool
+    supervisor: UsuarioArqueoOut | None
+    monedas: list[MonedaCierreVerificacionOut]
+
+
+class CierreVerificacionOut(BaseModel):
+    puede_cerrar: bool
+    alertas: list[str]
+    arqueo: ArqueoCierreVerificacionOut | None
+
+
+class CierreCajaCreate(BaseModel):
+    observacion: str | None = None
+
+
+class MonedaCierreCajaOut(BaseModel):
+    moneda: MonedaOut
+    monto_apertura: Decimal
+    total_depositos: Decimal
+    cantidad_depositos: int
+    total_retiros: Decimal
+    cantidad_retiros: int
+    cantidad_transferencias: int
+    saldo_teorico: Decimal
+    total_contado: Decimal
+    diferencia: Decimal
+    traspaso_boveda: Decimal
+
+
+class CierreCajaOut(BaseModel):
+    id: int
+    fecha: datetime
+    caja_nombre: str
+    cajero: UsuarioArqueoOut
+    fecha_apertura: datetime
+    fecha_cierre: datetime
+    arqueo_id: int
+    observacion: str | None
+    monedas: list[MonedaCierreCajaOut]
+
+
 class CuentaAhorroCreate(BaseModel):
     socio_id: int
     moneda_id: int
