@@ -35,8 +35,9 @@ ALTER TABLE usuario
 
 CREATE INDEX IF NOT EXISTS idx_usuario_cooperativa ON usuario(cooperativa_id);
 
+-- rol.nombre no tiene UNIQUE en bd.sql, por eso no se usa ON CONFLICT
 INSERT INTO rol (nombre, descripcion)
-VALUES ('SUPERADMIN', 'Super Administrador SaaS: gestiona cooperativas (tenants)')
-ON CONFLICT (nombre) DO NOTHING;
+SELECT 'SUPERADMIN', 'Super Administrador SaaS: gestiona cooperativas (tenants)'
+WHERE NOT EXISTS (SELECT 1 FROM rol WHERE nombre = 'SUPERADMIN');
 
 COMMIT;
