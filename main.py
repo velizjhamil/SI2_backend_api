@@ -1,6 +1,5 @@
 import logging
 import sys
-from mangum import Mangum
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -58,5 +57,3 @@ def root():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
-
-handler = Mangum(app)
