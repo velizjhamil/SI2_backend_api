@@ -213,6 +213,66 @@ class MonedaOut(BaseModel):
     simbolo: str
 
 
+class ProductoCreditoCreate(BaseModel):
+    codigo: str
+    nombre: str
+    descripcion: str | None = None
+    moneda_id: int
+    monto_min: Decimal
+    monto_max: Decimal
+    plazo_min_meses: int
+    plazo_max_meses: int
+    tasa_interes_anual: Decimal
+    tipo_amortizacion: str
+    dias_gracia_mora: int = 0
+    tasa_mora_anual: Decimal = Decimal("0.00")
+    relacion_cuota_ingreso_max: Decimal = Decimal("40.00")
+    requiere_garantia: bool = False
+
+
+class ProductoCreditoUpdate(BaseModel):
+    nombre: str | None = None
+    descripcion: str | None = None
+    moneda_id: int | None = None
+    monto_min: Decimal | None = None
+    monto_max: Decimal | None = None
+    plazo_min_meses: int | None = None
+    plazo_max_meses: int | None = None
+    tasa_interes_anual: Decimal | None = None
+    tipo_amortizacion: str | None = None
+    dias_gracia_mora: int | None = None
+    tasa_mora_anual: Decimal | None = None
+    relacion_cuota_ingreso_max: Decimal | None = None
+    requiere_garantia: bool | None = None
+
+
+class ProductoCreditoEstadoUpdate(BaseModel):
+    estado: str
+
+
+class ProductoCreditoOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: str | None
+    moneda: MonedaOut
+    monto_min: Decimal
+    monto_max: Decimal
+    plazo_min_meses: int
+    plazo_max_meses: int
+    tasa_interes_anual: Decimal
+    tipo_amortizacion: str
+    dias_gracia_mora: int
+    tasa_mora_anual: Decimal
+    relacion_cuota_ingreso_max: Decimal
+    requiere_garantia: bool
+    estado: str
+    fecha_creacion: datetime
+    fecha_actualizacion: datetime
+
+
 class CajaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

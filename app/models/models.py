@@ -242,6 +242,43 @@ class CuentaAhorro(Base):
     moneda: Mapped["Moneda"] = relationship()
 
 
+class ProductoCredito(Base):
+    __tablename__ = "producto_credito"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "codigo", name="uq_producto_credito_cooperativa_codigo"),
+        CheckConstraint("tipo_amortizacion IN ('FRANCES','ALEMAN')", name="chk_producto_credito_amortizacion"),
+        CheckConstraint("estado IN ('ACTIVO','INACTIVO')", name="chk_producto_credito_estado"),
+        CheckConstraint("monto_min > 0 AND monto_min <= monto_max", name="chk_producto_credito_montos"),
+        CheckConstraint("plazo_min_meses > 0 AND plazo_min_meses <= plazo_max_meses", name="chk_producto_credito_plazos"),
+        CheckConstraint("tasa_interes_anual >= 0 AND tasa_interes_anual <= 100", name="chk_producto_credito_tasa"),
+        CheckConstraint("tasa_mora_anual >= 0 AND tasa_mora_anual <= 100", name="chk_producto_credito_tasa_mora"),
+        CheckConstraint("relacion_cuota_ingreso_max > 0 AND relacion_cuota_ingreso_max <= 100", name="chk_producto_credito_ratio"),
+        CheckConstraint("dias_gracia_mora >= 0", name="chk_producto_credito_gracia"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    codigo: Mapped[str] = mapped_column(String(20), nullable=False)
+    nombre: Mapped[str] = mapped_column(String(100), nullable=False)
+    descripcion: Mapped[str | None] = mapped_column(Text)
+    moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
+    monto_min = mapped_column(Numeric(14, 2), nullable=False)
+    monto_max = mapped_column(Numeric(14, 2), nullable=False)
+    plazo_min_meses: Mapped[int] = mapped_column(Integer, nullable=False)
+    plazo_max_meses: Mapped[int] = mapped_column(Integer, nullable=False)
+    tasa_interes_anual = mapped_column(Numeric(5, 2), nullable=False)
+    tipo_amortizacion: Mapped[str] = mapped_column(String(10), nullable=False)
+    dias_gracia_mora: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tasa_mora_anual = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
+    relacion_cuota_ingreso_max = mapped_column(Numeric(5, 2), nullable=False, default=40, server_default="40.00")
+    requiere_garantia: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVO", server_default="ACTIVO")
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_actualizacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    moneda: Mapped["Moneda"] = relationship()
+
+
 class Caja(Base):
     __tablename__ = "caja"
 
