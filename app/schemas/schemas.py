@@ -273,6 +273,143 @@ class ProductoCreditoOut(BaseModel):
     fecha_actualizacion: datetime
 
 
+class SocioResumen(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+    estado: str
+
+
+class ProductoResumen(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    tipo_amortizacion: str
+    relacion_cuota_ingreso_max: Decimal
+
+
+class EvaluacionCreditoCreate(BaseModel):
+    ingreso_mensual: Decimal
+    egreso_mensual: Decimal
+    cuota_deudas_mensual: Decimal
+    actividad_economica: str
+    fuente_ingresos: str
+    antiguedad_laboral_meses: int
+    calificacion_asfi: str
+    coordenadas: str | None = None
+    observaciones: str | None = None
+
+
+class EvaluacionCreditoUpdate(BaseModel):
+    ingreso_mensual: Decimal | None = None
+    egreso_mensual: Decimal | None = None
+    cuota_deudas_mensual: Decimal | None = None
+    actividad_economica: str | None = None
+    fuente_ingresos: str | None = None
+    antiguedad_laboral_meses: int | None = None
+    calificacion_asfi: str | None = None
+    coordenadas: str | None = None
+    observaciones: str | None = None
+
+
+class EvaluacionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ingreso_mensual: Decimal
+    egreso_mensual: Decimal
+    cuota_deudas_mensual: Decimal
+    capacidad_pago: Decimal
+    actividad_economica: str | None
+    fuente_ingresos: str | None
+    antiguedad_laboral_meses: int | None
+    calificacion_asfi: str | None
+    coordenadas: str | None
+    observaciones: str | None
+    fecha: date
+
+
+class SolicitudCreditoCreate(BaseModel):
+    socio_id: int
+    producto_id: int
+    monto: Decimal
+    plazo_meses: int
+    destino: str
+    destino_detalle: str | None = None
+    observaciones: str | None = None
+    evaluacion: EvaluacionCreditoCreate
+
+
+class SolicitudCreditoUpdate(BaseModel):
+    producto_id: int | None = None
+    monto: Decimal | None = None
+    plazo_meses: int | None = None
+    destino: str | None = None
+    destino_detalle: str | None = None
+    observaciones: str | None = None
+    evaluacion: EvaluacionCreditoUpdate | None = None
+
+
+class SolicitudAnulacionIn(BaseModel):
+    motivo: str
+
+
+class OficialResumen(BaseModel):
+    id: int
+    nombre: str
+
+
+class SolicitudOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    numero_solicitud: str | None
+    fecha_solicitud: datetime
+    fecha_actualizacion: datetime
+    estado: str | None
+    socio: SocioResumen
+    producto: ProductoResumen | None
+    moneda: MonedaOut | None
+    monto: Decimal
+    plazo_meses: int
+    tasa_interes: Decimal
+    destino: str | None
+    destino_detalle: str | None
+    observaciones: str | None
+    motivo_anulacion: str | None
+    tiene_deudas: bool | None
+    cuota_estimada: Decimal | None
+    relacion_cuota_ingreso: Decimal | None
+    supera_relacion_maxima: bool | None
+    evaluacion: EvaluacionOut | None
+    oficial: OficialResumen
+
+
+class SolicitudSimulacionIn(BaseModel):
+    producto_id: int
+    monto: Decimal
+    plazo_meses: int
+    ingreso_mensual: Decimal | None = None
+    egreso_mensual: Decimal | None = None
+    cuota_deudas_mensual: Decimal | None = None
+
+
+class SolicitudSimulacionOut(BaseModel):
+    producto: ProductoResumen
+    moneda: MonedaOut
+    monto: Decimal
+    plazo_meses: int
+    tasa_interes: Decimal
+    cuota_estimada: Decimal
+    total_intereses_estimado: Decimal
+    capacidad_pago: Decimal | None
+    relacion_cuota_ingreso: Decimal | None
+    relacion_maxima: Decimal
+    supera_relacion_maxima: bool | None
+    dentro_de_rangos: bool
+    errores: list[str]
+
+
 class CajaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

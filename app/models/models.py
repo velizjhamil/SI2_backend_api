@@ -279,6 +279,65 @@ class ProductoCredito(Base):
     moneda: Mapped["Moneda"] = relationship()
 
 
+class EvaluacionCampo(Base):
+    __tablename__ = "evaluacion_campo"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ingreso_mensual = mapped_column(Numeric(12, 2), nullable=False)
+    egreso_mensual = mapped_column(Numeric(12, 2), nullable=False)
+    capacidad_pago = mapped_column(Numeric(12, 2), nullable=False)
+    fotografias_respaldo: Mapped[str | None] = mapped_column(Text)
+    coordenadas: Mapped[str | None] = mapped_column(String(100))
+    fecha = mapped_column(Date, nullable=False, server_default=func.current_date())
+    resumen_cualitativo_ia: Mapped[str | None] = mapped_column(Text)
+    usuario_id: Mapped[int] = mapped_column(Integer, ForeignKey("usuario.id"), nullable=False)
+    socio_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("socio.id"))
+    cuota_deudas_mensual = mapped_column(Numeric(12, 2), nullable=False, default=0, server_default="0")
+    actividad_economica: Mapped[str | None] = mapped_column(String(150))
+    fuente_ingresos: Mapped[str | None] = mapped_column(String(20))
+    antiguedad_laboral_meses: Mapped[int | None] = mapped_column(Integer)
+    calificacion_asfi: Mapped[str | None] = mapped_column(String(1))
+    observaciones: Mapped[str | None] = mapped_column(Text)
+
+    socio: Mapped["Socio | None"] = relationship()
+    usuario: Mapped["Usuario"] = relationship()
+
+
+class SolicitudCredito(Base):
+    __tablename__ = "solicitud_credito"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "numero_solicitud", name="uq_solicitud_credito_coop_numero"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto = mapped_column(Numeric(12, 2), nullable=False)
+    plazo_meses: Mapped[int] = mapped_column(Integer, nullable=False)
+    tasa_interes = mapped_column(Numeric(5, 2), nullable=False)
+    calificacion_asfi: Mapped[str | None] = mapped_column(String(10))
+    tiene_deudas: Mapped[bool | None] = mapped_column(Boolean, default=False, server_default="false")
+    estado: Mapped[str | None] = mapped_column(String(20), default="PENDIENTE", server_default="PENDIENTE")
+    socio_id: Mapped[int] = mapped_column(Integer, ForeignKey("socio.id"), nullable=False)
+    usuario_id: Mapped[int] = mapped_column(Integer, ForeignKey("usuario.id"), nullable=False)
+    evaluacion_campo_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("evaluacion_campo.id"))
+    producto_credito_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("producto_credito.id"))
+    numero_solicitud: Mapped[str | None] = mapped_column(String(20))
+    destino: Mapped[str | None] = mapped_column(String(20))
+    destino_detalle: Mapped[str | None] = mapped_column(Text)
+    observaciones: Mapped[str | None] = mapped_column(Text)
+    motivo_anulacion: Mapped[str | None] = mapped_column(Text)
+    fecha_solicitud = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_actualizacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    moneda_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("moneda.id"))
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+
+    socio: Mapped["Socio"] = relationship()
+    producto: Mapped["ProductoCredito | None"] = relationship()
+    moneda: Mapped["Moneda | None"] = relationship()
+    evaluacion: Mapped["EvaluacionCampo | None"] = relationship()
+    oficial: Mapped["Usuario"] = relationship()
+    cooperativa: Mapped["Cooperativa | None"] = relationship()
+
+
 class Caja(Base):
     __tablename__ = "caja"
 
