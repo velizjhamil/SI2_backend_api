@@ -14,7 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.postgresql import TIMESTAMP, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -336,6 +336,51 @@ class SolicitudCredito(Base):
     evaluacion: Mapped["EvaluacionCampo | None"] = relationship()
     oficial: Mapped["Usuario"] = relationship()
     cooperativa: Mapped["Cooperativa | None"] = relationship()
+    evaluaciones_crediticias: Mapped[list["EvaluacionCrediticia"]] = relationship(
+        back_populates="solicitud", order_by="EvaluacionCrediticia.fecha.desc()"
+    )
+
+
+class EvaluacionCrediticia(Base):
+    __tablename__ = "evaluacion_crediticia"
+    __table_args__ = (
+        CheckConstraint("score BETWEEN 0 AND 1000", name="ck_evaluacion_crediticia_score"),
+        CheckConstraint(
+            "dictamen IN ('APROBADO', 'RECHAZADO', 'REVISION_MANUAL')",
+            name="ck_evaluacion_crediticia_dictamen",
+        ),
+        CheckConstraint(
+            "resolucion IS NULL OR resolucion IN ('APROBADO', 'RECHAZADO')",
+            name="ck_evaluacion_crediticia_resolucion",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    solicitud_credito_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("solicitud_credito.id"), nullable=False
+    )
+    cooperativa_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id"), nullable=False
+    )
+    version_modelo: Mapped[str] = mapped_column(String(20), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    dictamen: Mapped[str] = mapped_column(String(20), nullable=False)
+    factores = mapped_column(JSONB, nullable=False)
+    knockouts = mapped_column(JSONB, nullable=False)
+    explicacion: Mapped[str] = mapped_column(Text, nullable=False)
+    cuota_estimada = mapped_column(Numeric(14, 2))
+    relacion_cuota_ingreso = mapped_column(Numeric(7, 2))
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    resolucion: Mapped[str | None] = mapped_column(String(20))
+    resolucion_justificacion: Mapped[str | None] = mapped_column(Text)
+    resolucion_usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    resolucion_fecha = mapped_column(TIMESTAMP(timezone=True))
+
+    solicitud: Mapped["SolicitudCredito"] = relationship(back_populates="evaluaciones_crediticias")
+    cooperativa: Mapped["Cooperativa"] = relationship()
+    usuario: Mapped["Usuario"] = relationship(foreign_keys=[usuario_id])
+    resolucion_usuario: Mapped["Usuario | None"] = relationship(foreign_keys=[resolucion_usuario_id])
 
 
 class Caja(Base):

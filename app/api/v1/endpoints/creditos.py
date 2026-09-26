@@ -5,15 +5,18 @@ from decimal import Decimal, ROUND_HALF_UP, localcontext
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import Date, cast, func, or_, select
+from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.api.v1.deps import get_current_user, get_db, require_admin
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
+from app.services.scoring import score_application
 from app.models.models import (
+    CuentaAhorro,
     EvaluacionCampo,
+    EvaluacionCrediticia,
     Moneda,
     ProductoCredito,
     Socio,
@@ -34,6 +37,8 @@ from app.schemas.schemas import (
     SolicitudCreditoUpdate,
     SolicitudOut,
     SocioResumen,
+    EvaluacionCrediticiaOut,
+    ResolucionSolicitudIn,
 )
 
 router = APIRouter()
@@ -52,6 +57,7 @@ DESTINOS_SOLICITUD = {
 FUENTES_INGRESOS = {"DEPENDIENTE", "INDEPENDIENTE", "MIXTO"}
 CALIFICACIONES_ASFI = {"A", "B", "C", "D", "E", "F"}
 ROLES_ESCRITURA_SOLICITUD = {"ADMINISTRADOR", "OFICIAL_CREDITO"}
+ROLES_EVALUACION_CREDITICIA = {"ADMINISTRADOR", "OFICIAL_CREDITO"}
 ESTADOS_SOLICITUD = {
     "PENDIENTE",
     "OBSERVADA",
@@ -85,6 +91,14 @@ def _validar_admin_cooperativa(usuario: Usuario) -> int:
         raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
     if usuario.rol is None or usuario.rol.nombre != "ADMINISTRADOR":
         raise HTTPException(status_code=403, detail="Operación reservada a administradores de la cooperativa")
+    return usuario.cooperativa_id
+
+
+def _validar_evaluador_crediticio(usuario: Usuario) -> int:
+    if usuario.cooperativa_id is None:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    if usuario.rol is None or usuario.rol.nombre not in ROLES_EVALUACION_CREDITICIA:
+        raise HTTPException(status_code=403, detail="Operación reservada a oficiales de crédito y administradores")
     return usuario.cooperativa_id
 
 
@@ -201,6 +215,7 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
         if evaluacion is not None and evaluacion.ingreso_mensual > 0:
             relacion = _a_centavos(cuota / evaluacion.ingreso_mensual * Decimal("100"))
             supera = relacion > producto.relacion_cuota_ingreso_max
+    latest_evaluation = next(iter(solicitud.evaluaciones_crediticias), None)
     return {
         "id": solicitud.id,
         "numero_solicitud": solicitud.numero_solicitud,
@@ -247,6 +262,12 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
             "fecha": evaluacion.fecha,
         },
         "oficial": {"id": solicitud.oficial.id, "nombre": solicitud.oficial.nombre},
+        "ultima_evaluacion": None if latest_evaluation is None else {
+            "id": latest_evaluation.id,
+            "score": latest_evaluation.score,
+            "dictamen": latest_evaluation.dictamen,
+            "fecha": latest_evaluation.fecha,
+        },
     }
 
 
@@ -503,6 +524,200 @@ def _obtener_solicitud(db: Session, cooperativa_id: int, solicitud_id: int) -> S
     if solicitud is None:
         raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
     return solicitud
+
+
+def _evaluacion_crediticia_out(evaluacion: EvaluacionCrediticia) -> dict:
+    resolucion = None
+    if evaluacion.resolucion is not None:
+        resolucion = {
+            "decision": evaluacion.resolucion,
+            "justificacion": evaluacion.resolucion_justificacion,
+            "fecha": evaluacion.resolucion_fecha,
+            "usuario": {
+                "id": evaluacion.resolucion_usuario.id,
+                "nombre": evaluacion.resolucion_usuario.nombre,
+            },
+        }
+    return {
+        "id": evaluacion.id,
+        "solicitud_id": evaluacion.solicitud_credito_id,
+        "version_modelo": evaluacion.version_modelo,
+        "score": evaluacion.score,
+        "dictamen": evaluacion.dictamen,
+        "factores": evaluacion.factores,
+        "knockouts": evaluacion.knockouts,
+        "explicacion": evaluacion.explicacion,
+        "cuota_estimada": evaluacion.cuota_estimada,
+        "relacion_cuota_ingreso": evaluacion.relacion_cuota_ingreso,
+        "fecha": evaluacion.fecha,
+        "usuario": {"id": evaluacion.usuario.id, "nombre": evaluacion.usuario.nombre},
+        "resolucion": resolucion,
+    }
+
+
+@router.post(
+    "/solicitudes/{solicitud_id}/evaluacion",
+    response_model=EvaluacionCrediticiaOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def evaluar_solicitud_credito(
+    solicitud_id: int,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    if solicitud.estado not in {"PENDIENTE", "OBSERVADA", "EN_EVALUACION"}:
+        raise HTTPException(status_code=409, detail="La solicitud no está disponible para evaluación")
+    if solicitud.producto is None:
+        raise HTTPException(status_code=409, detail="La solicitud no tiene producto crediticio")
+
+    historial = db.execute(
+        text(
+            """
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM credito c
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      AND previa.id <> :solicitud_id
+                ) AS tiene_credito_previo,
+                EXISTS (
+                    SELECT 1
+                    FROM morosidad m
+                    JOIN credito c ON c.id = m.credito_id
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      AND previa.id <> :solicitud_id
+                      AND m.estado = 'EN_MORA'
+                ) AS tiene_mora_vigente
+            """
+        ),
+        {"socio_id": solicitud.socio_id, "solicitud_id": solicitud.id},
+    ).mappings().one()
+    ahorros = db.execute(
+        select(CuentaAhorro).where(
+            CuentaAhorro.socio_id == solicitud.socio_id,
+            CuentaAhorro.moneda_id == solicitud.moneda_id,
+            CuentaAhorro.estado == "ACTIVA",
+        )
+    ).scalars().all()
+    resultado = score_application(
+        solicitud,
+        savings_accounts=ahorros,
+        has_credit_history=historial["tiene_credito_previo"],
+        has_current_arrears=historial["tiene_mora_vigente"],
+    )
+    evaluacion = EvaluacionCrediticia(
+        solicitud_credito_id=solicitud.id,
+        cooperativa_id=cooperativa_id,
+        version_modelo=resultado["version_modelo"],
+        score=resultado["score"],
+        dictamen=resultado["dictamen"],
+        factores=resultado["factores"],
+        knockouts=resultado["knockouts"],
+        explicacion=resultado["explicacion"],
+        cuota_estimada=resultado["cuota_estimada"],
+        relacion_cuota_ingreso=resultado["relacion_cuota_ingreso"],
+        usuario_id=usuario.id,
+    )
+    solicitud.estado = (
+        "EN_EVALUACION" if resultado["dictamen"] == "REVISION_MANUAL" else resultado["dictamen"]
+    )
+    solicitud.fecha_actualizacion = func.now()
+    db.add(evaluacion)
+    registrar_accion(
+        db,
+        accion="EVALUAR_SOLICITUD",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Evaluación crediticia registrada para solicitud: {solicitud.id}",
+        request=request,
+    )
+    db.commit()
+    db.refresh(evaluacion)
+    return _evaluacion_crediticia_out(evaluacion)
+
+
+@router.get(
+    "/solicitudes/{solicitud_id}/evaluaciones",
+    response_model=list[EvaluacionCrediticiaOut],
+)
+def listar_evaluaciones_crediticias(
+    solicitud_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    evaluaciones = db.execute(
+        select(EvaluacionCrediticia)
+        .options(
+            joinedload(EvaluacionCrediticia.usuario),
+            joinedload(EvaluacionCrediticia.resolucion_usuario),
+        )
+        .where(
+            EvaluacionCrediticia.solicitud_credito_id == solicitud.id,
+            EvaluacionCrediticia.cooperativa_id == cooperativa_id,
+        )
+        .order_by(EvaluacionCrediticia.fecha.desc(), EvaluacionCrediticia.id.desc())
+    ).scalars().all()
+    return [_evaluacion_crediticia_out(item) for item in evaluaciones]
+
+
+@router.post(
+    "/solicitudes/{solicitud_id}/resolucion",
+    response_model=EvaluacionCrediticiaOut,
+)
+def resolver_solicitud_crediticia(
+    solicitud_id: int,
+    body: ResolucionSolicitudIn,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_admin_cooperativa(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    ultima_evaluacion = db.execute(
+        select(EvaluacionCrediticia)
+        .options(
+            joinedload(EvaluacionCrediticia.usuario),
+            joinedload(EvaluacionCrediticia.resolucion_usuario),
+        )
+        .where(
+            EvaluacionCrediticia.solicitud_credito_id == solicitud.id,
+            EvaluacionCrediticia.cooperativa_id == cooperativa_id,
+        )
+        .order_by(EvaluacionCrediticia.fecha.desc(), EvaluacionCrediticia.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if solicitud.estado != "EN_EVALUACION" or ultima_evaluacion is None or ultima_evaluacion.dictamen != "REVISION_MANUAL":
+        raise HTTPException(status_code=409, detail="La solicitud no tiene una evaluación pendiente de resolución")
+    justificacion = body.justificacion.strip()
+    if len(justificacion) < 10:
+        raise HTTPException(status_code=400, detail="La justificación debe tener al menos 10 caracteres")
+
+    ultima_evaluacion.resolucion = body.decision
+    ultima_evaluacion.resolucion_justificacion = justificacion
+    ultima_evaluacion.resolucion_usuario_id = usuario.id
+    ultima_evaluacion.resolucion_fecha = func.now()
+    solicitud.estado = body.decision
+    solicitud.fecha_actualizacion = func.now()
+    registrar_accion(
+        db,
+        accion="RESOLVER_SOLICITUD",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Solicitud de crédito resuelta: {solicitud.id} ({body.decision})",
+        request=request,
+    )
+    db.commit()
+    db.refresh(ultima_evaluacion)
+    return _evaluacion_crediticia_out(ultima_evaluacion)
 
 
 @router.get("/solicitudes", response_model=list[SolicitudOut])

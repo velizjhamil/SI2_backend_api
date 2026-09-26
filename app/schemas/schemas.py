@@ -359,6 +359,61 @@ class OficialResumen(BaseModel):
     nombre: str
 
 
+class FactorOut(BaseModel):
+    codigo: str
+    descripcion: str
+    puntos: int
+    maximo: int
+    valor: str
+    motivo: str
+
+
+class KnockoutOut(BaseModel):
+    codigo: str
+    descripcion: str
+    efecto: Literal["RECHAZADO", "REVISION_MANUAL"]
+
+
+class UsuarioEvaluacionOut(BaseModel):
+    id: int
+    nombre: str
+
+
+class ResolucionEvaluacionOut(BaseModel):
+    decision: Literal["APROBADO", "RECHAZADO"]
+    justificacion: str
+    fecha: datetime
+    usuario: UsuarioEvaluacionOut
+
+
+class ResolucionSolicitudIn(BaseModel):
+    decision: Literal["APROBADO", "RECHAZADO"]
+    justificacion: str
+
+
+class EvaluacionCrediticiaOut(BaseModel):
+    id: int
+    solicitud_id: int
+    version_modelo: str
+    score: int
+    dictamen: Literal["APROBADO", "RECHAZADO", "REVISION_MANUAL"]
+    factores: list[FactorOut]
+    knockouts: list[KnockoutOut]
+    explicacion: str
+    cuota_estimada: Decimal | None
+    relacion_cuota_ingreso: Decimal | None
+    fecha: datetime
+    usuario: UsuarioEvaluacionOut
+    resolucion: ResolucionEvaluacionOut | None
+
+
+class UltimaEvaluacionOut(BaseModel):
+    id: int
+    score: int
+    dictamen: Literal["APROBADO", "RECHAZADO", "REVISION_MANUAL"]
+    fecha: datetime
+
+
 class SolicitudOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -383,6 +438,7 @@ class SolicitudOut(BaseModel):
     supera_relacion_maxima: bool | None
     evaluacion: EvaluacionOut | None
     oficial: OficialResumen
+    ultima_evaluacion: UltimaEvaluacionOut | None = None
 
 
 class SolicitudSimulacionIn(BaseModel):
