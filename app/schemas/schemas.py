@@ -537,12 +537,78 @@ class CreditoOut(BaseModel):
     proxima_cuota: CuotaOut | None
     cuotas_pagadas: int
     cuotas_totales: int
+    estado_mora: Literal["AL_DIA", "EN_MORA"] | None = None
+    dias_de_retaso: int | None = None
 
 
 class CreditoDetalleOut(CreditoOut):
     cronograma: list[CuotaOut]
     transaccion_desembolso_id: int | None
     usuario: UsuarioDesembolsoOut | None
+
+
+class DeudaCuotaOut(BaseModel):
+    credito_id: int
+    numero_credito: str | None
+    cuota: CuotaOut
+    dias_atraso: int
+    dias_gracia: int
+    en_mora: bool
+    mora: Decimal
+    total_a_pagar: Decimal
+    moneda: MonedaOut | None
+
+
+class PagoCreditoOut(BaseModel):
+    id: int
+    numero_credito: str | None
+
+
+class PagoSocioOut(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+
+
+class PagoCuentaOut(BaseModel):
+    id: int
+    numero: str
+
+
+class PagoOut(BaseModel):
+    id: int
+    numero_recibo: str | None
+    fecha: datetime
+    modalidad: Literal["EFECTIVO", "CUENTA"] | None
+    credito: PagoCreditoOut
+    socio: PagoSocioOut
+    numero_cuota: int
+    capital: Decimal
+    interes: Decimal
+    mora: Decimal
+    total: Decimal
+    dias_atraso: int
+    moneda: MonedaOut | None
+    saldo_pendiente_credito: Decimal
+    credito_estado: str
+    cuenta: PagoCuentaOut | None
+    caja_nombre: str | None
+    usuario: UsuarioDesembolsoOut | None
+    declaracion_uif_id: int | None
+
+
+class MoraCreditoOut(BaseModel):
+    credito_id: int
+    numero_credito: str | None
+    socio: PagoSocioOut
+    estado_mora: Literal["AL_DIA", "EN_MORA"]
+    dias_de_retaso: int
+    monto_penalizado: Decimal
+    cuotas_vencidas: int
+    monto_vencido: Decimal
+    saldo_pendiente: Decimal
+    moneda: MonedaOut | None
+    fecha_actualizacion: datetime | None
 
 
 class CajaOut(BaseModel):
@@ -595,6 +661,12 @@ class DeclaracionUifIn(BaseModel):
     tercero_ci: str | None = Field(None, max_length=20)
     tercero_parentesco: str | None = Field(None, max_length=50)
     declara_bajo_juramento: bool = False
+
+
+class PagoCuotaIn(BaseModel):
+    modalidad: Literal["EFECTIVO", "CUENTA"]
+    cuenta_ahorro_id: int | None = Field(None, ge=1)
+    declaracion_uif: DeclaracionUifIn | None = None
 
 
 class DesembolsoCreditoIn(BaseModel):

@@ -430,6 +430,8 @@ class Credito(Base):
     cronograma: Mapped[list["TablaAmortizacion"]] = relationship(
         back_populates="credito", order_by="TablaAmortizacion.numero_cuota"
     )
+    mora: Mapped["Morosidad | None"] = relationship(back_populates="credito")
+    pagos: Mapped[list["PagoCuota"]] = relationship(back_populates="credito")
 
 
 class TablaAmortizacion(Base):
@@ -446,8 +448,67 @@ class TablaAmortizacion(Base):
     saldo_inicial = mapped_column(Numeric(14, 2))
     saldo_final = mapped_column(Numeric(14, 2))
     monto_pagado = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0.00")
+    fecha_pago = mapped_column(TIMESTAMP(timezone=True))
 
     credito: Mapped["Credito"] = relationship(back_populates="cronograma")
+    pagos: Mapped[list["PagoCuota"]] = relationship(
+        back_populates="cuota", order_by="PagoCuota.id"
+    )
+
+
+class PagoCuota(Base):
+    __tablename__ = "pago_cuota"
+    __table_args__ = (
+        UniqueConstraint(
+            "cooperativa_id", "numero_recibo",
+            name="uq_pago_cuota_cooperativa_recibo",
+        ),
+        CheckConstraint(
+            "modalidad IS NULL OR modalidad IN ('EFECTIVO', 'CUENTA')",
+            name="ck_pago_cuota_modalidad",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto_capital = mapped_column(Numeric(12, 2), nullable=False)
+    monto_interes_pagado = mapped_column(Numeric(12, 2), nullable=False)
+    monto_mora = mapped_column(Numeric(12, 2), default=0, server_default="0.00")
+    fecha = mapped_column(TIMESTAMP(timezone=False), server_default=func.now())
+    tabla_amortizacion_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("tabla_amortizacion.id"), nullable=False
+    )
+    credito_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("credito.id"))
+    cooperativa_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id")
+    )
+    numero_recibo: Mapped[str | None] = mapped_column(String(20))
+    modalidad: Mapped[str | None] = mapped_column(String(10))
+    monto_total = mapped_column(Numeric(14, 2))
+    dias_atraso: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # The transaction table is SQL-only in this project; the FK is installed by migration 018.
+    transaccion_id: Mapped[int | None] = mapped_column(Integer)
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+
+    cuota: Mapped["TablaAmortizacion"] = relationship(back_populates="pagos")
+    credito: Mapped["Credito | None"] = relationship(back_populates="pagos")
+    cooperativa: Mapped["Cooperativa | None"] = relationship()
+    usuario: Mapped["Usuario | None"] = relationship()
+
+
+class Morosidad(Base):
+    __tablename__ = "morosidad"
+    __table_args__ = (
+        UniqueConstraint("credito_id", name="uq_morosidad_credito"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dias_de_retaso: Mapped[int] = mapped_column(Integer, nullable=False)
+    monto_penalizado = mapped_column(Numeric(12, 2), default=0, server_default="0.00")
+    estado: Mapped[str | None] = mapped_column(String(20), default="EN_MORA", server_default="EN_MORA")
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    fecha_actualizacion = mapped_column(TIMESTAMP(timezone=True), server_default=func.now())
+
+    credito: Mapped["Credito"] = relationship(back_populates="mora")
 
 
 class Caja(Base):

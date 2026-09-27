@@ -65,7 +65,7 @@ def requiere_declaracion(
               )
               AND t.moneda_id = :moneda_id
               AND t.canal = 'VENTANILLA'
-              AND t.tipo IN ('DEPOSITO', 'RETIRO')
+              AND t.tipo IN ('DEPOSITO', 'RETIRO', 'PAGO_CUOTA')
               AND t.fecha_hora::date = CURRENT_DATE
         """),
         {"socio_id": socio_id, "moneda_id": moneda_id},

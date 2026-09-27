@@ -2,7 +2,7 @@
 
 import re
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import date
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import Date, cast, func, or_, select, text
@@ -10,9 +10,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_current_user, get_db, require_admin
-from app.api.v1.endpoints.ahorros import _siguiente_secuencia
+from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.services.amortizacion import calcular_cuota_inicial, generar_plan_pagos
+from app.services.cobro_cuotas import calcular_mora, resumir_morosidad
 from app.services.scoring import score_application
 from app.models.models import (
     Credito,
@@ -21,6 +22,8 @@ from app.models.models import (
     EvaluacionCrediticia,
     Moneda,
     ProductoCredito,
+    PagoCuota,
+    Morosidad,
     Socio,
     SolicitudCredito,
     TablaAmortizacion,
@@ -47,6 +50,10 @@ from app.schemas.schemas import (
     CreditoDetalleOut,
     CreditoOut,
     DesembolsoCreditoIn,
+    DeudaCuotaOut,
+    PagoCuotaIn,
+    PagoOut,
+    MoraCreditoOut,
 )
 
 router = APIRouter()
@@ -1163,6 +1170,8 @@ def _credito_detalle_out(credito: Credito) -> dict:
         "proxima_cuota": None if pendiente is None else _cuota_credito_out(pendiente),
         "cuotas_pagadas": sum(row.estado_pago == "PAGADA" for row in cuotas),
         "cuotas_totales": len(cuotas),
+        "estado_mora": None if credito.mora is None else credito.mora.estado,
+        "dias_de_retaso": None if credito.mora is None else credito.mora.dias_de_retaso,
         "cronograma": [_cuota_credito_out(row) for row in cuotas],
         "transaccion_desembolso_id": credito.transaccion_desembolso_id,
         "usuario": None if credito.usuario is None else {
@@ -1179,7 +1188,7 @@ def _credito_lista_out(credito: Credito) -> dict:
         "monto_aprobado", "saldo_pendiente", "tasa_interes", "plazo_meses",
         "tipo_amortizacion", "fecha_desembolso", "modalidad_desembolso",
         "cuenta_desembolso", "solicitud", "proxima_cuota", "cuotas_pagadas",
-        "cuotas_totales",
+        "cuotas_totales", "estado_mora", "dias_de_retaso",
     )}
 
 
@@ -1244,6 +1253,469 @@ def obtener_credito(
     if credito is None:
         raise HTTPException(status_code=404, detail="Crédito no encontrado")
     return _credito_detalle_out(credito)
+
+
+@router.post("/mora/actualizar")
+def actualizar_mora_creditos(
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    creditos = db.execute(
+        select(Credito)
+        .options(
+            joinedload(Credito.socio), joinedload(Credito.producto),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            selectinload(Credito.cronograma),
+        )
+        .where(Credito.estado == "VIGENTE", _credito_cooperativa_filter(cooperativa_id))
+        .order_by(Credito.id)
+    ).unique().scalars().all()
+    fecha = date.today()
+    estados = []
+    for credito in creditos:
+        mora = _actualizar_morosidad_credito(db, credito, fecha)
+        estados.append(mora.estado)
+    registrar_accion(
+        db, accion="ACTUALIZAR_MORA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Actualización de mora para {len(creditos)} créditos vigentes",
+        request=request,
+    )
+    db.commit()
+    return {
+        "actualizados": len(creditos),
+        "en_mora": sum(estado == "EN_MORA" for estado in estados),
+        "al_dia": sum(estado == "AL_DIA" for estado in estados),
+        "fecha": fecha,
+    }
+
+
+@router.get("/mora", response_model=list[MoraCreditoOut])
+def listar_morosidad_creditos(
+    estado: str = Query(..., pattern="^(EN_MORA|AL_DIA)$"),
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    filas = db.execute(
+        select(Morosidad)
+        .join(Credito, Credito.id == Morosidad.credito_id)
+        .options(
+            joinedload(Morosidad.credito).joinedload(Credito.socio),
+            joinedload(Morosidad.credito).joinedload(Credito.moneda),
+            joinedload(Morosidad.credito).joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Morosidad.credito).joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+            joinedload(Morosidad.credito).joinedload(Credito.producto),
+            joinedload(Morosidad.credito).joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            joinedload(Morosidad.credito).selectinload(Credito.cronograma),
+        )
+        .where(Morosidad.estado == estado, _credito_cooperativa_filter(cooperativa_id))
+        .order_by(Morosidad.dias_de_retaso.desc(), Credito.id)
+    ).unique().scalars().all()
+    fecha = date.today()
+    resultado = []
+    for mora in filas:
+        credito = mora.credito
+        solicitud = credito.solicitud
+        socio = credito.socio or solicitud.socio
+        moneda = credito.moneda or solicitud.moneda
+        tasa_mora, dias_gracia = _configuracion_mora(credito)
+        resumen = resumir_morosidad(
+            cuotas=credito.cronograma, fecha=fecha,
+            tasa_mora_anual=tasa_mora, dias_gracia_mora=dias_gracia,
+        )
+        resultado.append({
+            "credito_id": credito.id,
+            "numero_credito": credito.numero_credito,
+            "socio": {
+                "id": socio.id,
+                "nombre_completo": f"{socio.nombre} {socio.apellido}",
+                "ci": socio.ci,
+            },
+            "estado_mora": mora.estado,
+            "dias_de_retaso": mora.dias_de_retaso,
+            "monto_penalizado": mora.monto_penalizado,
+            "cuotas_vencidas": resumen["cuotas_vencidas"],
+            "monto_vencido": resumen["monto_vencido"],
+            "saldo_pendiente": credito.saldo_pendiente,
+            "moneda": None if moneda is None else MonedaOut.model_validate(moneda),
+            "fecha_actualizacion": mora.fecha_actualizacion,
+        })
+    return resultado
+
+
+@router.get("/creditos/{credito_id}/deuda", response_model=DeudaCuotaOut)
+def obtener_deuda_cuota(
+    credito_id: int,
+    fecha: date | None = Query(None),
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    coop_id = _validar_lector(usuario)
+    credito = db.execute(
+        select(Credito)
+        .options(
+            joinedload(Credito.socio),
+            joinedload(Credito.producto),
+            joinedload(Credito.moneda),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+            selectinload(Credito.cronograma),
+        )
+        .where(Credito.id == credito_id, _credito_cooperativa_filter(coop_id))
+    ).unique().scalar_one_or_none()
+    if credito is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    if credito.estado != "VIGENTE":
+        raise HTTPException(status_code=409, detail="El crédito no está VIGENTE")
+
+    cuota = next(
+        (
+            row for row in sorted(credito.cronograma, key=lambda row: row.numero_cuota)
+            if (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+        ),
+        None,
+    )
+    if cuota is None:
+        raise HTTPException(status_code=409, detail="El crédito no tiene cuotas pendientes")
+
+    producto = credito.producto or credito.solicitud.producto
+    mora_datos = calcular_mora(
+        capital_cuota=cuota.monto_capital,
+        tasa_mora_anual=Decimal("0.00") if producto is None else producto.tasa_mora_anual,
+        fecha_vencimiento=cuota.fecha_vencimiento,
+        fecha_pago=fecha or date.today(),
+        dias_gracia_mora=0 if producto is None else producto.dias_gracia_mora,
+    )
+    mora = mora_datos["mora"]
+    return {
+        "credito_id": credito.id,
+        "numero_credito": credito.numero_credito,
+        "cuota": _cuota_credito_out(cuota),
+        "dias_atraso": mora_datos["dias_atraso"],
+        "dias_gracia": 0 if producto is None else producto.dias_gracia_mora,
+        "en_mora": mora_datos["en_mora"],
+        "mora": mora,
+        "total_a_pagar": cuota.monto_cuota_total + mora,
+        "moneda": None if credito.moneda is None else MonedaOut.model_validate(credito.moneda),
+    }
+
+
+def _configuracion_mora(credito: Credito) -> tuple[Decimal, int]:
+    producto = credito.producto or credito.solicitud.producto
+    if producto is None:
+        return Decimal("0.00"), 0
+    return producto.tasa_mora_anual, producto.dias_gracia_mora
+
+
+def _actualizar_morosidad_credito(db: Session, credito: Credito, fecha: date) -> Morosidad:
+    tasa_mora, dias_gracia = _configuracion_mora(credito)
+    resumen = resumir_morosidad(
+        cuotas=credito.cronograma,
+        fecha=fecha,
+        tasa_mora_anual=tasa_mora,
+        dias_gracia_mora=dias_gracia,
+    )
+    mora = db.execute(
+        select(Morosidad).where(Morosidad.credito_id == credito.id).with_for_update()
+    ).scalar_one_or_none()
+    if mora is None:
+        mora = Morosidad(credito_id=credito.id, dias_de_retaso=0)
+        db.add(mora)
+    mora.estado = resumen["estado"]
+    mora.dias_de_retaso = resumen["dias_de_retaso"]
+    mora.monto_penalizado = resumen["monto_penalizado"]
+    mora.fecha_actualizacion = func.now()
+    return mora
+
+
+def _pago_out(db: Session, pago: PagoCuota) -> dict:
+    credito = pago.credito or db.execute(
+        select(Credito)
+        .join(TablaAmortizacion, TablaAmortizacion.credito_id == Credito.id)
+        .where(TablaAmortizacion.id == pago.tabla_amortizacion_id)
+    ).scalar_one()
+    solicitud = credito.solicitud
+    socio = credito.socio or solicitud.socio
+    moneda = credito.moneda or solicitud.moneda
+    movimiento = db.execute(
+        text("""
+            SELECT t.cuenta_ahorro_id, t.declaracion_jurada_uif_id,
+                   c.nombre AS caja_nombre
+            FROM transaccion t
+            LEFT JOIN control_caja cc ON cc.id = t.control_caja_id
+            LEFT JOIN caja c ON c.id = cc.caja_id
+            WHERE t.id = COALESCE(
+                :transaccion_id,
+                (SELECT t2.id FROM transaccion t2 WHERE t2.pago_cuota_id = :pago_id
+                 ORDER BY t2.id DESC LIMIT 1)
+            )
+            LIMIT 1
+        """),
+        {"transaccion_id": pago.transaccion_id, "pago_id": pago.id},
+    ).mappings().first()
+    cuenta = None
+    if movimiento is not None and movimiento["cuenta_ahorro_id"] is not None:
+        cuenta_row = db.get(CuentaAhorro, movimiento["cuenta_ahorro_id"])
+        if cuenta_row is not None:
+            cuenta = {"id": cuenta_row.id, "numero": cuenta_row.numero}
+    total = pago.monto_total
+    if total is None:
+        total = pago.monto_capital + pago.monto_interes_pagado + (pago.monto_mora or Decimal("0.00"))
+    return {
+        "id": pago.id,
+        "numero_recibo": pago.numero_recibo,
+        "fecha": pago.fecha or datetime.now(),
+        "modalidad": pago.modalidad,
+        "credito": {"id": credito.id, "numero_credito": credito.numero_credito},
+        "socio": {
+            "id": socio.id,
+            "nombre_completo": f"{socio.nombre} {socio.apellido}",
+            "ci": socio.ci,
+        },
+        "numero_cuota": pago.cuota.numero_cuota,
+        "capital": pago.monto_capital,
+        "interes": pago.monto_interes_pagado,
+        "mora": pago.monto_mora or Decimal("0.00"),
+        "total": total,
+        "dias_atraso": pago.dias_atraso or 0,
+        "moneda": None if moneda is None else MonedaOut.model_validate(moneda),
+        "saldo_pendiente_credito": credito.saldo_pendiente,
+        "credito_estado": credito.estado or "VIGENTE",
+        "cuenta": cuenta,
+        "caja_nombre": None if movimiento is None else movimiento["caja_nombre"],
+        "usuario": None if pago.usuario is None else {
+            "id": pago.usuario.id,
+            "nombre": pago.usuario.nombre,
+        },
+        "declaracion_uif_id": None if movimiento is None else movimiento["declaracion_jurada_uif_id"],
+    }
+
+
+@router.post(
+    "/creditos/{credito_id}/pagos",
+    response_model=PagoOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def cobrar_cuota(
+    credito_id: int,
+    body: PagoCuotaIn,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if usuario.cooperativa_id is None:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    rol = usuario.rol.nombre if usuario.rol is not None else None
+    if body.modalidad == "EFECTIVO" and rol not in {"CAJERO", "OFICIAL_CREDITO", "ADMINISTRADOR"}:
+        raise HTTPException(status_code=403, detail="Operación reservada al personal de caja")
+    if body.modalidad == "CUENTA" and rol not in {"OFICIAL_CREDITO", "ADMINISTRADOR"}:
+        raise HTTPException(status_code=403, detail="Operación reservada a oficiales de crédito y administradores")
+
+    cooperativa_id = usuario.cooperativa_id
+    credito = db.execute(
+        select(Credito)
+        .options(
+            joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.moneda),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+            selectinload(Credito.cronograma),
+        )
+        .where(Credito.id == credito_id, _credito_cooperativa_filter(cooperativa_id))
+        .with_for_update(of=Credito)
+    ).unique().scalar_one_or_none()
+    if credito is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    if credito.estado != "VIGENTE":
+        raise HTTPException(status_code=409, detail="El crédito no está VIGENTE")
+    cuota = next(
+        (
+            row for row in sorted(credito.cronograma, key=lambda row: row.numero_cuota)
+            if (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+        ),
+        None,
+    )
+    if cuota is None:
+        raise HTTPException(status_code=409, detail="El crédito no tiene cuotas pendientes")
+
+    fecha_pago = date.today()
+    tasa_mora, dias_gracia = _configuracion_mora(credito)
+    mora_datos = calcular_mora(
+        capital_cuota=cuota.monto_capital,
+        tasa_mora_anual=tasa_mora,
+        fecha_vencimiento=cuota.fecha_vencimiento,
+        fecha_pago=fecha_pago,
+        dias_gracia_mora=dias_gracia,
+    )
+    mora = mora_datos["mora"]
+    total = cuota.monto_cuota_total + mora
+    cuenta = None
+    control = None
+    declaracion_id = None
+    fraccionada = False
+
+    if body.modalidad == "CUENTA":
+        if body.cuenta_ahorro_id is None:
+            raise HTTPException(status_code=400, detail="Debe indicar una cuenta de ahorro")
+        cuenta = db.execute(
+            select(CuentaAhorro)
+            .options(joinedload(CuentaAhorro.moneda))
+            .where(
+                CuentaAhorro.id == body.cuenta_ahorro_id,
+                CuentaAhorro.socio_id == (credito.socio_id or credito.solicitud.socio_id),
+                CuentaAhorro.estado == "ACTIVA",
+                CuentaAhorro.moneda_id == (credito.moneda_id or credito.solicitud.moneda_id),
+            )
+            .with_for_update(of=CuentaAhorro)
+        ).unique().scalar_one_or_none()
+        if cuenta is None:
+            raise HTTPException(status_code=400, detail="La cuenta debe estar activa y pertenecer al socio en la misma moneda")
+        saldo_minimo = MONTO_MINIMO_APERTURA[cuenta.tipo_producto]
+        if cuenta.saldo_disponible - total < saldo_minimo:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Saldo insuficiente: debe mantener un saldo mínimo de {saldo_minimo:.2f}",
+            )
+    else:
+        from app.api.v1.endpoints.caja import _sesion_abierta
+        from app.services.uif import exigir_declaracion_si_corresponde
+
+        control = _sesion_abierta(db, usuario, bloquear=True)
+        if control.caja.cooperativa_id != cooperativa_id:
+            raise HTTPException(status_code=400, detail="El usuario no tiene una sesión de caja abierta")
+        moneda = credito.moneda or credito.solicitud.moneda
+        fraccionada = exigir_declaracion_si_corresponde(
+            db, declaracion=body.declaracion_uif,
+            socio_id=credito.socio_id or credito.solicitud.socio_id,
+            moneda_id=moneda.id, moneda_iso=moneda.codigo_iso, monto=total,
+        )
+        if body.declaracion_uif is not None:
+            from app.services.uif import registrar_declaracion
+            declaracion_id = registrar_declaracion(
+                db, declaracion=body.declaracion_uif, tipo_operacion="PAGO_CUOTA",
+                monto=total, moneda_id=moneda.id,
+                socio_id=credito.socio_id or credito.solicitud.socio_id,
+                usuario_id=usuario.id, cooperativa_id=cooperativa_id,
+                fraccionada=fraccionada,
+            )
+
+    recibo = _siguiente_secuencia(db, cooperativa_id, "PAGO_CUOTA")
+    pago = PagoCuota(
+        monto_capital=cuota.monto_capital,
+        monto_interes_pagado=cuota.monto_interes,
+        monto_mora=mora,
+        tabla_amortizacion_id=cuota.id,
+        credito_id=credito.id,
+        cooperativa_id=cooperativa_id,
+        numero_recibo=f"REC-{recibo:06d}",
+        modalidad=body.modalidad,
+        monto_total=total,
+        dias_atraso=mora_datos["dias_atraso"],
+        usuario_id=usuario.id,
+    )
+    db.add(pago)
+    db.flush()
+
+    cuota.estado_pago = "PAGADA"
+    cuota.fecha_pago = func.now()
+    cuota.monto_pagado = total
+    credito.saldo_pendiente = max(credito.saldo_pendiente - cuota.monto_capital, Decimal("0.00"))
+    restantes = [
+        row for row in credito.cronograma
+        if row.id != cuota.id and (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+    ]
+    if not restantes:
+        credito.estado = "CANCELADO"
+
+    canal = "VENTANILLA" if body.modalidad == "EFECTIVO" else "WEB"
+    transaction_id = db.execute(
+        text("""
+            INSERT INTO transaccion (
+                tipo, monto, canal, control_caja_id, moneda_id, cuenta_ahorro_id,
+                pago_cuota_id, declaracion_jurada_uif_id, credito_id
+            ) VALUES (
+                'PAGO_CUOTA', :monto, :canal, :control_id, :moneda_id, :cuenta_id,
+                :pago_id, :declaracion_id, :credito_id
+            ) RETURNING id
+        """),
+        {
+            "monto": total, "canal": canal,
+            "control_id": None if control is None else control.id,
+            "moneda_id": (credito.moneda or credito.solicitud.moneda).id,
+            "cuenta_id": None if cuenta is None else cuenta.id,
+            "pago_id": pago.id, "declaracion_id": declaracion_id,
+            "credito_id": credito.id,
+        },
+    ).scalar_one()
+    pago.transaccion_id = transaction_id
+    if body.modalidad == "CUENTA":
+        cuenta.saldo_disponible -= total
+    else:
+        control.saldo_sistema += total
+    _actualizar_morosidad_credito(db, credito, fecha_pago)
+    registrar_accion(
+        db, accion="COBRAR_CUOTA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Cobro {pago.numero_recibo} de cuota {cuota.numero_cuota} del crédito {credito.numero_credito}",
+        request=request,
+    )
+    db.flush()
+    payload = _pago_out(db, pago)
+    db.commit()
+    return payload
+
+
+@router.get("/creditos/{credito_id}/pagos", response_model=list[PagoOut])
+def listar_pagos_credito(
+    credito_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    coop_id = _validar_lector(usuario)
+    credito = db.execute(
+        select(Credito).where(
+            Credito.id == credito_id, _credito_cooperativa_filter(coop_id)
+        )
+    ).scalar_one_or_none()
+    if credito is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    pagos = db.execute(
+        select(PagoCuota)
+        .join(TablaAmortizacion, PagoCuota.tabla_amortizacion_id == TablaAmortizacion.id)
+        .options(
+            joinedload(PagoCuota.cuota), joinedload(PagoCuota.credito),
+            joinedload(PagoCuota.usuario),
+        )
+        .where(or_(PagoCuota.credito_id == credito.id, TablaAmortizacion.credito_id == credito.id))
+        .order_by(PagoCuota.fecha, PagoCuota.id)
+    ).unique().scalars().all()
+    return [_pago_out(db, pago) for pago in pagos]
+
+
+@router.get("/pagos/{pago_id}", response_model=PagoOut)
+def obtener_pago(
+    pago_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    coop_id = _validar_lector(usuario)
+    pago = db.execute(
+        select(PagoCuota)
+        .join(TablaAmortizacion, PagoCuota.tabla_amortizacion_id == TablaAmortizacion.id)
+        .join(Credito, Credito.id == TablaAmortizacion.credito_id)
+        .options(
+            joinedload(PagoCuota.cuota), joinedload(PagoCuota.credito),
+            joinedload(PagoCuota.usuario),
+        )
+        .where(PagoCuota.id == pago_id, _credito_cooperativa_filter(coop_id))
+    ).unique().scalar_one_or_none()
+    if pago is None:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    return _pago_out(db, pago)
 
 
 @router.post(

@@ -138,13 +138,13 @@ def _resumen_sesion_arqueo(
     rows = db.execute(
         text("""
             SELECT moneda_id,
-                   COALESCE(SUM(CASE WHEN tipo = 'DEPOSITO' THEN monto ELSE 0 END), 0) AS depositos,
+                   COALESCE(SUM(CASE WHEN tipo IN ('DEPOSITO', 'PAGO_CUOTA') THEN monto ELSE 0 END), 0) AS depositos,
                    COALESCE(SUM(CASE WHEN tipo = 'RETIRO' THEN monto ELSE 0 END), 0) AS retiros,
                    COUNT(*) AS cantidad
             FROM transaccion
             WHERE control_caja_id = :control_caja_id
               AND canal = 'VENTANILLA'
-              AND tipo IN ('DEPOSITO', 'RETIRO')
+              AND tipo IN ('DEPOSITO', 'RETIRO', 'PAGO_CUOTA')
             GROUP BY moneda_id
         """),
         {"control_caja_id": control.id},
