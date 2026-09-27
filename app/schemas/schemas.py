@@ -466,6 +466,85 @@ class SolicitudSimulacionOut(BaseModel):
     errores: list[str]
 
 
+class CuotaOut(BaseModel):
+    numero: int
+    fecha_vencimiento: date
+    saldo_inicial: Decimal | None
+    capital: Decimal
+    interes: Decimal
+    cuota: Decimal
+    saldo_final: Decimal | None
+    estado_pago: str
+
+
+class PlanPagosOut(BaseModel):
+    tipo_amortizacion: str
+    monto: Decimal
+    tasa_interes: Decimal
+    plazo_meses: int
+    moneda: MonedaOut
+    fecha_desembolso: date
+    fecha_primer_vencimiento: date
+    cuotas: list[CuotaOut]
+    total_capital: Decimal
+    total_interes: Decimal
+    total_pagar: Decimal
+
+
+class CreditoSocioOut(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+
+
+class CreditoProductoOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+
+
+class CuentaDesembolsoOut(BaseModel):
+    id: int
+    numero: str
+
+
+class SolicitudCreditoResumenOut(BaseModel):
+    id: int
+    numero_solicitud: str | None
+
+
+class UsuarioDesembolsoOut(BaseModel):
+    id: int
+    nombre: str
+
+
+class CreditoOut(BaseModel):
+    id: int
+    numero_credito: str | None
+    estado: str
+    socio: CreditoSocioOut
+    producto: CreditoProductoOut | None
+    moneda: MonedaOut | None
+    monto_aprobado: Decimal
+    saldo_pendiente: Decimal
+    tasa_interes: Decimal | None
+    plazo_meses: int | None
+    tipo_amortizacion: str | None
+    fecha_desembolso: date | None
+    modalidad_desembolso: str | None
+    cuenta_desembolso: CuentaDesembolsoOut | None
+    solicitud: SolicitudCreditoResumenOut
+    proxima_cuota: CuotaOut | None
+    cuotas_pagadas: int
+    cuotas_totales: int
+
+
+class CreditoDetalleOut(CreditoOut):
+    cronograma: list[CuotaOut]
+    transaccion_desembolso_id: int | None
+    usuario: UsuarioDesembolsoOut | None
+
+
 class CajaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -516,6 +595,13 @@ class DeclaracionUifIn(BaseModel):
     tercero_ci: str | None = Field(None, max_length=20)
     tercero_parentesco: str | None = Field(None, max_length=50)
     declara_bajo_juramento: bool = False
+
+
+class DesembolsoCreditoIn(BaseModel):
+    modalidad: Literal["CUENTA", "EFECTIVO"]
+    cuenta_ahorro_id: int | None = Field(None, ge=1)
+    fecha_primer_vencimiento: date | None = None
+    declaracion_uif: DeclaracionUifIn | None = None
 
 
 class DepositoVentanillaCreate(BaseModel):

@@ -53,8 +53,16 @@ def requiere_declaracion(
         text("""
             SELECT COALESCE(SUM(t.monto), 0)
             FROM transaccion t
-            JOIN cuenta_ahorro ca ON ca.id = t.cuenta_ahorro_id
-            WHERE ca.socio_id = :socio_id
+            WHERE (
+                  EXISTS (
+                      SELECT 1 FROM cuenta_ahorro ca
+                      WHERE ca.id = t.cuenta_ahorro_id AND ca.socio_id = :socio_id
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM credito cr
+                      WHERE cr.id = t.credito_id AND cr.socio_id = :socio_id
+                  )
+              )
               AND t.moneda_id = :moneda_id
               AND t.canal = 'VENTANILLA'
               AND t.tipo IN ('DEPOSITO', 'RETIRO')

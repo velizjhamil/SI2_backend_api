@@ -1,19 +1,21 @@
 """Cooperative credit-product catalog (CU-W20)."""
 
 import re
-from decimal import Decimal, ROUND_HALF_UP, localcontext
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_current_user, get_db, require_admin
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
+from app.services.amortizacion import calcular_cuota_inicial, generar_plan_pagos
 from app.services.scoring import score_application
 from app.models.models import (
+    Credito,
     CuentaAhorro,
     EvaluacionCampo,
     EvaluacionCrediticia,
@@ -21,9 +23,11 @@ from app.models.models import (
     ProductoCredito,
     Socio,
     SolicitudCredito,
+    TablaAmortizacion,
     Usuario,
 )
 from app.schemas.schemas import (
+    MonedaOut,
     ProductoResumen,
     ProductoResumen,
     ProductoCreditoCreate,
@@ -39,6 +43,10 @@ from app.schemas.schemas import (
     SocioResumen,
     EvaluacionCrediticiaOut,
     ResolucionSolicitudIn,
+    PlanPagosOut,
+    CreditoDetalleOut,
+    CreditoOut,
+    DesembolsoCreditoIn,
 )
 
 router = APIRouter()
@@ -160,16 +168,7 @@ def _a_centavos(value: Decimal) -> Decimal:
 
 
 def _cuota_estimada(monto: Decimal, plazo_meses: int, tasa_anual: Decimal, amortizacion: str) -> Decimal:
-    with localcontext() as context:
-        context.prec = 32
-        tasa_mensual = tasa_anual / Decimal("1200")
-        if amortizacion == "ALEMAN":
-            cuota = monto / Decimal(plazo_meses) + monto * tasa_mensual
-        elif tasa_mensual == 0:
-            cuota = monto / Decimal(plazo_meses)
-        else:
-            cuota = monto * tasa_mensual / (Decimal(1) - (Decimal(1) + tasa_mensual) ** (-plazo_meses))
-        return _a_centavos(cuota)
+    return calcular_cuota_inicial(monto, plazo_meses, tasa_anual, amortizacion)
 
 
 def _intereses_estimados(
@@ -177,25 +176,15 @@ def _intereses_estimados(
     plazo_meses: int,
     tasa_anual: Decimal,
     amortizacion: str,
-    cuota: Decimal,
 ) -> Decimal:
-    with localcontext() as context:
-        context.prec = 32
-        tasa_mensual = tasa_anual / Decimal("1200")
-        saldo = monto
-        capital_aleman = _a_centavos(monto / Decimal(plazo_meses))
-        total_intereses = Decimal("0.00")
-        for numero_cuota in range(1, plazo_meses + 1):
-            interes = _a_centavos(saldo * tasa_mensual)
-            total_intereses += interes
-            if numero_cuota == plazo_meses:
-                capital = saldo
-            elif amortizacion == "ALEMAN":
-                capital = capital_aleman
-            else:
-                capital = cuota - interes
-            saldo -= capital
-        return _a_centavos(total_intereses)
+    plan = generar_plan_pagos(
+        monto=monto,
+        tasa_anual=tasa_anual,
+        plazo_meses=plazo_meses,
+        tipo_amortizacion=amortizacion,
+        fecha_desembolso=date.today(),
+    )
+    return plan["total_interes"]
 
 
 def _solicitud_out(solicitud: SolicitudCredito) -> dict:
@@ -323,7 +312,7 @@ def simular_solicitud_credito(
 
     cuota = _cuota_estimada(body.monto, body.plazo_meses, producto.tasa_interes_anual, producto.tipo_amortizacion)
     total_intereses = _intereses_estimados(
-        body.monto, body.plazo_meses, producto.tasa_interes_anual, producto.tipo_amortizacion, cuota
+        body.monto, body.plazo_meses, producto.tasa_interes_anual, producto.tipo_amortizacion
     )
     dentro_de_monto = producto.monto_min <= body.monto <= producto.monto_max
     dentro_de_plazo = producto.plazo_min_meses <= body.plazo_meses <= producto.plazo_max_meses
@@ -769,6 +758,52 @@ def obtener_solicitud_credito(
     return _solicitud_out(_obtener_solicitud(db, cooperativa_id, solicitud_id))
 
 
+@router.get("/solicitudes/{solicitud_id}/plan-pagos", response_model=PlanPagosOut)
+def obtener_plan_pagos_solicitud(
+    solicitud_id: int,
+    fecha_desembolso: date | None = Query(None),
+    fecha_primer_vencimiento: date | None = Query(None),
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    if solicitud.estado != "APROBADO":
+        raise HTTPException(status_code=409, detail="La solicitud no está aprobada")
+    if solicitud.producto is None:
+        raise HTTPException(status_code=409, detail="La solicitud no tiene producto crediticio")
+
+    fecha_desembolso = fecha_desembolso or date.today()
+    if fecha_primer_vencimiento is None:
+        plan = generar_plan_pagos(
+            monto=solicitud.monto,
+            tasa_anual=solicitud.tasa_interes,
+            plazo_meses=solicitud.plazo_meses,
+            tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+            fecha_desembolso=fecha_desembolso,
+        )
+        fecha_primer_vencimiento = plan["fecha_primer_vencimiento"]
+    else:
+        dias = (fecha_primer_vencimiento - fecha_desembolso).days
+        if not 15 <= dias <= 45:
+            raise HTTPException(status_code=400, detail="El primer vencimiento debe ser entre 15 y 45 días después del desembolso")
+        plan = generar_plan_pagos(
+            monto=solicitud.monto,
+            tasa_anual=solicitud.tasa_interes,
+            plazo_meses=solicitud.plazo_meses,
+            tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+            fecha_desembolso=fecha_desembolso,
+            fecha_primer_vencimiento=fecha_primer_vencimiento,
+        )
+
+    if solicitud.moneda is None:
+        raise HTTPException(status_code=409, detail="La solicitud no tiene una moneda asignada")
+    return {
+        **plan,
+        "moneda": MonedaOut.model_validate(solicitud.moneda),
+    }
+
+
 @router.put("/solicitudes/{solicitud_id}", response_model=SolicitudOut)
 def actualizar_solicitud_credito(
     solicitud_id: int,
@@ -1073,3 +1108,315 @@ def obtener_producto_crediticio(
 ):
     cooperativa_id = _validar_lector(usuario)
     return _obtener_producto(db, cooperativa_id, producto_id)
+
+
+def _cuota_credito_out(cuota) -> dict:
+    return {
+        "numero": cuota.numero_cuota,
+        "fecha_vencimiento": cuota.fecha_vencimiento,
+        "saldo_inicial": cuota.saldo_inicial,
+        "capital": cuota.monto_capital,
+        "interes": cuota.monto_interes,
+        "cuota": cuota.monto_cuota_total,
+        "saldo_final": cuota.saldo_final,
+        "estado_pago": cuota.estado_pago or "PENDIENTE",
+    }
+
+
+def _credito_detalle_out(credito: Credito) -> dict:
+    cuotas = list(credito.cronograma)
+    pendiente = next((row for row in cuotas if row.estado_pago == "PENDIENTE"), None)
+    solicitud = credito.solicitud
+    socio = credito.socio or solicitud.socio
+    producto = credito.producto or solicitud.producto
+    moneda = credito.moneda or solicitud.moneda
+    return {
+        "id": credito.id,
+        "numero_credito": credito.numero_credito,
+        "estado": credito.estado or "VIGENTE",
+        "socio": {
+            "id": socio.id,
+            "nombre_completo": f"{socio.nombre} {socio.apellido}",
+            "ci": socio.ci,
+        },
+        "producto": None if producto is None else {
+            "id": producto.id,
+            "codigo": producto.codigo,
+            "nombre": producto.nombre,
+        },
+        "moneda": None if moneda is None else MonedaOut.model_validate(moneda),
+        "monto_aprobado": credito.monto_aprobado,
+        "saldo_pendiente": credito.saldo_pendiente,
+        "tasa_interes": credito.tasa_interes if credito.tasa_interes is not None else solicitud.tasa_interes,
+        "plazo_meses": credito.plazo_meses if credito.plazo_meses is not None else solicitud.plazo_meses,
+        "tipo_amortizacion": credito.tipo_amortizacion if credito.tipo_amortizacion is not None else (None if producto is None else producto.tipo_amortizacion),
+        "fecha_desembolso": credito.fecha_desembolso,
+        "modalidad_desembolso": credito.modalidad_desembolso,
+        "cuenta_desembolso": None if credito.cuenta_desembolso is None else {
+            "id": credito.cuenta_desembolso.id,
+            "numero": credito.cuenta_desembolso.numero,
+        },
+        "solicitud": {
+            "id": solicitud.id,
+            "numero_solicitud": solicitud.numero_solicitud,
+        },
+        "proxima_cuota": None if pendiente is None else _cuota_credito_out(pendiente),
+        "cuotas_pagadas": sum(row.estado_pago == "PAGADA" for row in cuotas),
+        "cuotas_totales": len(cuotas),
+        "cronograma": [_cuota_credito_out(row) for row in cuotas],
+        "transaccion_desembolso_id": credito.transaccion_desembolso_id,
+        "usuario": None if credito.usuario is None else {
+            "id": credito.usuario.id,
+            "nombre": credito.usuario.nombre,
+        },
+    }
+
+
+def _credito_lista_out(credito: Credito) -> dict:
+    detalle = _credito_detalle_out(credito)
+    return {key: detalle[key] for key in (
+        "id", "numero_credito", "estado", "socio", "producto", "moneda",
+        "monto_aprobado", "saldo_pendiente", "tasa_interes", "plazo_meses",
+        "tipo_amortizacion", "fecha_desembolso", "modalidad_desembolso",
+        "cuenta_desembolso", "solicitud", "proxima_cuota", "cuotas_pagadas",
+        "cuotas_totales",
+    )}
+
+
+def _credito_cooperativa_filter(cooperativa_id: int):
+    return or_(
+        Credito.cooperativa_id == cooperativa_id,
+        Credito.solicitud.has(SolicitudCredito.cooperativa_id == cooperativa_id),
+        Credito.socio.has(Socio.cooperativa_id == cooperativa_id),
+        Credito.producto.has(ProductoCredito.cooperativa_id == cooperativa_id),
+    )
+
+
+@router.get("/creditos", response_model=list[CreditoOut])
+def listar_creditos(
+    estado: str | None = Query(None),
+    socio_ci: str | None = Query(None),
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    coop_id = _validar_lector(usuario)
+    query = (
+        select(Credito)
+        .join(SolicitudCredito, Credito.solicitud_credito_id == SolicitudCredito.id)
+        .options(
+            joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.moneda),
+            joinedload(Credito.cuenta_desembolso), joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+            selectinload(Credito.cronograma),
+        )
+        .where(_credito_cooperativa_filter(coop_id))
+        .order_by(Credito.id.desc())
+    )
+    if estado is not None:
+        query = query.where(Credito.estado == estado)
+    if socio_ci is not None:
+        query = query.join(Socio, Socio.id == SolicitudCredito.socio_id).where(Socio.ci == socio_ci)
+    creditos = db.execute(query).unique().scalars().all()
+    return [_credito_lista_out(credito) for credito in creditos]
+
+
+@router.get("/creditos/{credito_id}", response_model=CreditoDetalleOut)
+def obtener_credito(
+    credito_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    coop_id = _validar_lector(usuario)
+    credito = db.execute(
+        select(Credito)
+        .join(SolicitudCredito, Credito.solicitud_credito_id == SolicitudCredito.id)
+        .options(
+            joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.moneda),
+            joinedload(Credito.cuenta_desembolso), joinedload(Credito.usuario),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+            joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+            selectinload(Credito.cronograma),
+        )
+        .where(Credito.id == credito_id, _credito_cooperativa_filter(coop_id))
+    ).unique().scalar_one_or_none()
+    if credito is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    return _credito_detalle_out(credito)
+
+
+@router.post(
+    "/solicitudes/{solicitud_id}/desembolso",
+    response_model=CreditoDetalleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def desembolsar_solicitud_credito(
+    solicitud_id: int,
+    body: DesembolsoCreditoIn,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if usuario.cooperativa_id is None:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    if usuario.rol is None:
+        raise HTTPException(status_code=403, detail="Operación reservada al personal de la cooperativa")
+    coop_id = usuario.cooperativa_id
+    if body.modalidad == "CUENTA" and usuario.rol.nombre not in {"OFICIAL_CREDITO", "ADMINISTRADOR"}:
+        raise HTTPException(status_code=403, detail="Operación reservada a oficiales de crédito y administradores")
+    if body.modalidad == "EFECTIVO" and usuario.rol.nombre not in {"CAJERO", "OFICIAL_CREDITO", "ADMINISTRADOR"}:
+        raise HTTPException(status_code=403, detail="Operación reservada al personal de caja")
+
+    solicitud = db.execute(
+        select(SolicitudCredito)
+        .options(joinedload(SolicitudCredito.socio), joinedload(SolicitudCredito.producto),
+                 joinedload(SolicitudCredito.moneda))
+        .where(SolicitudCredito.id == solicitud_id, SolicitudCredito.cooperativa_id == coop_id)
+        .with_for_update(of=SolicitudCredito)
+    ).unique().scalar_one_or_none()
+    if solicitud is None:
+        raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
+    if solicitud.estado != "APROBADO":
+        raise HTTPException(status_code=409, detail="La solicitud debe estar APROBADO para desembolsar")
+    if solicitud.producto is None or solicitud.moneda is None:
+        raise HTTPException(status_code=409, detail="La solicitud no tiene producto o moneda")
+    if solicitud.producto.cooperativa_id != coop_id or solicitud.socio.cooperativa_id != coop_id:
+        raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
+    if solicitud.producto.tipo_amortizacion not in {"FRANCES", "ALEMAN"}:
+        raise HTTPException(status_code=400, detail="El producto no tiene un tipo de amortización válido")
+
+    hoy = date.today()
+    primer_vencimiento = body.fecha_primer_vencimiento
+    if primer_vencimiento is not None and not 15 <= (primer_vencimiento - hoy).days <= 45:
+        raise HTTPException(status_code=400, detail="El primer vencimiento debe ser entre 15 y 45 días desde el desembolso")
+
+    cuenta = None
+    control = None
+    fraccionada = False
+    if body.modalidad == "CUENTA":
+        if body.cuenta_ahorro_id is None:
+            raise HTTPException(status_code=400, detail="Debe indicar una cuenta de ahorro")
+        cuenta = db.execute(
+            select(CuentaAhorro)
+            .options(joinedload(CuentaAhorro.moneda), joinedload(CuentaAhorro.socio))
+            .where(CuentaAhorro.id == body.cuenta_ahorro_id,
+                   CuentaAhorro.socio_id == solicitud.socio_id,
+                   CuentaAhorro.estado == "ACTIVA",
+                   CuentaAhorro.moneda_id == solicitud.moneda_id)
+            .with_for_update(of=CuentaAhorro)
+        ).unique().scalar_one_or_none()
+        if cuenta is None:
+            raise HTTPException(status_code=400, detail="La cuenta debe estar activa y pertenecer al socio en la misma moneda")
+    else:
+        from app.api.v1.endpoints.caja import _resumen_sesion_arqueo, _sesion_abierta
+        from app.services.uif import exigir_declaracion_si_corresponde
+
+        control = _sesion_abierta(db, usuario, bloquear=True)
+        if control.caja.cooperativa_id != coop_id:
+            raise HTTPException(status_code=400, detail="El usuario no tiene una sesión de caja abierta")
+        resumen = _resumen_sesion_arqueo(db, control)
+        efectivo = next(
+            (moneda.saldo_teorico for moneda in resumen.monedas if moneda.moneda.id == solicitud.moneda_id),
+            Decimal("0.00"),
+        )
+        if solicitud.monto > efectivo:
+            raise HTTPException(status_code=400, detail="Efectivo insuficiente en caja")
+        fraccionada = exigir_declaracion_si_corresponde(
+            db,
+            declaracion=body.declaracion_uif,
+            socio_id=solicitud.socio_id,
+            moneda_id=solicitud.moneda_id,
+            moneda_iso=solicitud.moneda.codigo_iso,
+            monto=solicitud.monto,
+        )
+
+    plan = generar_plan_pagos(
+        monto=solicitud.monto,
+        tasa_anual=solicitud.tasa_interes,
+        plazo_meses=solicitud.plazo_meses,
+        tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+        fecha_desembolso=hoy,
+        fecha_primer_vencimiento=primer_vencimiento,
+    )
+    correlativo = _siguiente_secuencia(db, coop_id, "CREDITO")
+    credito = Credito(
+        monto_aprobado=solicitud.monto,
+        saldo_pendiente=solicitud.monto,
+        estado="VIGENTE",
+        solicitud_credito_id=solicitud.id,
+        numero_credito=f"CRE-{correlativo:06d}",
+        cooperativa_id=coop_id,
+        socio_id=solicitud.socio_id,
+        producto_credito_id=solicitud.producto_credito_id,
+        moneda_id=solicitud.moneda_id,
+        tasa_interes=solicitud.tasa_interes,
+        plazo_meses=solicitud.plazo_meses,
+        tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+        fecha_desembolso=hoy,
+        modalidad_desembolso=body.modalidad,
+        cuenta_desembolso_id=cuenta.id if cuenta else None,
+        usuario_id=usuario.id,
+    )
+    db.add(credito)
+    db.flush()
+    db.add_all([
+        TablaAmortizacion(
+            numero_cuota=row["numero"], fecha_vencimiento=row["fecha_vencimiento"],
+            monto_capital=row["capital"], monto_interes=row["interes"],
+            monto_cuota_total=row["cuota"], estado_pago="PENDIENTE",
+            credito_id=credito.id, saldo_inicial=row["saldo_inicial"],
+            saldo_final=row["saldo_final"], monto_pagado=Decimal("0.00"),
+        ) for row in plan["cuotas"]
+    ])
+
+    declaracion_id = None
+    if body.modalidad == "EFECTIVO" and body.declaracion_uif is not None:
+        from app.services.uif import registrar_declaracion
+        declaracion_id = registrar_declaracion(
+            db, declaracion=body.declaracion_uif, tipo_operacion="DESEMBOLSO_CREDITO",
+            monto=solicitud.monto, moneda_id=solicitud.moneda_id,
+            socio_id=solicitud.socio_id, usuario_id=usuario.id,
+            cooperativa_id=coop_id, fraccionada=fraccionada,
+        )
+
+    if body.modalidad == "CUENTA":
+        cuenta.saldo_disponible += solicitud.monto
+        tx = db.execute(text("""
+            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id, credito_id)
+            VALUES ('DESEMBOLSO_CREDITO', :monto, 'WEB', :moneda_id, :cuenta_id, :credito_id)
+            RETURNING id
+        """), {"monto": solicitud.monto, "moneda_id": solicitud.moneda_id,
+               "cuenta_id": cuenta.id, "credito_id": credito.id}).scalar_one()
+    else:
+        control.saldo_sistema -= solicitud.monto
+        tx = db.execute(text("""
+            INSERT INTO transaccion (tipo, monto, canal, control_caja_id, moneda_id,
+                retirante_tipo, retirante_nombre, retirante_ci, declaracion_jurada_uif_id, credito_id)
+            VALUES ('RETIRO', :monto, 'VENTANILLA', :control_id, :moneda_id,
+                'TITULAR', :nombre, :ci, :declaracion_id, :credito_id)
+            RETURNING id
+        """), {"monto": solicitud.monto, "control_id": control.id,
+               "moneda_id": solicitud.moneda_id, "nombre": f"{solicitud.socio.nombre} {solicitud.socio.apellido}",
+               "ci": solicitud.socio.ci, "declaracion_id": declaracion_id,
+               "credito_id": credito.id}).scalar_one()
+    credito.transaccion_desembolso_id = tx
+    solicitud.estado = "DESEMBOLSADO"
+    registrar_accion(
+        db, accion="DESEMBOLSAR_CREDITO", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id,
+        descripcion=f"Desembolso {credito.numero_credito} de {solicitud.monto} en modalidad {body.modalidad}",
+        request=request,
+    )
+    db.flush()
+    detalle = db.execute(
+        select(Credito)
+        .options(joinedload(Credito.socio), joinedload(Credito.producto),
+                 joinedload(Credito.moneda), joinedload(Credito.cuenta_desembolso),
+                 joinedload(Credito.solicitud), joinedload(Credito.usuario),
+                 selectinload(Credito.cronograma))
+        .where(Credito.id == credito.id)
+    ).unique().scalar_one()
+    payload = _credito_detalle_out(detalle)
+    db.commit()
+    return payload

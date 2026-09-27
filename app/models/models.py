@@ -383,6 +383,73 @@ class EvaluacionCrediticia(Base):
     resolucion_usuario: Mapped["Usuario | None"] = relationship(foreign_keys=[resolucion_usuario_id])
 
 
+class Credito(Base):
+    __tablename__ = "credito"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "numero_credito", name="uq_credito_cooperativa_numero"),
+        CheckConstraint(
+            "modalidad_desembolso IS NULL OR modalidad_desembolso IN ('CUENTA','EFECTIVO')",
+            name="ck_credito_modalidad_desembolso",
+        ),
+        CheckConstraint(
+            "tipo_amortizacion IS NULL OR tipo_amortizacion IN ('FRANCES','ALEMAN')",
+            name="ck_credito_tipo_amortizacion",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    monto_aprobado = mapped_column(Numeric(12, 2), nullable=False)
+    saldo_pendiente = mapped_column(Numeric(12, 2), nullable=False)
+    estado: Mapped[str | None] = mapped_column(String(20), default="VIGENTE", server_default="VIGENTE")
+    solicitud_credito_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("solicitud_credito.id"), nullable=False, unique=True
+    )
+    numero_credito: Mapped[str | None] = mapped_column(String(20))
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    socio_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("socio.id"))
+    producto_credito_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("producto_credito.id"))
+    moneda_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("moneda.id"))
+    tasa_interes = mapped_column(Numeric(5, 2))
+    plazo_meses: Mapped[int | None] = mapped_column(Integer)
+    tipo_amortizacion: Mapped[str | None] = mapped_column(String(10))
+    fecha_desembolso = mapped_column(Date)
+    modalidad_desembolso: Mapped[str | None] = mapped_column(String(10))
+    cuenta_desembolso_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("cuenta_ahorro.id"))
+    # Database FK is installed by migration 017; no Transaccion ORM exists in this project.
+    transaccion_desembolso_id: Mapped[int | None] = mapped_column(Integer)
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    solicitud: Mapped["SolicitudCredito"] = relationship()
+    cooperativa: Mapped["Cooperativa | None"] = relationship()
+    socio: Mapped["Socio | None"] = relationship()
+    producto: Mapped["ProductoCredito | None"] = relationship()
+    moneda: Mapped["Moneda | None"] = relationship()
+    cuenta_desembolso: Mapped["CuentaAhorro | None"] = relationship()
+    usuario: Mapped["Usuario | None"] = relationship()
+    cronograma: Mapped[list["TablaAmortizacion"]] = relationship(
+        back_populates="credito", order_by="TablaAmortizacion.numero_cuota"
+    )
+
+
+class TablaAmortizacion(Base):
+    __tablename__ = "tabla_amortizacion"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    numero_cuota: Mapped[int] = mapped_column(Integer, nullable=False)
+    fecha_vencimiento = mapped_column(Date, nullable=False)
+    monto_capital = mapped_column(Numeric(12, 2), nullable=False)
+    monto_interes = mapped_column(Numeric(12, 2), nullable=False)
+    monto_cuota_total = mapped_column(Numeric(12, 2), nullable=False)
+    estado_pago: Mapped[str | None] = mapped_column(String(20), default="PENDIENTE", server_default="PENDIENTE")
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    saldo_inicial = mapped_column(Numeric(14, 2))
+    saldo_final = mapped_column(Numeric(14, 2))
+    monto_pagado = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0.00")
+
+    credito: Mapped["Credito"] = relationship(back_populates="cronograma")
+
+
 class Caja(Base):
     __tablename__ = "caja"
 
