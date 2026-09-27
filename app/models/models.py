@@ -274,6 +274,7 @@ class ProductoCredito(Base):
     tasa_mora_anual = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
     relacion_cuota_ingreso_max = mapped_column(Numeric(5, 2), nullable=False, default=40, server_default="40.00")
     requiere_garantia: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    cobertura_minima_garantia = mapped_column(Numeric(6, 2), nullable=False, default=100, server_default="100.00")
     monto_aprobacion_directa = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0.00")
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVO", server_default="ACTIVO")
     fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
@@ -346,6 +347,39 @@ class SolicitudCredito(Base):
     evaluaciones_crediticias: Mapped[list["EvaluacionCrediticia"]] = relationship(
         back_populates="solicitud", order_by="EvaluacionCrediticia.fecha.desc()"
     )
+    garantias: Mapped[list["Garantia"]] = relationship(back_populates="solicitud", lazy="selectin")
+
+
+class Garantia(Base):
+    __tablename__ = "garantia"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    solicitud_credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("solicitud_credito.id"), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(12), nullable=False)
+    descripcion: Mapped[str] = mapped_column(Text, nullable=False)
+    moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
+    valor_comercial = mapped_column(Numeric(14, 2))
+    valor_realizable = mapped_column(Numeric(14, 2), nullable=False)
+    documento_referencia: Mapped[str | None] = mapped_column(String(120))
+    avalista_nombre: Mapped[str | None] = mapped_column(String(150))
+    avalista_ci: Mapped[str | None] = mapped_column(String(20))
+    avalista_ingreso_mensual = mapped_column(Numeric(14, 2))
+    avalista_relacion: Mapped[str | None] = mapped_column(String(60))
+    avalista_telefono: Mapped[str | None] = mapped_column(String(30))
+    socio_avalista_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("socio.id"))
+    estado: Mapped[str] = mapped_column(String(12), nullable=False, default="REGISTRADA", server_default="REGISTRADA")
+    observacion_verificacion: Mapped[str | None] = mapped_column(Text)
+    usuario_registro_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    usuario_verificacion_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    fecha_registro = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_verificacion = mapped_column(TIMESTAMP(timezone=True))
+    fecha_liberacion = mapped_column(TIMESTAMP(timezone=True))
+
+    solicitud: Mapped["SolicitudCredito"] = relationship(back_populates="garantias")
+    moneda: Mapped["Moneda"] = relationship()
+    usuario_registro: Mapped["Usuario"] = relationship(foreign_keys=[usuario_registro_id])
+    usuario_verificacion: Mapped["Usuario | None"] = relationship(foreign_keys=[usuario_verificacion_id])
 
 
 class EvaluacionCrediticia(Base):

@@ -201,7 +201,7 @@ def test_evaluation_persists_advisory_probability_without_changing_reglas_dictam
     assert response.status_code==201,response.text
     body=response.json()
     assert body["version_modelo_mora"]=="mora-logit-v1" and body["probabilidad_mora"] is not None and body["nivel_riesgo"] in {"BAJO","MEDIO","ALTO"}
-    assert body["version_modelo"]=="reglas-v1" and body["dictamen"]=="APROBADO" and body["score"]==900
+    assert body["version_modelo"]=="reglas-v2" and body["dictamen"]=="APROBADO" and body["score"]==900
     from app.services.scoring import score_application
     with SessionLocal() as db:
         scored_request=db.get(models.SolicitudCredito,request_id)

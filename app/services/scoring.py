@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 
 
-VERSION_MODELO = "reglas-v1"
+VERSION_MODELO = "reglas-v2"
 _CERO = Decimal("0")
 _CIEN = Decimal("100")
 
@@ -25,6 +25,7 @@ _MOTIVOS = {
     "SIN_EVALUACION": "No existe evaluación socioeconómica válida para calcular el riesgo.",
     "MORA_VIGENTE": "El socio tiene una morosidad vigente en un crédito anterior.",
     "RATIO_SUPERA_MAXIMO": "La relación cuota-ingreso supera el máximo del producto.",
+    "GARANTIA_INSUFICIENTE": "La cobertura de garantías verificadas no alcanza el mínimo del producto.",
 }
 
 
@@ -158,7 +159,7 @@ def score_application(
     has_current_arrears: bool = False,
     today: date | None = None,
 ) -> dict:
-    """Calculate the task's reglas-v1 score and deterministic explanation."""
+    """Calculate the task's reglas-v2 score and deterministic explanation."""
     from app.api.v1.endpoints.creditos import _cuota_estimada
 
     today = today or date.today()
@@ -221,6 +222,18 @@ def score_application(
             "descripcion": _MOTIVOS["RATIO_SUPERA_MAXIMO"],
             "efecto": "REVISION_MANUAL",
         })
+    if getattr(solicitud.producto, "requiere_garantia", False):
+        verified = sum((_decimal(garantia.valor_realizable)
+            for garantia in getattr(solicitud, "garantias", ()) if garantia.estado == "VERIFICADA"), _CERO)
+        amount = _decimal(solicitud.monto)
+        coverage = verified / amount * _CIEN if amount > 0 else _CERO
+        minimum = _decimal(getattr(solicitud.producto, "cobertura_minima_garantia", _CIEN))
+        if coverage < minimum:
+            knockouts.append({
+                "codigo": "GARANTIA_INSUFICIENTE",
+                "descripcion": _MOTIVOS["GARANTIA_INSUFICIENTE"],
+                "efecto": "REVISION_MANUAL",
+            })
 
     score = sum(item["puntos"] for item in factors)
     if any(item["efecto"] == "RECHAZADO" for item in knockouts):

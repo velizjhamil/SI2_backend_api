@@ -34,6 +34,7 @@ from app.models.models import (
     OfertaRecredito,
     AlertaCredito,
     GestionCobranza,
+    Garantia,
     Bitacora,
     VotoComite,
     Cooperativa,
@@ -66,6 +67,7 @@ from app.schemas.schemas import (
     OfertaOut, GeneracionRecreditosOut, OfertaAceptadaOut, DescartarRecreditoIn,
     VotoComiteIn, VotoOut, ComiteItemOut, ActaOut,
     AlertaOut, GestionOut, GestionCreateIn, DescartarAlertaIn,
+    GarantiaCreateIn, GarantiaUpdateIn, GarantiaVerificacionIn, GarantiaOut, CoberturaOut,
 )
 from app.services.alertas_mora import construir_candidatos_alerta, reconciliar_alertas, candidato_riesgo_alto
 
@@ -218,6 +220,21 @@ def _intereses_estimados(
     return plan["total_interes"]
 
 
+def _cobertura_solicitud_out(solicitud: SolicitudCredito) -> dict | None:
+    producto = solicitud.producto
+    if producto is None:
+        return None
+    verificadas = sum((Decimal(g.valor_realizable) for g in solicitud.garantias if g.estado == "VERIFICADA"), Decimal("0.00"))
+    pendientes = sum((Decimal(g.valor_realizable) for g in solicitud.garantias if g.estado == "REGISTRADA"), Decimal("0.00"))
+    monto = Decimal(solicitud.monto)
+    porcentaje = (verificadas / monto * Decimal("100")).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    requiere = bool(producto.requiere_garantia)
+    minimo = Decimal(producto.cobertura_minima_garantia)
+    return {"requiere_garantia": requiere, "cobertura_minima": minimo, "monto_solicitado": monto,
+        "valor_realizable_verificado": verificadas, "valor_realizable_pendiente": pendientes,
+        "porcentaje_cobertura": porcentaje, "cumple": not requiere or porcentaje >= minimo}
+
+
 def _solicitud_out(solicitud: SolicitudCredito) -> dict:
     socio = solicitud.socio
     producto = solicitud.producto
@@ -284,6 +301,7 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
             "fecha": evaluacion.fecha,
         },
         "oficial": {"id": solicitud.oficial.id, "nombre": solicitud.oficial.nombre},
+        "cobertura": _cobertura_solicitud_out(solicitud),
         "ultima_evaluacion": None if latest_evaluation is None else {
             "id": latest_evaluation.id,
             "score": latest_evaluation.score,
@@ -1273,6 +1291,240 @@ def anular_solicitud_credito(
     return _solicitud_out(_obtener_solicitud(db, cooperativa_id, solicitud.id))
 
 
+def _obtener_garantia(db: Session, cooperativa_id: int, garantia_id: int) -> Garantia:
+    garantia = db.execute(
+        select(Garantia).options(joinedload(Garantia.moneda), joinedload(Garantia.usuario_registro),
+            joinedload(Garantia.usuario_verificacion), joinedload(Garantia.solicitud),
+            joinedload(Garantia.solicitud).joinedload(SolicitudCredito.socio),
+            joinedload(Garantia.solicitud).joinedload(SolicitudCredito.oficial))
+        .where(Garantia.id == garantia_id, Garantia.cooperativa_id == cooperativa_id)
+    ).scalar_one_or_none()
+    if garantia is None:
+        raise HTTPException(status_code=404, detail="Garantía no encontrada")
+    return garantia
+
+
+def _garantia_out(db: Session, garantia: Garantia) -> dict:
+    registrar = garantia.usuario_registro
+    verificador = garantia.usuario_verificacion
+    avalista = None
+    if garantia.tipo == "PERSONAL":
+        avalista = {"nombre": garantia.avalista_nombre, "ci": garantia.avalista_ci,
+            "ingreso_mensual": garantia.avalista_ingreso_mensual, "relacion": garantia.avalista_relacion,
+            "telefono": garantia.avalista_telefono, "socio_id": garantia.socio_avalista_id}
+    return {"id": garantia.id, "tipo": garantia.tipo, "descripcion": garantia.descripcion,
+        "moneda": garantia.moneda, "valor_comercial": garantia.valor_comercial,
+        "valor_realizable": garantia.valor_realizable, "documento_referencia": garantia.documento_referencia,
+        "avalista": avalista, "estado": garantia.estado,
+        "observacion_verificacion": garantia.observacion_verificacion,
+        "usuario_registro": {"id": registrar.id, "nombre": registrar.nombre},
+        "usuario_verificacion": None if verificador is None else {"id": verificador.id, "nombre": verificador.nombre},
+        "fecha_registro": garantia.fecha_registro, "fecha_verificacion": garantia.fecha_verificacion,
+        "fecha_liberacion": garantia.fecha_liberacion}
+
+
+def _valor_realizable(tipo: str, valor_comercial: Decimal | None, ingreso: Decimal | None, monto: Decimal) -> Decimal:
+    if tipo == "HIPOTECARIA":
+        value = valor_comercial * Decimal("0.70")
+    elif tipo == "PRENDARIA":
+        value = valor_comercial * Decimal("0.50")
+    else:
+        value = min(ingreso * Decimal("12") * Decimal("0.30"), monto)
+    return value.quantize(CENTAVO, rounding=ROUND_HALF_UP)
+
+
+def _marcar_garantias_liberadas(garantias: list[Garantia]) -> int:
+    liberadas = 0
+    for garantia in garantias:
+        if garantia.estado == "VERIFICADA":
+            garantia.estado = "LIBERADA"
+            garantia.fecha_liberacion = func.now()
+            liberadas += 1
+    return liberadas
+
+
+def _asignar_avalista(garantia: Garantia, avalista) -> None:
+    garantia.avalista_nombre = avalista.nombre.strip()
+    garantia.avalista_ci = avalista.ci.strip()
+    garantia.avalista_ingreso_mensual = avalista.ingreso_mensual
+    garantia.avalista_relacion = avalista.relacion.strip()
+    garantia.avalista_telefono = avalista.telefono
+    garantia.socio_avalista_id = avalista.socio_id
+
+
+def _normalizar_ci(ci: str) -> str:
+    return "".join(ci.split()).upper()
+
+
+def _validar_payload_garantia(schema, payload):
+    try:
+        return schema.model_validate(payload)
+    except ValidationError as exc:
+        detail = "; ".join(error["msg"].removeprefix("Value error, ") for error in exc.errors())
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.post("/solicitudes/{solicitud_id}/garantias", response_model=GarantiaOut, status_code=201)
+def registrar_garantia(solicitud_id: int, payload: Any = Body(...), request: Request = None,
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    body = _validar_payload_garantia(GarantiaCreateIn, payload)
+    cooperativa_id = _validar_escritor_solicitud(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    if solicitud.estado not in ESTADOS_EDITABLES_SOLICITUD:
+        raise HTTPException(status_code=409, detail="La solicitud no permite registrar garantías")
+    moneda_id = solicitud.moneda_id if body.tipo == "PERSONAL" else body.moneda_id
+    if moneda_id != solicitud.moneda_id:
+        raise HTTPException(status_code=400, detail="La moneda de la garantía debe coincidir con la solicitud")
+    if body.tipo == "PERSONAL" and body.avalista.socio_id == solicitud.socio_id:
+        raise HTTPException(status_code=400, detail="El socio solicitante no puede ser su propio avalista")
+    if body.tipo == "PERSONAL" and _normalizar_ci(body.avalista.ci) == _normalizar_ci(solicitud.socio.ci):
+        raise HTTPException(status_code=400, detail="El socio solicitante no puede ser su propio avalista")
+    if body.tipo == "PERSONAL" and body.avalista.socio_id is not None:
+        socio_aval = db.get(Socio, body.avalista.socio_id)
+        if socio_aval is None or socio_aval.cooperativa_id != cooperativa_id:
+            raise HTTPException(status_code=400, detail="El socio avalista no pertenece a esta cooperativa")
+    realizable = _valor_realizable(body.tipo, body.valor_comercial,
+        body.avalista.ingreso_mensual if body.avalista else None, solicitud.monto)
+    garantia = Garantia(cooperativa_id=cooperativa_id, solicitud_credito_id=solicitud.id,
+        tipo=body.tipo, descripcion=body.descripcion.strip(), moneda_id=moneda_id,
+        valor_comercial=body.valor_comercial, valor_realizable=realizable,
+        documento_referencia=body.documento_referencia, usuario_registro_id=usuario.id)
+    if body.avalista:
+        _asignar_avalista(garantia, body.avalista)
+    db.add(garantia); db.flush()
+    registrar_accion(db, accion="REGISTRAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id, descripcion=f"Garantía registrada: {garantia.id}", request=request)
+    db.commit(); db.refresh(garantia)
+    return _garantia_out(db, _obtener_garantia(db, cooperativa_id, garantia.id))
+
+
+@router.get("/solicitudes/{solicitud_id}/garantias", response_model=list[GarantiaOut])
+def listar_garantias_solicitud(solicitud_id: int, usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db)):
+    cooperativa_id = _validar_lector(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    rows = db.execute(select(Garantia).options(joinedload(Garantia.moneda),
+        joinedload(Garantia.usuario_registro), joinedload(Garantia.usuario_verificacion))
+        .where(Garantia.solicitud_credito_id == solicitud.id, Garantia.cooperativa_id == cooperativa_id)
+        .order_by(Garantia.id)).scalars().all()
+    return [_garantia_out(db, row) for row in rows]
+
+
+@router.put("/garantias/{garantia_id}", response_model=GarantiaOut)
+def actualizar_garantia(garantia_id: int, body: GarantiaUpdateIn, request: Request,
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    cooperativa_id = _validar_escritor_solicitud(usuario)
+    garantia = _obtener_garantia(db, cooperativa_id, garantia_id)
+    if garantia.estado != "REGISTRADA" or garantia.solicitud.estado not in ESTADOS_EDITABLES_SOLICITUD:
+        raise HTTPException(status_code=409, detail="La garantía o solicitud ya no permite edición")
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        return _garantia_out(db, garantia)
+    if garantia.tipo == "PERSONAL":
+        if any(k in changes for k in ("moneda_id", "valor_comercial")):
+            raise HTTPException(status_code=400, detail="La garantía personal no admite moneda ni valor comercial")
+        avalista = body.avalista
+        if avalista is not None:
+            if avalista.socio_id == garantia.solicitud.socio_id:
+                raise HTTPException(status_code=400, detail="El socio solicitante no puede ser su propio avalista")
+            if _normalizar_ci(avalista.ci) == _normalizar_ci(garantia.solicitud.socio.ci):
+                raise HTTPException(status_code=400, detail="El socio solicitante no puede ser su propio avalista")
+            if avalista.socio_id is not None:
+                socio_aval = db.get(Socio, avalista.socio_id)
+                if socio_aval is None or socio_aval.cooperativa_id != cooperativa_id:
+                    raise HTTPException(status_code=400, detail="El socio avalista no pertenece a esta cooperativa")
+            _asignar_avalista(garantia, avalista)
+    else:
+        if "avalista" in changes:
+            raise HTTPException(status_code=400, detail="La garantía no admite datos de avalista")
+        if "moneda_id" in changes:
+            if changes["moneda_id"] != garantia.solicitud.moneda_id:
+                raise HTTPException(status_code=400, detail="La moneda de la garantía debe coincidir con la solicitud")
+            garantia.moneda_id = changes["moneda_id"]
+        if "valor_comercial" in changes:
+            garantia.valor_comercial = changes["valor_comercial"]
+    if "descripcion" in changes and changes["descripcion"] is not None:
+        garantia.descripcion = changes["descripcion"].strip()
+    if "documento_referencia" in changes:
+        garantia.documento_referencia = changes["documento_referencia"]
+    garantia.valor_realizable = _valor_realizable(garantia.tipo, garantia.valor_comercial,
+        garantia.avalista_ingreso_mensual, garantia.solicitud.monto)
+    registrar_accion(db, accion="ACTUALIZAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id, descripcion=f"Garantía actualizada: {garantia.id}", request=request)
+    db.commit(); db.refresh(garantia)
+    return _garantia_out(db, _obtener_garantia(db, cooperativa_id, garantia.id))
+
+
+@router.delete("/garantias/{garantia_id}", status_code=204)
+def eliminar_garantia(garantia_id: int, request: Request, usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db)):
+    cooperativa_id = _validar_escritor_solicitud(usuario)
+    garantia = _obtener_garantia(db, cooperativa_id, garantia_id)
+    if garantia.estado != "REGISTRADA" or garantia.solicitud.estado not in ESTADOS_EDITABLES_SOLICITUD:
+        raise HTTPException(status_code=409, detail="La garantía o solicitud ya no permite eliminación")
+    registrar_accion(db, accion="ELIMINAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id, descripcion=f"Garantía eliminada: {garantia.id}", request=request)
+    db.delete(garantia); db.commit()
+    return None
+
+
+def _calcular_cobertura(db: Session, solicitud: SolicitudCredito) -> dict:
+    sums = db.execute(select(Garantia.estado, func.coalesce(func.sum(Garantia.valor_realizable), 0))
+        .where(Garantia.solicitud_credito_id == solicitud.id,
+            Garantia.cooperativa_id == solicitud.cooperativa_id)
+        .group_by(Garantia.estado)).all()
+    values = {state: Decimal(total) for state, total in sums}
+    verified = values.get("VERIFICADA", Decimal("0.00"))
+    pending = values.get("REGISTRADA", Decimal("0.00"))
+    amount = Decimal(solicitud.monto)
+    percentage = (verified / amount * Decimal("100")).quantize(CENTAVO, rounding=ROUND_HALF_UP)
+    product = solicitud.producto
+    required = bool(product and product.requiere_garantia)
+    minimum = Decimal(product.cobertura_minima_garantia) if product else Decimal("100.00")
+    return {"requiere_garantia": required, "cobertura_minima": minimum, "monto_solicitado": amount,
+        "valor_realizable_verificado": verified, "valor_realizable_pendiente": pending,
+        "porcentaje_cobertura": percentage, "cumple": not required or percentage >= minimum}
+
+
+@router.post("/garantias/{garantia_id}/verificacion", response_model=GarantiaOut)
+def verificar_garantia(garantia_id: int, payload: Any = Body(...), request: Request = None,
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    body = _validar_payload_garantia(GarantiaVerificacionIn, payload)
+    cooperativa_id = _validar_lector(usuario)
+    if usuario.rol is None or usuario.rol.nombre != "ADMINISTRADOR":
+        raise HTTPException(status_code=403, detail="Operación reservada a administradores de la cooperativa")
+    garantia = _obtener_garantia(db, cooperativa_id, garantia_id)
+    if garantia.usuario_registro_id == usuario.id:
+        raise HTTPException(status_code=403, detail="Quien registra la garantía no puede verificarla")
+    if garantia.estado != "REGISTRADA":
+        raise HTTPException(status_code=409, detail="La garantía ya fue verificada")
+    garantia.estado = body.decision
+    garantia.observacion_verificacion = body.observacion.strip()
+    garantia.usuario_verificacion_id = usuario.id
+    garantia.fecha_verificacion = func.now()
+    registrar_accion(db, accion="VERIFICAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id, descripcion=f"Garantía {garantia.estado.lower()}: {garantia.id}", request=request)
+    db.commit(); db.refresh(garantia)
+    return _garantia_out(db, _obtener_garantia(db, cooperativa_id, garantia.id))
+
+
+@router.get("/solicitudes/{solicitud_id}/cobertura", response_model=CoberturaOut)
+def obtener_cobertura(solicitud_id: int, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    cooperativa_id = _validar_lector(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    return _calcular_cobertura(db, solicitud)
+
+
+@router.get("/creditos/{credito_id}/garantias", response_model=list[GarantiaOut])
+def listar_garantias_credito(credito_id: int, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    cooperativa_id = _validar_lector(usuario)
+    credito = db.execute(select(Credito).where(Credito.id == credito_id,
+        Credito.cooperativa_id == cooperativa_id)).scalar_one_or_none()
+    if credito is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    return listar_garantias_solicitud(credito.solicitud_credito_id, usuario, db)
+
+
 @router.post("/productos", response_model=ProductoCreditoOut, status_code=status.HTTP_201_CREATED)
 def crear_producto_crediticio(
     body: ProductoCreditoCreate,
@@ -1951,6 +2203,15 @@ def cobrar_cuota(
     ]
     if not restantes:
         credito.estado = "CANCELADO"
+        garantias_verificadas = db.execute(select(Garantia).where(
+            Garantia.solicitud_credito_id == credito.solicitud_credito_id,
+            Garantia.cooperativa_id == cooperativa_id,
+            Garantia.estado == "VERIFICADA",
+        ).with_for_update()).scalars().all()
+        _marcar_garantias_liberadas(garantias_verificadas)
+        for garantia in garantias_verificadas:
+            registrar_accion(db, accion="LIBERAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
+                cooperativa_id=cooperativa_id, descripcion=f"Garantía liberada por cancelación: {garantia.id}", request=request)
 
     canal = "VENTANILLA" if body.modalidad == "EFECTIVO" else "WEB"
     transaction_id = db.execute(
@@ -2329,7 +2590,8 @@ def _validar_payload_alerta(schema, payload):
     try:
         return schema.model_validate(payload)
     except ValidationError as exc:
-        detail = "; ".join(error["msg"] for error in exc.errors())
+        messages = [error["msg"].removeprefix("Value error, ") for error in exc.errors()]
+        detail = "; ".join(messages)
         raise HTTPException(status_code=400, detail=detail) from exc
 
 
@@ -2492,6 +2754,12 @@ def obtener_resumen_monitoreo_mora(usuario: Usuario = Depends(get_current_user),
     last = db.execute(select(func.max(Bitacora.fecha_hora)).where(Bitacora.cooperativa_id == coop_id,
         Bitacora.modulo == "CREDITOS", Bitacora.accion == "MONITOREO_MORA")).scalar_one()
     top.sort(key=lambda item: Decimal(str(item["probabilidad_mora"])), reverse=True)
+    for row in portfolio.values():
+        row["cartera_total"] = f"{row['cartera_total']:.2f}"
+        row["cartera_en_mora"] = f"{row['cartera_en_mora']:.2f}"
+        row["indice_mora"] = f"{row['indice_mora']:.2f}"
+    for item in top:
+        item["saldo_pendiente"] = f"{item['saldo_pendiente']:.2f}"
     return {"por_moneda": list(portfolio.values()), "creditos_por_riesgo": risk_counts,
         "alertas_activas": severities, "top_riesgo": top[:5], "ultima_ejecucion": last}
 

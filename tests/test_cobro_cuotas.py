@@ -393,6 +393,50 @@ def test_account_payments_settle_one_oldest_installment_per_call(client, payment
     assert receipt.json()["numero_cuota"] == 1
 
 
+def test_partial_payment_keeps_verified_guarantee_and_final_payment_releases_it(client, payment_case_factory):
+    case = payment_case_factory()
+    token = case["tokens"]["OFICIAL_CREDITO"]["token"]
+    guarantee_id = None
+    url = f"/api/v1/creditos/creditos/{case['credit_id']}/pagos"
+    try:
+        with SessionLocal() as db:
+            credit = db.get(models.Credito, case["credit_id"])
+            request_row = db.get(models.SolicitudCredito, credit.solicitud_credito_id)
+            guarantee = models.Garantia(
+                cooperativa_id=case["coop_id"], solicitud_credito_id=request_row.id,
+                tipo="HIPOTECARIA", descripcion="Garantía test payoff", moneda_id=case["bob_id"],
+                valor_comercial=Decimal("1000.00"), valor_realizable=Decimal("700.00"),
+                estado="VERIFICADA", usuario_registro_id=case["tokens"]["OFICIAL_CREDITO"]["id"],
+                usuario_verificacion_id=case["tokens"]["ADMINISTRADOR"]["id"],
+                observacion_verificacion="Verificada para probar pago final", fecha_verificacion=datetime.now(),
+            )
+            db.add(guarantee); db.commit(); guarantee_id = guarantee.id
+
+        partial = client.post(url, json={"modalidad": "CUENTA", "cuenta_ahorro_id": case["account_id"]},
+            headers=_auth(token))
+        assert partial.status_code == 201, partial.text
+        assert partial.json()["credito_estado"] == "VIGENTE"
+        with SessionLocal() as db:
+            guarantee = db.get(models.Garantia, guarantee_id)
+            assert guarantee.estado == "VERIFICADA" and guarantee.fecha_liberacion is None
+
+        final = client.post(url, json={"modalidad": "CUENTA", "cuenta_ahorro_id": case["account_id"]},
+            headers=_auth(token))
+        assert final.status_code == 201, final.text
+        assert final.json()["credito_estado"] == "CANCELADO"
+        with SessionLocal() as db:
+            guarantee = db.get(models.Garantia, guarantee_id)
+            assert guarantee.estado == "LIBERADA" and guarantee.fecha_liberacion is not None
+            assert db.query(models.Bitacora).filter_by(
+                usuario_id=case["tokens"]["OFICIAL_CREDITO"]["id"], accion="LIBERAR_GARANTIA"
+            ).count() == 1
+    finally:
+        if guarantee_id is not None:
+            with SessionLocal() as db:
+                db.query(models.Garantia).filter_by(id=guarantee_id).delete(synchronize_session=False)
+                db.commit()
+
+
 def test_cash_payment_uses_open_session_and_counts_as_cash_in(client, payment_case_factory):
     case = payment_case_factory()
     token = case["tokens"]["CAJERO"]["token"]

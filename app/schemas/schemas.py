@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 
@@ -228,6 +228,7 @@ class ProductoCreditoCreate(BaseModel):
     tasa_mora_anual: Decimal = Decimal("0.00")
     relacion_cuota_ingreso_max: Decimal = Decimal("40.00")
     requiere_garantia: bool = False
+    cobertura_minima_garantia: Decimal = Field(default=Decimal("100.00"), ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal = Field(default=Decimal("0.00"), ge=0)
 
 
@@ -245,6 +246,7 @@ class ProductoCreditoUpdate(BaseModel):
     tasa_mora_anual: Decimal | None = None
     relacion_cuota_ingreso_max: Decimal | None = None
     requiere_garantia: bool | None = None
+    cobertura_minima_garantia: Decimal | None = Field(None, ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal | None = Field(None, ge=0)
 
 
@@ -270,6 +272,7 @@ class ProductoCreditoOut(BaseModel):
     tasa_mora_anual: Decimal
     relacion_cuota_ingreso_max: Decimal
     requiere_garantia: bool
+    cobertura_minima_garantia: Decimal
     monto_aprobacion_directa: Decimal
     estado: str
     fecha_creacion: datetime
@@ -420,6 +423,88 @@ class UltimaEvaluacionOut(BaseModel):
     fecha: datetime
 
 
+class AvalistaOut(BaseModel):
+    nombre: str
+    ci: str
+    ingreso_mensual: Decimal
+    relacion: str
+    telefono: str | None = None
+    socio_id: int | None = None
+
+
+class UsuarioGarantiaOut(BaseModel):
+    id: int
+    nombre: str
+
+
+class GarantiaOut(BaseModel):
+    id: int
+    tipo: Literal["HIPOTECARIA", "PRENDARIA", "PERSONAL"]
+    descripcion: str
+    moneda: MonedaOut
+    valor_comercial: Decimal | None
+    valor_realizable: Decimal
+    documento_referencia: str | None
+    avalista: AvalistaOut | None
+    estado: Literal["REGISTRADA", "VERIFICADA", "RECHAZADA", "LIBERADA"]
+    observacion_verificacion: str | None
+    usuario_registro: UsuarioGarantiaOut
+    usuario_verificacion: UsuarioGarantiaOut | None
+    fecha_registro: datetime
+    fecha_verificacion: datetime | None
+    fecha_liberacion: datetime | None
+
+
+class AvalistaIn(BaseModel):
+    nombre: str = Field(min_length=2, max_length=150)
+    ci: str = Field(min_length=2, max_length=20)
+    ingreso_mensual: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+    relacion: str = Field(min_length=2, max_length=60)
+    telefono: str | None = Field(None, max_length=30)
+    socio_id: int | None = None
+
+
+class GarantiaCreateIn(BaseModel):
+    tipo: Literal["HIPOTECARIA", "PRENDARIA", "PERSONAL"]
+    descripcion: str = Field(min_length=2, max_length=5000)
+    moneda_id: int | None = None
+    valor_comercial: Decimal | None = Field(None, gt=0, max_digits=14, decimal_places=2)
+    documento_referencia: str | None = Field(None, max_length=120)
+    avalista: AvalistaIn | None = None
+
+    @model_validator(mode="after")
+    def validate_by_type(self):
+        if self.tipo == "PERSONAL":
+            if self.avalista is None or self.moneda_id is not None or self.valor_comercial is not None:
+                raise ValueError("La garantía personal requiere los datos del avalista")
+        elif self.avalista is not None or self.moneda_id is None or self.valor_comercial is None:
+            raise ValueError("La garantía hipotecaria o prendaria requiere moneda y valor comercial")
+        return self
+
+
+class GarantiaUpdateIn(BaseModel):
+    descripcion: str | None = Field(None, min_length=2, max_length=5000)
+    moneda_id: int | None = None
+    valor_comercial: Decimal | None = Field(None, gt=0, max_digits=14, decimal_places=2)
+    documento_referencia: str | None = Field(None, max_length=120)
+    avalista: AvalistaIn | None = None
+
+
+class GarantiaVerificacionIn(BaseModel):
+    decision: Literal["VERIFICADA", "RECHAZADA"]
+    observacion: str = Field(min_length=5)
+
+
+class CoberturaOut(BaseModel):
+    requiere_garantia: bool
+    cobertura_minima: Decimal
+    monto_solicitado: Decimal
+    valor_realizable_verificado: Decimal
+    valor_realizable_pendiente: Decimal
+    porcentaje_cobertura: Decimal
+    cumple: bool
+
+
 class SolicitudOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -447,6 +532,7 @@ class SolicitudOut(BaseModel):
     ultima_evaluacion: UltimaEvaluacionOut | None = None
     ronda_comite: int = 0
     resultado_comite: str | None = None
+    cobertura: CoberturaOut | None = None
 
 
 class VotoComiteIn(BaseModel):

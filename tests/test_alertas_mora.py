@@ -244,12 +244,16 @@ def test_monitor_creates_due_soon_once_and_resolves_after_payment_with_cleanup(m
             assert summary.status_code == 200, summary.text
             summary_data = summary.json()
             assert summary_data["por_moneda"][0]["moneda"] == "BOB"
+            assert isinstance(summary_data["por_moneda"][0]["cartera_total"], str)
+            assert isinstance(summary_data["por_moneda"][0]["cartera_en_mora"], str)
+            assert isinstance(summary_data["por_moneda"][0]["indice_mora"], str)
             assert Decimal(str(summary_data["por_moneda"][0]["cartera_total"])) == Decimal("900.00")
             assert Decimal(str(summary_data["por_moneda"][0]["indice_mora"])) == Decimal("100.00")
             assert summary_data["creditos_por_riesgo"] == {"BAJO": 0, "MEDIO": 0, "ALTO": 1, "SIN_PREDICCION": 0}
             assert summary_data["alertas_activas"] == {"INFO": 1, "ADVERTENCIA": 2, "CRITICA": 1}
             assert len(summary_data["top_riesgo"]) == 1
             assert summary_data["top_riesgo"][0]["credito_id"] == ids["credit"]
+            assert isinstance(summary_data["top_riesgo"][0]["saldo_pendiente"], str)
             assert Decimal(str(summary_data["top_riesgo"][0]["probabilidad_mora"])) == Decimal("0.9000")
             foreign_headers = {"Authorization": f"Bearer {foreign_token}"}
             reader_headers = {"Authorization": f"Bearer {reader_token}"}

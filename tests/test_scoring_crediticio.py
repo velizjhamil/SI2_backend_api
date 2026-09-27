@@ -239,7 +239,7 @@ def test_scoring_reuses_request_rate_snapshot_for_installment_and_returns_explan
     request.producto.tasa_interes_anual = Decimal("99.00")
     result = _score(request, today)
     assert result["cuota_estimada"] == Decimal("110.02")
-    assert result["version_modelo"] == "reglas-v1"
+    assert result["version_modelo"] == "reglas-v2"
     assert "APROBADO" in result["explicacion"]
     assert result["score"] == sum(item["puntos"] for item in result["factores"])
 
@@ -434,7 +434,7 @@ def test_evaluation_updates_request_persists_history_and_adds_latest_summary(
     assert response.status_code == 201, response.text
     evaluation = response.json()
     assert evaluation["dictamen"] == "APROBADO"
-    assert evaluation["version_modelo"] == "reglas-v1"
+    assert evaluation["version_modelo"] == "reglas-v2"
     assert evaluation["cuota_estimada"] == "110.02"
     assert len(evaluation["factores"]) == 7
     assert evaluation["resolucion"] is None
