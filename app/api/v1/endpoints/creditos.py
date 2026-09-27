@@ -28,6 +28,8 @@ from app.models.models import (
     SolicitudCredito,
     TablaAmortizacion,
     Usuario,
+    PrediccionDeMorosidad,
+    OfertaRecredito,
 )
 from app.schemas.schemas import (
     MonedaOut,
@@ -54,6 +56,7 @@ from app.schemas.schemas import (
     PagoCuotaIn,
     PagoOut,
     MoraCreditoOut,
+    OfertaOut, GeneracionRecreditosOut, OfertaAceptadaOut, DescartarRecreditoIn,
 )
 
 router = APIRouter()
@@ -548,6 +551,9 @@ def _evaluacion_crediticia_out(evaluacion: EvaluacionCrediticia) -> dict:
         "fecha": evaluacion.fecha,
         "usuario": {"id": evaluacion.usuario.id, "nombre": evaluacion.usuario.nombre},
         "resolucion": resolucion,
+        "probabilidad_mora": evaluacion.probabilidad_mora,
+        "nivel_riesgo": evaluacion.nivel_riesgo,
+        "version_modelo_mora": evaluacion.version_modelo_mora,
     }
 
 
@@ -588,7 +594,17 @@ def evaluar_solicitud_credito(
                     WHERE previa.socio_id = :socio_id
                       AND previa.id <> :solicitud_id
                       AND m.estado = 'EN_MORA'
-                ) AS tiene_mora_vigente
+                ) AS tiene_mora_vigente,
+                (
+                    SELECT count(*)
+                    FROM pago_cuota p
+                    JOIN credito c ON c.id = p.credito_id
+                    JOIN producto_credito pc ON pc.id = c.producto_credito_id
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      AND previa.id <> :solicitud_id
+                      AND p.dias_atraso > pc.dias_gracia_mora
+                ) AS atrasos_previos
             """
         ),
         {"socio_id": solicitud.socio_id, "solicitud_id": solicitud.id},
@@ -606,6 +622,7 @@ def evaluar_solicitud_credito(
         has_credit_history=historial["tiene_credito_previo"],
         has_current_arrears=historial["tiene_mora_vigente"],
     )
+    mora_resultado = predecir_mora(_features_mora(solicitud, resultado, ahorros, historial))
     evaluacion = EvaluacionCrediticia(
         solicitud_credito_id=solicitud.id,
         cooperativa_id=cooperativa_id,
@@ -618,6 +635,9 @@ def evaluar_solicitud_credito(
         cuota_estimada=resultado["cuota_estimada"],
         relacion_cuota_ingreso=resultado["relacion_cuota_ingreso"],
         usuario_id=usuario.id,
+        probabilidad_mora=mora_resultado["probabilidad_mora"],
+        nivel_riesgo=mora_resultado["nivel_riesgo"],
+        version_modelo_mora=mora_resultado["version_modelo"],
     )
     solicitud.estado = (
         "EN_EVALUACION" if resultado["dictamen"] == "REVISION_MANUAL" else resultado["dictamen"]
@@ -1294,12 +1314,12 @@ def actualizar_mora_creditos(
 
 @router.get("/mora", response_model=list[MoraCreditoOut])
 def listar_morosidad_creditos(
-    estado: str = Query(..., pattern="^(EN_MORA|AL_DIA)$"),
+    estado: str | None = Query(None, pattern="^(EN_MORA|AL_DIA)$"),
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     cooperativa_id = _validar_lector(usuario)
-    filas = db.execute(
+    consulta = (
         select(Morosidad)
         .join(Credito, Credito.id == Morosidad.credito_id)
         .options(
@@ -1311,9 +1331,12 @@ def listar_morosidad_creditos(
             joinedload(Morosidad.credito).joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
             joinedload(Morosidad.credito).selectinload(Credito.cronograma),
         )
-        .where(Morosidad.estado == estado, _credito_cooperativa_filter(cooperativa_id))
+        .where(_credito_cooperativa_filter(cooperativa_id))
         .order_by(Morosidad.dias_de_retaso.desc(), Credito.id)
-    ).unique().scalars().all()
+    )
+    if estado is not None:
+        consulta = consulta.where(Morosidad.estado == estado)
+    filas = db.execute(consulta).unique().scalars().all()
     fecha = date.today()
     resultado = []
     for mora in filas:
@@ -1326,7 +1349,10 @@ def listar_morosidad_creditos(
             cuotas=credito.cronograma, fecha=fecha,
             tasa_mora_anual=tasa_mora, dias_gracia_mora=dias_gracia,
         )
+        prediction = db.execute(select(PrediccionDeMorosidad).where(PrediccionDeMorosidad.credito_id == credito.id)).scalar_one_or_none()
         resultado.append({
+            "probabilidad_mora": None if prediction is None else prediction.probabilidad_mora,
+            "nivel_riesgo": None if prediction is None else prediction.nivel_riesgo,
             "credito_id": credito.id,
             "numero_credito": credito.numero_credito,
             "socio": {
@@ -1892,3 +1918,213 @@ def desembolsar_solicitud_credito(
     payload = _credito_detalle_out(detalle)
     db.commit()
     return payload
+
+# Synthetic mora model endpoints (strictly informational; reglas-v1 remains authoritative).
+from app.services.modelo_mora import ficha_modelo, predecir_mora
+
+
+def _features_mora(solicitud, resultado, ahorros, historial):
+    ingreso = Decimal(str(solicitud.evaluacion.ingreso_mensual)) if solicitud.evaluacion else Decimal("0")
+    cuota_deudas = Decimal(str(solicitud.evaluacion.cuota_deudas_mensual)) if solicitud.evaluacion else Decimal("0")
+    ahorro = sum((Decimal(str(a.saldo_disponible)) for a in ahorros if a.estado == "ACTIVA" and a.moneda_id == solicitud.moneda_id), Decimal("0"))
+    importe = Decimal(str(solicitud.monto))
+    return {
+        "ratio_cuota_ingreso": resultado["relacion_cuota_ingreso"] or Decimal("0"),
+        "asfi": solicitud.evaluacion.calificacion_asfi if solicitud.evaluacion and solicitud.evaluacion.calificacion_asfi else "A",
+        "antiguedad_laboral_meses": solicitud.evaluacion.antiguedad_laboral_meses or 0 if solicitud.evaluacion else 0,
+        "endeudamiento": cuota_deudas / ingreso * Decimal("100") if ingreso > 0 else Decimal("0"),
+        "antiguedad_socio_meses": max(0, (date.today().year - solicitud.socio.fecha_registro.year) * 12 + date.today().month - solicitud.socio.fecha_registro.month),
+        "ahorro_ratio": ahorro / importe * Decimal("100") if importe > 0 else Decimal("0"),
+        "atrasos_previos": int(historial.get("atrasos_previos", 0)),
+    }
+
+
+@router.get("/modelo-mora")
+def obtener_ficha_modelo_mora(usuario: Usuario = Depends(get_current_user)):
+    _validar_lector(usuario)
+    return ficha_modelo()
+
+
+@router.post("/mora/prediccion")
+def actualizar_predicciones_mora(
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_escritor_solicitud(usuario)
+    credits = db.execute(select(Credito).options(joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion)).where(Credito.cooperativa_id == cooperativa_id, Credito.estado == "VIGENTE")).unique().scalars().all()
+    counts = {"actualizados": 0, "bajo": 0, "medio": 0, "alto": 0}
+    for credit in credits:
+        req = credit.solicitud
+        eval_field = req.evaluacion
+        if eval_field is None:
+            continue
+        try:
+            installment = _cuota_estimada(Decimal(str(credit.monto_aprobado)), credit.plazo_meses, Decimal(str(credit.tasa_interes)), credit.tipo_amortizacion)
+        except (ValueError, TypeError):
+            continue
+        ratio = installment / Decimal(str(eval_field.ingreso_mensual)) * 100 if eval_field.ingreso_mensual else Decimal("0")
+        late = db.execute(text("SELECT count(*) FROM pago_cuota WHERE credito_id=:id AND dias_atraso > :grace"), {"id": credit.id, "grace": credit.producto.dias_gracia_mora if credit.producto else 0}).scalar_one()
+        eligible_savings = db.execute(select(func.coalesce(func.sum(CuentaAhorro.saldo_disponible), 0)).where(CuentaAhorro.socio_id == credit.socio_id, CuentaAhorro.moneda_id == credit.moneda_id, CuentaAhorro.estado == "ACTIVA")).scalar_one()
+        savings_ratio = Decimal(str(eligible_savings)) / Decimal(str(credit.monto_aprobado)) * 100 if credit.monto_aprobado else Decimal("0")
+        features = {"ratio_cuota_ingreso": ratio, "asfi": eval_field.calificacion_asfi or "A", "antiguedad_laboral_meses": eval_field.antiguedad_laboral_meses or 0, "endeudamiento": Decimal(str(eval_field.cuota_deudas_mensual or 0)) / Decimal(str(eval_field.ingreso_mensual)) * 100 if eval_field.ingreso_mensual else Decimal("0"), "antiguedad_socio_meses": max(0, (date.today().year-credit.socio.fecha_registro.year)*12+date.today().month-credit.socio.fecha_registro.month), "ahorro_ratio": savings_ratio, "atrasos_previos": int(late)}
+        predicted = predecir_mora(features)
+        row = db.execute(select(PrediccionDeMorosidad).where(PrediccionDeMorosidad.credito_id == credit.id)).scalar_one_or_none()
+        if row is None:
+            row = PrediccionDeMorosidad(credito_id=credit.id)
+            db.add(row)
+        row.probabilidad_mora = predicted["probabilidad_mora"]
+        row.nivel_riesgo = predicted["nivel_riesgo"]
+        row.version_modelo = predicted["version_modelo"]
+        row.fecha = func.now()
+        counts["actualizados"] += 1
+        counts[predicted["nivel_riesgo"].lower()] += 1
+    registrar_accion(db, accion="PREDECIR_MORA", modulo="CREDITOS", usuario_id=usuario.id, cooperativa_id=cooperativa_id, descripcion=f"Predicción informativa de mora actualizada para {counts['actualizados']} créditos vigentes", request=request)
+    db.commit()
+    return counts
+
+
+@router.get("/evaluaciones/{evaluacion_id}/explicacion")
+def explicar_evaluacion_mora(evaluacion_id: int, request: Request, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    coop_id = _validar_lector(usuario)
+    evaluacion = db.execute(select(EvaluacionCrediticia).where(EvaluacionCrediticia.id == evaluacion_id, EvaluacionCrediticia.cooperativa_id == coop_id)).scalar_one_or_none()
+    if evaluacion is None:
+        raise HTTPException(status_code=404, detail="Evaluación crediticia no encontrada")
+    risk = evaluacion.nivel_riesgo
+    reasons = [f.get("motivo", f.get("descripcion", "")) for f in (evaluacion.factores or []) if f.get("motivo")]
+    template = f"Dictamen {evaluacion.dictamen} con score {evaluacion.score}. " + " ".join(reasons)
+    if risk:
+        template += f" El modelo sintético estima riesgo {risk.lower()} de mora."
+    result = {"fuente": "PLANTILLA", "texto": template, "nivel_riesgo": risk, "probabilidad_mora": evaluacion.probabilidad_mora}
+    import os
+    provider, key, model = (os.getenv("LLM_PROVIDER"), os.getenv("LLM_API_KEY"), os.getenv("LLM_MODEL"))
+    if provider in {"anthropic", "gemini"} and key and model:
+        # Provider data is restricted to rule outcomes, factor codes/points/reasons and synthetic risk only.
+        text_out = _llm_explanation(provider, key, model, _llm_payload(evaluacion))
+        if text_out:
+            result.update(fuente="LLM", texto=text_out)
+    registrar_accion(db, accion="EXPLICAR_DICTAMEN", modulo="CREDITOS", usuario_id=usuario.id,
+                     cooperativa_id=coop_id, descripcion=f"Explicación de evaluación {evaluacion.id} generada mediante {result['fuente']}", request=request)
+    db.commit()
+    return result
+
+
+def _llm_payload(evaluacion):
+    def safe_factor(factor):
+        code = factor.get("codigo")
+        return {"codigo": code, "puntos": factor.get("puntos"), "motivo": f"Factor {code} aplicado" if isinstance(code, str) and code.isascii() and code.replace("_", "").isalnum() else "Factor de evaluación aplicado"}
+    def safe_knockout(knockout):
+        code = knockout.get("codigo")
+        return {"codigo": code, "motivo": "Criterio de elegibilidad no cumplido"}
+    return {"dictamen": evaluacion.dictamen, "score": evaluacion.score, "factores": [safe_factor(f) for f in (evaluacion.factores or [])], "knockouts": [safe_knockout(k) for k in (evaluacion.knockouts or [])], "nivel_riesgo": evaluacion.nivel_riesgo}
+
+
+def _llm_explanation(provider, key, model, payload):
+    try:
+        import httpx
+        prompt = "Explica en español de forma breve y respetuosa este dictamen: " + str(payload)
+        if provider == "anthropic":
+            response = httpx.post("https://api.anthropic.com/v1/messages", headers={"x-api-key": key, "anthropic-version": "2023-06-01"}, json={"model": model, "max_tokens": 300, "messages": [{"role": "user", "content": prompt}]}, timeout=15)
+            response.raise_for_status()
+            text_out = response.json()["content"][0]["text"]
+        elif provider == "gemini":
+            response = httpx.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}", json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
+            response.raise_for_status()
+            text_out = response.json()["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            return None
+        return text_out.strip() if isinstance(text_out, str) and text_out.strip() else None
+    except Exception:
+        return None
+
+from datetime import timedelta
+from sqlalchemy.orm import joinedload as _joinedload
+
+
+def _oferta_out(db, offer):
+    socio = db.get(Socio, offer.socio_id)
+    credit = db.get(Credito, offer.credito_origen_id)
+    product = db.get(ProductoCredito, offer.producto_credito_id)
+    request = db.get(SolicitudCredito, offer.solicitud_generada_id) if offer.solicitud_generada_id else None
+    currency = db.get(Moneda, product.moneda_id) if product else None
+    if offer.estado == "VIGENTE" and offer.fecha_vencimiento < date.today():
+        offer.estado = "EXPIRADA"
+        db.flush()
+    return {"id":offer.id,"socio":{"id":socio.id,"nombre_completo":f"{socio.nombre} {socio.apellido}","ci":socio.ci},"credito_origen":{"id":credit.id,"numero_credito":credit.numero_credito,"estado":credit.estado},"producto":{"id":product.id,"codigo":product.codigo,"nombre":product.nombre},"moneda":currency.codigo_iso if currency else None,"monto_sugerido":offer.monto_sugerido,"plazo_meses":offer.plazo_meses,"tasa_interes":offer.tasa_interes,"cuota_estimada":offer.cuota_estimada,"probabilidad_mora":offer.probabilidad_mora,"nivel_riesgo":offer.nivel_riesgo,"motivos":offer.motivos,"estado":offer.estado,"fecha_generacion":offer.fecha_generacion,"fecha_vencimiento":offer.fecha_vencimiento,"solicitud_generada":None if request is None else {"id":request.id,"numero_solicitud":request.numero_solicitud}}
+
+
+@router.post("/recreditos/generar", response_model=GeneracionRecreditosOut)
+def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_current_user), db: Session=Depends(get_db)):
+    coop_id=_validar_escritor_solicitud(usuario)
+    credits=db.execute(select(Credito).options(joinedload(Credito.socio),joinedload(Credito.producto),joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion)).where(Credito.cooperativa_id==coop_id, Credito.estado.in_(("VIGENTE","CANCELADO")))).unique().scalars().all()
+    generated=[]; omitted=0
+    for credit in credits:
+        product=credit.producto; socio=credit.socio; source=credit.solicitud
+        if not product or product.estado!="ACTIVO" or not socio or not source: omitted+=1; continue
+        if credit.estado=="VIGENTE" and (credit.monto_aprobado-credit.saldo_pendiente)/credit.monto_aprobado < Decimal("0.70"): omitted+=1; continue
+        db.execute(text("UPDATE oferta_recredito SET estado='EXPIRADA' WHERE socio_id=:socio_id AND estado='VIGENTE' AND fecha_vencimiento < :today"), {"socio_id": socio.id, "today": date.today()})
+        if db.execute(select(OfertaRecredito.id).where(OfertaRecredito.socio_id==socio.id,OfertaRecredito.estado=="VIGENTE")).scalar_one_or_none(): omitted+=1; continue
+        if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==socio.id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION")))).scalar_one_or_none(): omitted+=1; continue
+        if db.execute(select(Morosidad.id).join(Credito, Credito.id == Morosidad.credito_id).where(Credito.socio_id == socio.id, Morosidad.estado == "EN_MORA")).scalar_one_or_none(): omitted+=1; continue
+        late=db.execute(text("SELECT count(*) FROM pago_cuota p JOIN tabla_amortizacion t ON t.id=p.tabla_amortizacion_id WHERE p.credito_id=:cid AND p.dias_atraso > :grace"),{"cid":credit.id,"grace":product.dias_gracia_mora}).scalar_one()
+        if late: omitted+=1; continue
+        evaluation=db.execute(select(EvaluacionCampo).where(EvaluacionCampo.socio_id==socio.id).order_by(EvaluacionCampo.fecha.desc(),EvaluacionCampo.id.desc())).scalars().first()
+        if evaluation is None or evaluation.ingreso_mensual<=0: omitted+=1; continue
+        amount=credit.monto_aprobado*(Decimal("1.50") if credit.estado=="CANCELADO" else Decimal("1.25"))
+        amount=min(amount,product.monto_max).quantize(Decimal("1"),rounding="ROUND_DOWN")
+        amount=(amount/Decimal("100")).to_integral_value(rounding="ROUND_DOWN")*Decimal("100")
+        term=min(max(credit.plazo_meses or product.plazo_min_meses,product.plazo_min_meses),product.plazo_max_meses)
+        installment=calcular_cuota_inicial(amount,term,product.tasa_interes_anual,product.tipo_amortizacion)
+        while amount>=product.monto_min and installment/evaluation.ingreso_mensual*100>product.relacion_cuota_ingreso_max:
+            amount-=Decimal("100")
+            installment=calcular_cuota_inicial(amount,term,product.tasa_interes_anual,product.tipo_amortizacion)
+        if amount<product.monto_min: omitted+=1; continue
+        active_savings=db.execute(select(func.coalesce(func.sum(CuentaAhorro.saldo_disponible),0)).where(CuentaAhorro.socio_id==socio.id,CuentaAhorro.moneda_id==credit.moneda_id,CuentaAhorro.estado=="ACTIVA")).scalar_one()
+        arrears_count=db.execute(text("SELECT count(*) FROM pago_cuota p JOIN tabla_amortizacion t ON t.id=p.tabla_amortizacion_id WHERE p.credito_id=:cid AND p.dias_atraso > :grace"),{"cid":credit.id,"grace":product.dias_gracia_mora}).scalar_one()
+        member_months=max(0,(date.today().year-socio.fecha_registro.year)*12+date.today().month-socio.fecha_registro.month)
+        result=predecir_mora({"ratio_cuota_ingreso":installment/evaluation.ingreso_mensual*100,"asfi":evaluation.calificacion_asfi or "A","antiguedad_laboral_meses":evaluation.antiguedad_laboral_meses or 0,"endeudamiento":evaluation.cuota_deudas_mensual/evaluation.ingreso_mensual*100,"antiguedad_socio_meses":member_months,"ahorro_ratio":Decimal(str(active_savings))/amount*100 if amount else Decimal("0"),"atrasos_previos":int(arrears_count)})
+        motivo=f"Crédito {credit.numero_credito} {('cancelado' if credit.estado=='CANCELADO' else 'vigente con al menos 70% del principal pagado')} sin atrasos"
+        offer=OfertaRecredito(cooperativa_id=coop_id,socio_id=socio.id,credito_origen_id=credit.id,producto_credito_id=product.id,monto_sugerido=amount,plazo_meses=term,tasa_interes=product.tasa_interes_anual,cuota_estimada=installment,probabilidad_mora=result["probabilidad_mora"],nivel_riesgo=result["nivel_riesgo"],motivos=[motivo],fecha_vencimiento=date.today()+timedelta(days=30),usuario_id=usuario.id)
+        db.add(offer); db.flush(); generated.append(_oferta_out(db,offer))
+    registrar_accion(db,accion="GENERAR_RECREDITOS",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Generadas {len(generated)} ofertas de re-crédito",request=request); db.commit()
+    return {"generadas":len(generated),"omitidas":omitted,"ofertas":generated}
+
+
+@router.get("/recreditos", response_model=list[OfertaOut])
+def listar_ofertas_recredito(estado: str|None=Query(None),usuario: Usuario=Depends(get_current_user),db: Session=Depends(get_db)):
+    coop_id=_validar_lector(usuario)
+    offers=db.execute(select(OfertaRecredito).where(OfertaRecredito.cooperativa_id==coop_id).order_by(OfertaRecredito.fecha_generacion.desc(),OfertaRecredito.id.desc())).scalars().all()
+    result=[]
+    for offer in offers:
+        value=_oferta_out(db,offer)
+        if estado is None or value["estado"]==estado: result.append(value)
+    db.commit(); return result
+
+
+@router.post("/recreditos/{oferta_id}/descartar", response_model=OfertaOut)
+def descartar_oferta_recredito(oferta_id:int,body:DescartarRecreditoIn,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db)):
+    coop_id=_validar_escritor_solicitud(usuario); reason=body.motivo
+    if not isinstance(reason,str) or len(reason.strip())<5: raise HTTPException(status_code=422,detail="El motivo debe contener al menos 5 caracteres")
+    offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id)).scalar_one_or_none()
+    if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")
+    if offer.estado!="VIGENTE": raise HTTPException(status_code=409,detail="La oferta no está vigente")
+    offer.estado="DESCARTADA"; offer.motivo_descarte=reason.strip()
+    registrar_accion(db,accion="DESCARTAR_RECREDITO",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Oferta {offer.id} descartada",request=request); db.commit(); db.refresh(offer); return _oferta_out(db,offer)
+
+
+@router.post("/recreditos/{oferta_id}/aceptar",status_code=201,response_model=OfertaAceptadaOut)
+def aceptar_oferta_recredito(oferta_id:int,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db)):
+    coop_id=_validar_escritor_solicitud(usuario)
+    offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id).with_for_update()).scalar_one_or_none()
+    if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")
+    if offer.estado=="VIGENTE" and offer.fecha_vencimiento<date.today(): offer.estado="EXPIRADA"
+    if offer.estado!="VIGENTE": raise HTTPException(status_code=409,detail="La oferta no está vigente")
+    if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==offer.socio_id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION")))).scalar_one_or_none(): raise HTTPException(status_code=409,detail="El socio ya tiene una solicitud en curso")
+    socio=db.get(Socio,offer.socio_id); product=db.get(ProductoCredito,offer.producto_credito_id)
+    evaluation=db.execute(select(EvaluacionCampo).where(EvaluacionCampo.socio_id==offer.socio_id).order_by(EvaluacionCampo.fecha.desc(),EvaluacionCampo.id.desc())).scalars().first()
+    number=_siguiente_secuencia(db,coop_id,"SOLICITUD_CREDITO")
+    solicitud=SolicitudCredito(monto=offer.monto_sugerido,plazo_meses=offer.plazo_meses,tasa_interes=offer.tasa_interes,calificacion_asfi=evaluation.calificacion_asfi if evaluation else None,tiene_deudas=bool(evaluation and evaluation.cuota_deudas_mensual>0),estado="PENDIENTE",socio_id=socio.id,usuario_id=usuario.id,evaluacion_campo_id=evaluation.id if evaluation else None,producto_credito_id=product.id,moneda_id=product.moneda_id,numero_solicitud=f"SOL-{number:06d}",destino="OTRO",destino_detalle=f"Re-crédito preaprobado (oferta #{offer.id})",cooperativa_id=coop_id)
+    db.add(solicitud); db.flush(); offer.estado="ACEPTADA"; offer.solicitud_generada_id=solicitud.id
+    registrar_accion(db,accion="ACEPTAR_RECREDITO",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Oferta de re-crédito {offer.id} aceptada; solicitud {solicitud.id}",request=request)
+    db.commit(); db.refresh(offer); solicitud=_obtener_solicitud(db,coop_id,solicitud.id)
+    return {"oferta":_oferta_out(db,offer),"solicitud":_solicitud_out(solicitud)}

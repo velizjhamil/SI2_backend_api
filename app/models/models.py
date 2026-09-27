@@ -376,6 +376,9 @@ class EvaluacionCrediticia(Base):
     resolucion_justificacion: Mapped[str | None] = mapped_column(Text)
     resolucion_usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
     resolucion_fecha = mapped_column(TIMESTAMP(timezone=True))
+    probabilidad_mora = mapped_column(Numeric(5, 4))
+    nivel_riesgo: Mapped[str | None] = mapped_column(String(10))
+    version_modelo_mora: Mapped[str | None] = mapped_column(String(20))
 
     solicitud: Mapped["SolicitudCredito"] = relationship(back_populates="evaluaciones_crediticias")
     cooperativa: Mapped["Cooperativa"] = relationship()
@@ -782,3 +785,35 @@ class Liquidacion(Base):
     usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
     cuenta_abono_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cuenta_ahorro.id"))
     dpf_renovado_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id"))
+
+
+class PrediccionDeMorosidad(Base):
+    __tablename__ = "prediccion_de_morosidad"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id", ondelete="CASCADE"), nullable=False, unique=True)
+    probabilidad_mora = mapped_column(Numeric(5, 4), nullable=False)
+    nivel_riesgo: Mapped[str] = mapped_column(String(10), nullable=False)
+    version_modelo: Mapped[str | None] = mapped_column(String(20))
+    fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+
+class OfertaRecredito(Base):
+    __tablename__ = "oferta_recredito"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    socio_id: Mapped[int] = mapped_column(Integer, ForeignKey("socio.id"), nullable=False)
+    credito_origen_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    producto_credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("producto_credito.id"), nullable=False)
+    monto_sugerido = mapped_column(Numeric(14, 2), nullable=False)
+    plazo_meses: Mapped[int] = mapped_column(Integer, nullable=False)
+    tasa_interes = mapped_column(Numeric(5, 2), nullable=False)
+    cuota_estimada = mapped_column(Numeric(14, 2), nullable=False)
+    probabilidad_mora = mapped_column(Numeric(5, 4))
+    nivel_riesgo: Mapped[str | None] = mapped_column(String(10))
+    motivos = mapped_column(JSONB, nullable=False)
+    estado: Mapped[str] = mapped_column(String(12), nullable=False, server_default="VIGENTE")
+    fecha_generacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_vencimiento = mapped_column(Date, nullable=False)
+    solicitud_generada_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("solicitud_credito.id"))
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    motivo_descarte: Mapped[str | None] = mapped_column(Text)

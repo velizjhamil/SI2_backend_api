@@ -405,6 +405,9 @@ class EvaluacionCrediticiaOut(BaseModel):
     fecha: datetime
     usuario: UsuarioEvaluacionOut
     resolucion: ResolucionEvaluacionOut | None
+    probabilidad_mora: Decimal | None = None
+    nivel_riesgo: str | None = None
+    version_modelo_mora: str | None = None
 
 
 class UltimaEvaluacionOut(BaseModel):
@@ -609,6 +612,8 @@ class MoraCreditoOut(BaseModel):
     saldo_pendiente: Decimal
     moneda: MonedaOut | None
     fecha_actualizacion: datetime | None
+    probabilidad_mora: Decimal | None = None
+    nivel_riesgo: str | None = None
 
 
 class CajaOut(BaseModel):
@@ -1001,3 +1006,60 @@ class DPFLiquidacionIn(BaseModel):
     capitalizar: bool = False
     plazo_dias: int | None = Field(None, ge=30)
     modalidad_pago_interes: Literal["VENCIMIENTO", "MENSUAL"] | None = None
+
+
+class SocioOfertaOut(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+
+
+class CreditoOrigenOfertaOut(BaseModel):
+    id: int
+    numero_credito: str | None
+    estado: str | None
+
+
+class ProductoOfertaOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+
+
+class SolicitudGeneradaOfertaOut(BaseModel):
+    id: int
+    numero_solicitud: str | None
+
+
+class OfertaOut(BaseModel):
+    id: int
+    socio: SocioOfertaOut
+    credito_origen: CreditoOrigenOfertaOut
+    producto: ProductoOfertaOut
+    moneda: str | None
+    monto_sugerido: Decimal
+    plazo_meses: int
+    tasa_interes: Decimal
+    cuota_estimada: Decimal
+    probabilidad_mora: Decimal | None
+    nivel_riesgo: str | None
+    motivos: list[str]
+    estado: Literal["VIGENTE", "ACEPTADA", "DESCARTADA", "EXPIRADA"]
+    fecha_generacion: datetime
+    fecha_vencimiento: date
+    solicitud_generada: SolicitudGeneradaOfertaOut | None
+
+
+class GeneracionRecreditosOut(BaseModel):
+    generadas: int
+    omitidas: int
+    ofertas: list[OfertaOut]
+
+
+class OfertaAceptadaOut(BaseModel):
+    oferta: OfertaOut
+    solicitud: SolicitudOut
+
+
+class DescartarRecreditoIn(BaseModel):
+    motivo: str = Field(min_length=5)

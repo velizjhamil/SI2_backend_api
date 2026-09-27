@@ -1,0 +1,92 @@
+# Feature: Predictive re-credit offers, default-probability model and dictamen explanation — CU-W23 part 2
+
+Last step of the plan: W20 ✅ → W21 ✅ → W23 p1 ✅ → W24+W26 ✅ → W27 ✅ → **W23 part 2**. Autonomous run authorized by the user. Agreed approach (2026-09-24): AI layer external to the rule-based engine; ML only with a declared synthetic dataset; the dictamen is never changed by the AI.
+
+## User stories (fictional, drafted by the orchestrator)
+> Como oficial de crédito quiero ver ofertas de re-crédito preaprobadas para socios puntuales, con monto y cuota sugeridos y el motivo, para ofrecerles un nuevo crédito de forma proactiva.
+> Como analista quiero una probabilidad de mora estimada por un modelo (informativa) para cada evaluación y cada crédito vigente, con transparencia sobre cómo fue entrenado.
+> Como oficial quiero una explicación en lenguaje natural del dictamen para comunicarla al socio.
+
+Acceptance criteria:
+1. Measurable "socio puntual" criteria; offers generated on demand with suggested product, amount, term, rate, estimated installment, probability of default and explicit reasons; offers expire after 30 days.
+2. Accepting an offer creates a new PENDIENTE request (CU-W21 rules apply) prefilled from the offer and the socio's latest evaluation; discarding records it.
+3. A logistic-regression default-probability model trained **only on a synthetic dataset**, clearly declared as such (model card with dataset description, sample size, metrics and feature weights). It is informative: it never changes scores, knock-outs or dictamen.
+4. Probability shown in each new credit evaluation and computed for VIGENTE credits (stored in `prediccion_de_morosidad`).
+5. Dictamen explanation: deterministic template by default; optional LLM provider only when configured by environment variables (disabled by default), sending no personal data. Audited.
+
+## Decisions (orchestrator)
+### Socio puntual and offers
+- Eligible when the socio has a credit (VIGENTE or CANCELADO) whose product is ACTIVE and: (a) CANCELADO, or VIGENTE with ≥ 70% of principal paid; (b) every paid installment has `dias_atraso ≤ dias_gracia_mora` of its product; (c) no current `morosidad` EN_MORA; (d) no request in progress (PENDIENTE/OBSERVADA/EN_EVALUACION); (e) no VIGENTE offer already.
+- Suggested amount = previous `monto_aprobado` × 1.50 if CANCELADO else × 1.25, capped at the product `monto_max`, rounded down to the nearest 100. Term = previous term clamped to product range; rate = current product rate; installment via the amortization service.
+- Capacity: with the socio's latest evaluation income (`evaluacion_campo`), if installment/income × 100 exceeds product `relacion_cuota_ingreso_max`, reduce the amount in steps of 100 until it fits; if it cannot reach the product `monto_min`, no offer. Without evaluation income → no offer.
+- `motivos`: list of Spanish strings explaining eligibility (e.g. "Crédito CRE-000002 cancelado sin atrasos").
+- Offer states: VIGENTE → ACEPTADA | DESCARTADA | EXPIRADA (expired lazily on read when `fecha_vencimiento` < today).
+- Roles: generate/accept/discard = OFICIAL_CREDITO or ADMINISTRADOR; read = cooperative staff.
+
+### Default-probability model `mora-logit-v1`
+- Training script `scripts/train_modelo_mora.py` (numpy + scikit-learn, already in requirements): deterministic synthetic dataset (`numpy.random.default_rng(2026)`, N = 5000) generated from a documented ground-truth logistic rule with noise over the features below; 80/20 split; `LogisticRegression` on standardized features; writes `app/ml/modelo_mora_v1.json` with feature order, means, stds, coefficients, intercept, metrics (AUC, accuracy on the holdout), N, seed, the ground-truth description and `"dataset": "SINTETICO"`. The JSON is committed; runtime inference is pure Python from the JSON (no sklearn import at request time).
+- Features (same definitions as reglas-v1 inputs): `ratio_cuota_ingreso` (%), `asfi` (A=0 … F=5), `antiguedad_laboral_meses`, `endeudamiento` (%), `antiguedad_socio_meses`, `ahorro_ratio` (%), `atrasos_previos` (count of past installments paid late beyond grace).
+- Risk level: BAJO p < 0.15; MEDIO 0.15 ≤ p < 0.35; ALTO p ≥ 0.35.
+- Evaluation (CU-W23 p1) stores `probabilidad_mora`, `nivel_riesgo`, `version_modelo_mora` on `evaluacion_crediticia`; dictamen/score unchanged (tests must prove the dictamen is identical with and without the model).
+- VIGENTE credits: refresh endpoint writes one `prediccion_de_morosidad` row per credit (upsert).
+
+### Explanation
+- Endpoint returns `{fuente, texto}`. `fuente = "PLANTILLA"` (existing deterministic explanation, enriched with the risk level) unless `LLM_PROVIDER` and its key are configured (`LLM_PROVIDER=anthropic|gemini`, `LLM_API_KEY`, `LLM_MODEL`), in which case call the provider with httpx (timeout 15 s) sending only dictamen, score, factor codes/points/reasons, knock-outs and risk level — **never names, CI or amounts tied to identity** — and fall back to PLANTILLA on any error. Tests mock the provider; no real network in tests.
+- Bitácora `CREDITOS`: `GENERAR_RECREDITOS`, `ACEPTAR_RECREDITO`, `DESCARTAR_RECREDITO`, `PREDECIR_MORA`.
+
+## Migration `migrations/019_sprint8_recredito_ia.sql` (idempotent; do not modify 002–018)
+- `oferta_recredito(id BIGSERIAL PK, cooperativa_id BIGINT NOT NULL REFERENCES cooperativa(id), socio_id INT NOT NULL REFERENCES socio(id), credito_origen_id INT NOT NULL REFERENCES credito(id), producto_credito_id INT NOT NULL REFERENCES producto_credito(id), monto_sugerido NUMERIC(14,2) NOT NULL, plazo_meses INT NOT NULL, tasa_interes NUMERIC(5,2) NOT NULL, cuota_estimada NUMERIC(14,2) NOT NULL, probabilidad_mora NUMERIC(5,4) NULL, nivel_riesgo VARCHAR(10) NULL, motivos JSONB NOT NULL, estado VARCHAR(12) NOT NULL DEFAULT 'VIGENTE' CHECK (estado IN ('VIGENTE','ACEPTADA','DESCARTADA','EXPIRADA')), fecha_generacion TIMESTAMPTZ NOT NULL DEFAULT now(), fecha_vencimiento DATE NOT NULL, solicitud_generada_id INT NULL REFERENCES solicitud_credito(id), usuario_id BIGINT NULL REFERENCES usuario(id), motivo_descarte TEXT NULL)`; partial unique: one VIGENTE offer per socio.
+- `evaluacion_crediticia` add `probabilidad_mora NUMERIC(5,4)`, `nivel_riesgo VARCHAR(10)`, `version_modelo_mora VARCHAR(20)`.
+- `prediccion_de_morosidad` add `version_modelo VARCHAR(20)`, `fecha TIMESTAMPTZ DEFAULT now()`; `UNIQUE (credito_id)` only if existing data allows it (seed has 1 row).
+
+## API contract (backend and frontend MUST follow exactly)
+Base `/api/v1/creditos`. Errors `{"detail": "..."}`.
+
+`OfertaOut` = `{id, socio: {id, nombre_completo, ci}, credito_origen: {id, numero_credito, estado}, producto: {id, codigo, nombre}, moneda, monto_sugerido, plazo_meses, tasa_interes, cuota_estimada, probabilidad_mora | null, nivel_riesgo | null, motivos: [string], estado, fecha_generacion, fecha_vencimiento, solicitud_generada: {id, numero_solicitud} | null}`.
+
+1. `POST /creditos/recreditos/generar` → `{generadas, omitidas, ofertas: [OfertaOut]}` (new VIGENTE offers created in this call).
+2. `GET /creditos/recreditos?estado=` → `[OfertaOut]` newest first (expires stale ones first).
+3. `POST /creditos/recreditos/{id}/aceptar` → `201 {oferta: OfertaOut, solicitud: SolicitudOut}` (new PENDIENTE request with the offer's product, amount and term, `destino = "OTRO"` and `destino_detalle = "Re-crédito preaprobado (oferta #<id>)"`), evaluation copied from the socio's latest `evaluacion_campo`. 409 if not VIGENTE or the socio has a request in progress.
+4. `POST /creditos/recreditos/{id}/descartar` body `{motivo}` (≥ 5 chars) → `OfertaOut` DESCARTADA.
+5. `GET /creditos/modelo-mora` → model card `{version, dataset: "SINTETICO", descripcion_dataset, n_muestras, semilla, metricas: {auc, accuracy}, features: [{nombre, descripcion, coeficiente}], umbrales: {bajo, medio}, advertencia}`.
+6. `POST /creditos/mora/prediccion` → `{actualizados, bajo, medio, alto}` for VIGENTE credits of the cooperative.
+7. `GET /creditos/evaluaciones/{id}/explicacion` → `{fuente: "PLANTILLA"|"LLM", texto, nivel_riesgo, probabilidad_mora}`.
+8. Additive: `EvaluacionCrediticiaOut` gains `probabilidad_mora`, `nivel_riesgo`, `version_modelo_mora`; `MoraCreditoOut` (CU-W27) gains `probabilidad_mora`, `nivel_riesgo` (null until predicted).
+
+## Tasks
+Backend — Codex (`SI2_backend_api`, branch `feat/recredito-ia`):
+- [x] B1 Migration 019 applied twice; models/schemas
+- [x] B2 Training script + committed `app/ml/modelo_mora_v1.json` (report AUC/accuracy) + pure-Python inference service with tests (probability monotonic in ratio and ASFI; deterministic output for a fixed input)
+- [x] B3 Model in evaluation (dictamen unchanged, proven by test) + credit prediction refresh + model card endpoint (RED→GREEN)
+- [x] B4 Re-credit eligibility/offer generation/accept/discard/expiry with exact amounts (RED→GREEN)
+- [x] B5 Explanation endpoint: template default, mocked LLM provider path, no PII in payload (test asserts), fallback on error (RED→GREEN)
+
+Frontend — Antigravity (`SI2_frontend_web`, branch `feat/recredito-ia`):
+- [x] F1 `creditosApi.js`: add functions for endpoints 1–7 (add only)
+- [x] F2 Evaluation panel: probability + risk level badge labeled "Modelo sintético (informativo)", "Explicación" button showing text and `fuente`, "Acerca del modelo" modal (model card)
+- [x] F3 New page `RecreditosPage.jsx` for `/oficial/recreditos` and `/admin/recreditos` + nav items "Re-créditos": generate button, offers list with reasons/risk, accept (navigate to the new request) / discard with reason
+- [x] F4 Mora view (CarteraPage): probability/risk columns + "Predecir mora" button (oficial/admin)
+
+Orchestrator — Claude:
+- [x] V1 Review, E2E (punctual socio → offer → accept; model card metrics; dictamen unchanged; explanation template), commits, final summary
+
+## Checks
+- Backend TDD strict: `.venv/bin/python -m pytest -q`; new tests `tests/test_recredito_ia.py`, `tests/test_modelo_mora.py`. Baseline 204 passed / 5 pre-existing failures. No leftover test cooperatives (verify before finishing).
+- Frontend: `pnpm build` OK; oxlint 0 errors, 8 pre-existing warnings.
+
+## Progress
+- 2026-09-26: branches `feat/recredito-ia` created from `feat/cobro-cuotas-mora`; decisions and contract defined; delegated.
+- 2026-09-26: Implementation route: delegated direct (single writer); mapping trigger fired because understanding spans scoring, credit APIs, persistence, ML, and test fixture surfaces. Strict TDD is enabled by the request; exact runner: `.venv/bin/python -m pytest`. User baseline: 204 passed / 5 pre-existing failures. Forecast: approximately 1,000–1,400 authored changed lines across B1–B5; delivery strategy `ask-on-risk`. User's active Git-forbidden rule means no work-unit commit will be attempted; if commits are later authorized, chain strategy must be resolved before a commit because the forecast exceeds 400 lines.
+- Mapping readback: `prediccion_de_morosidad` is referenced by the contract but was not found in tracked migrations/app models; migration 019 must establish the table safely before adding model fields. The ML `ahorro_ratio` is not separately defined in the task; use the existing reglas-v1 savings-factor definition (eligible active savings balance divided by requested principal), document it in the model card, and keep inference strictly advisory.
+- 2026-09-26 backend implementation evidence: B1 migration `019_sprint8_recredito_ia.sql` applied twice locally; legacy `prediccion_de_morosidad` schema was already present with Spanish legacy column names, so migration now adds canonical columns and backfills them, preserving old data. B2 synthetic training regenerates identical JSON SHA-256 `cd4172d6eb8300a0b7952622bccbb467139574a8def3dd1e8165c59ab531f069`; holdout AUC `0.8579033033251346`, accuracy `0.779`; pure-Python inference and deterministic/monotonic tests pass. Model card documents synthetic-only data and ahorro mapping. This was an intermediate checkpoint before completing B3–B5 endpoint-level tests. At that point the helpers were covered, while end-to-end endpoint proof remained open; the final completion readback below supersedes its partial status and test counts. `git diff --check` clean. Hygiene: only cooperative row is `Cooperativa de Prueba SI2`; `control_caja.id=406` remains ABIERTA. No test cooperatives remain.
+
+- 2026-09-26 backend B1–B5 completion readback: Added endpoint-level tests and verified B3 evaluation persistence plus identical reglas-v1 score/dictamen/knockouts, model-card response, and prediction upsert; B4 eligibility includes exact 70% threshold, paid-payment grace boundary (5 days passes/6 fails), current arrears, in-progress request, capacity steps, cap, term/rate, duplicate offer, discard, acceptance/latest evaluation, stale expiry, role and tenant boundaries; B5 template, mocked provider PII-free payload, network-failure fallback, and audit. During RED, API tests exposed missing `OfertaRecredito` import, incorrect `Moneda.codigo` attribute, and legacy NOT NULL prediction columns; fixed and targeted `.venv/bin/python -m pytest tests/test_modelo_mora.py tests/test_recredito_ia.py -q`: `21 passed`. Full `.venv/bin/python -m pytest -q`: `225 passed, 5 failed` (same five known pre-existing multi-tenant/savings fixture failures). Migration 019 applied twice again. Training regeneration hash equal twice (`cd4172d6eb8300a0b7952622bccbb467139574a8def3dd1e8165c59ab531f069`); AUC `0.8579033033251346`, accuracy `0.779`. `git diff --check` exit 0. DB hygiene: only `Cooperativa de Prueba SI2`, no test cooperatives; `control_caja.id=406` remains ABIERTA. No commits.
+
+- 2026-09-26 verifier follow-up (B3/B4/B5 hardening): Added adversarial tests before fixes. RED observed all three expected failures: template explanation had zero audit rows; LLM payload retained a name/CI embedded in free-text factor/knockout reasons; and re-credit prediction emitted `antiguedad_socio_meses=0` despite persisted 2020 registration and evaluation data. GREEN changes: audit now records template and fallback paths; provider payload retains factor codes/points but substitutes generic reason text (and generic knockout reason); offer prediction derives member tenure, active savings ratio, and over-grace paid installments from persistence, while absent savings safely yields zero. Focused RED→GREEN command: `.venv/bin/python -m pytest tests/test_recredito_ia.py -q -k 'sanitizes_untrusted or template_explanation_api or persisted_member_credit_features'` → RED `3 failed` as expected, then GREEN `3 passed`. Final `.venv/bin/python -m pytest tests/test_modelo_mora.py tests/test_recredito_ia.py -q` → `23 passed, 2 warnings` (19.38s). Full `.venv/bin/python -m pytest -q` → `227 passed, 5 failed, 2 warnings` (113.33s); same known unrelated failures: one multi-tenant admin access expectation and four stale savings request fixtures (`monto_apertura`, `numero_titulos`, `valor_unitario`, dependent KeyError). `git diff --check` clean. Final hygiene: only `(1, 'Cooperativa de Prueba SI2')`, zero test cooperatives, `control_caja.id=406` is `ABIERTA`. No network calls or commits.
+- Parent final spot-check after privacy/audit/feature-source hardening: `.venv/bin/python -m pytest -q` → `5 failed, 227 passed, 2 warnings in 113.13s (0:01:53)`; the five are the documented pre-existing multi-tenant/savings failures. Final local DB query: only `1:Cooperativa de Prueba SI2`, zero test cooperatives, `control_caja.id=406` remains `ABIERTA`. `git diff --check` exit 0. Artifacts remain uncommitted/untracked where newly created because Git write commands are forbidden for this task.
+- 2026-09-26 parent correction: GET `/creditos/mora` now accepts an omitted `estado` filter; when provided it still validates `EN_MORA|AL_DIA`. Ordering remains days late descending, then credit ID. Test-first RED: no-query endpoint test returned 422 (required `estado`); GREEN after optional parameter/conditional filtering: focused test `1 passed`. Observed existing behavior: POST `/creditos/mora/prediccion` skips VIGENTE credits without socioeconomic evaluation/features, such as legacy seed credit; prediction contract unchanged.
+- Parent correction verification: exact `.venv/bin/python -m pytest -q` → `5 failed, 228 passed, 2 warnings in 177.76s (0:02:57)`; same known pre-existing failures (multi-tenant admin access expectation; four savings fixtures requiring `monto_apertura`, `numero_titulos`, `valor_unitario`, including dependent `KeyError`). Final coopDB hygiene query returned only `(1, 'Cooperativa de Prueba SI2')`; `control_caja.id=406` remains `ABIERTA`. `git diff --check` clean. No contract deviation beyond the requested optional `estado` filter; ordering and filtered values unchanged.
+- Parent correction spot-check: `.venv/bin/python -m pytest -q` → `5 failed, 228 passed, 2 warnings in 177.60s (0:02:57)`; the same five known baseline failures. Final coopDB query confirmed only `Cooperativa de Prueba SI2`, zero test cooperatives, and caja 406 `ABIERTA`.
+- 2026-09-26 (orchestrator review): scope respected on both sides (requirements.txt untouched; no sklearn import under app/; frontend creditosApi additions only, re-credit routes + nav items, components; package/lock intact). Model artifact reproducible: retraining yields the identical file (same SHA-256). Metrics on the synthetic holdout: AUC 0.858, accuracy 0.779 (N 5000, seed 2026). Probability always labeled as synthetic/informative in the UI.
+- E2E through the Vite proxy: model card declares SINTETICO + warning; evaluation still 860 APROBADO (dictamen unchanged) with p 0.0073 BAJO; explanation fuente PLANTILLA; no offer before history; after 12 on-time payments (credit CANCELADO) offer 3000 (= 2000 × 1.5, rounded down to 100), 12 m, 18.00 %, installment 275.04 (hand-verified), reason "Crédito CRE-000002 cancelado sin atrasos"; regenerate does not duplicate; cajero generate 403; accept → SOL-000004 PENDIENTE, destino OTRO "Re-crédito preaprobado (oferta #…)"; second accept/discard 409. Prediction refresh skipped the legacy seed credit (no socioeconomic evaluation) — documented. E2E rows removed.
+- Bug inherited from CU-W27 found in this E2E and fixed by Codex (RED→GREEN): GET /creditos/mora required `estado` (422 without it) although the contract defines it as optional; the frontend "Todos" view called it without the filter. Final suite: 228 passed / 5 pre-existing failures (hash identical); only the canonical cooperative remains.

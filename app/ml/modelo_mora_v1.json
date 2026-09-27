@@ -1,0 +1,58 @@
+{
+  "version": "mora-logit-v1",
+  "dataset": "SINTETICO",
+  "descripcion_dataset": "5000 registros completamente sintéticos generados con numpy.default_rng(2026); etiqueta Bernoulli obtenida de regla logística conocida con ruido. No contiene datos reales.",
+  "n_muestras": 5000,
+  "semilla": 2026,
+  "features": [
+    "ratio_cuota_ingreso",
+    "asfi",
+    "antiguedad_laboral_meses",
+    "endeudamiento",
+    "antiguedad_socio_meses",
+    "ahorro_ratio",
+    "atrasos_previos"
+  ],
+  "descripciones_features": [
+    "Cuota/ingreso (%)",
+    "ASFI codificada A=0…F=5",
+    "Antigüedad laboral (meses)",
+    "Cuotas de deuda/ingreso (%)",
+    "Antigüedad como socio (meses)",
+    "Ahorro activo elegible / principal solicitado (%)",
+    "Cuotas previas pagadas fuera de gracia"
+  ],
+  "medias": [
+    40.57332491441502,
+    2.52225,
+    239.42,
+    29.605237071049448,
+    178.38325,
+    49.958133938066425,
+    3.90975
+  ],
+  "desviaciones": [
+    22.917569409411474,
+    1.7261242532043148,
+    138.42657295476167,
+    17.435561747977857,
+    102.65396178149929,
+    29.019670494523563,
+    2.5781980019967365
+  ],
+  "coeficientes": [
+    0.7371830345963778,
+    0.6707831684876929,
+    -0.48706822968309266,
+    0.428459499171464,
+    -0.22856872367334669,
+    -0.3924617929872649,
+    1.2047713441514594
+  ],
+  "intercepto": 0.3059484765990935,
+  "metricas": {
+    "auc": 0.8579033033251346,
+    "accuracy": 0.779
+  },
+  "ground_truth": "logit(p) = -3.1 + 0.035*ratio_cuota_ingreso + 0.42*ASFI - 0.003*antiguedad_laboral + 0.025*endeudamiento - 0.002*antiguedad_socio - 0.012*ahorro_ratio + 0.48*atrasos_previos; labels sampled as Bernoulli(p)."
+}
