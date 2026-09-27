@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import ValidationError
 from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -30,6 +31,8 @@ from app.models.models import (
     Usuario,
     PrediccionDeMorosidad,
     OfertaRecredito,
+    VotoComite,
+    Cooperativa,
 )
 from app.schemas.schemas import (
     MonedaOut,
@@ -57,6 +60,7 @@ from app.schemas.schemas import (
     PagoOut,
     MoraCreditoOut,
     OfertaOut, GeneracionRecreditosOut, OfertaAceptadaOut, DescartarRecreditoIn,
+    VotoComiteIn, VotoOut, ComiteItemOut, ActaOut,
 )
 
 router = APIRouter()
@@ -80,12 +84,23 @@ ESTADOS_SOLICITUD = {
     "PENDIENTE",
     "OBSERVADA",
     "EN_EVALUACION",
+    "EN_COMITE",
     "APROBADO",
     "RECHAZADO",
     "DESEMBOLSADO",
     "ANULADA",
 }
 ESTADOS_EDITABLES_SOLICITUD = {"PENDIENTE", "OBSERVADA"}
+VOTOS_COMITE_REQUERIDOS = 3
+ROLES_VOTANTES_COMITE = {"ADMINISTRADOR", "OFICIAL_CREDITO", "CONTADOR"}
+
+
+def _estado_despues_evaluacion(dictamen: str, monto: Decimal, limite_directo: Decimal) -> str:
+    if dictamen == "RECHAZADO":
+        return "RECHAZADO"
+    if dictamen == "REVISION_MANUAL" or monto > limite_directo:
+        return "EN_COMITE"
+    return "APROBADO"
 
 
 def _validar_lector(usuario: Usuario) -> int:
@@ -221,6 +236,8 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
         "fecha_solicitud": solicitud.fecha_solicitud,
         "fecha_actualizacion": solicitud.fecha_actualizacion,
         "estado": solicitud.estado,
+        "ronda_comite": solicitud.ronda_comite,
+        "resultado_comite": solicitud.resultado_comite,
         "socio": {
             "id": socio.id,
             "nombre_completo": f"{socio.nombre} {socio.apellido}",
@@ -436,7 +453,7 @@ def crear_solicitud_credito(
     if db.execute(
         select(SolicitudCredito.id).where(
             SolicitudCredito.socio_id == socio.id,
-            SolicitudCredito.estado.in_(("PENDIENTE", "OBSERVADA", "EN_EVALUACION")),
+            SolicitudCredito.estado.in_(("PENDIENTE", "OBSERVADA", "EN_EVALUACION", "EN_COMITE")),
         )
     ).scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
@@ -557,6 +574,260 @@ def _evaluacion_crediticia_out(evaluacion: EvaluacionCrediticia) -> dict:
     }
 
 
+def _voto_comite_out(voto: VotoComite) -> dict:
+    return {
+        "id": voto.id,
+        "ronda": voto.ronda,
+        "usuario": {
+            "id": voto.usuario.id,
+            "nombre": voto.usuario.nombre,
+            "rol": voto.usuario.rol.nombre,
+        },
+        "voto": voto.voto,
+        "comentario": voto.comentario,
+        "fecha": voto.fecha,
+    }
+
+
+def _evaluacion_reciente_comite(db: Session, solicitud: SolicitudCredito, cooperativa_id: int):
+    return db.execute(
+        select(EvaluacionCrediticia)
+        .options(
+            joinedload(EvaluacionCrediticia.usuario).joinedload(Usuario.rol),
+            joinedload(EvaluacionCrediticia.resolucion_usuario).joinedload(Usuario.rol),
+        )
+        .where(
+            EvaluacionCrediticia.solicitud_credito_id == solicitud.id,
+            EvaluacionCrediticia.cooperativa_id == cooperativa_id,
+        )
+        .order_by(EvaluacionCrediticia.fecha.desc(), EvaluacionCrediticia.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _votos_ronda_comite(db: Session, solicitud: SolicitudCredito, ronda: int):
+    return db.execute(
+        select(VotoComite)
+        .options(joinedload(VotoComite.usuario).joinedload(Usuario.rol))
+        .where(
+            VotoComite.solicitud_credito_id == solicitud.id,
+            VotoComite.cooperativa_id == solicitud.cooperativa_id,
+            VotoComite.ronda == ronda,
+        )
+        .order_by(VotoComite.fecha, VotoComite.id)
+    ).scalars().all()
+
+
+def _puede_votar_comite(solicitud: SolicitudCredito, usuario: Usuario, votos: list[VotoComite]):
+    if usuario.rol is None or usuario.rol.nombre not in ROLES_VOTANTES_COMITE:
+        return False, "El rol del usuario no puede votar en el comité"
+    if solicitud.usuario_id == usuario.id:
+        return False, "El oficial que registró la solicitud no puede votar"
+    if any(voto.usuario_id == usuario.id for voto in votos):
+        return False, "El usuario ya votó en esta ronda"
+    if solicitud.estado != "EN_COMITE":
+        return False, "La solicitud no está en comité"
+    return True, None
+
+
+def _resultado_votacion_comite(votos: list[VotoComite]) -> str | None:
+    if len(votos) < VOTOS_COMITE_REQUERIDOS:
+        return None
+    aprobaciones = sum(voto.voto == "APROBAR" for voto in votos)
+    rechazos = sum(voto.voto == "RECHAZAR" for voto in votos)
+    if aprobaciones >= 2:
+        return "APROBADO"
+    if rechazos >= 2:
+        return "RECHAZADO"
+    return "OBSERVADA"
+
+
+def _comite_item_out(db: Session, solicitud: SolicitudCredito, usuario: Usuario) -> dict:
+    votos = _votos_ronda_comite(db, solicitud, solicitud.ronda_comite)
+    evaluacion = _evaluacion_reciente_comite(db, solicitud, solicitud.cooperativa_id)
+    puede_votar, motivo = _puede_votar_comite(solicitud, usuario, votos)
+    return {
+        "solicitud": _solicitud_out(solicitud),
+        "evaluacion": None if evaluacion is None else _evaluacion_crediticia_out(evaluacion),
+        "ronda": solicitud.ronda_comite,
+        "votos": [_voto_comite_out(voto) for voto in votos],
+        "votos_requeridos": VOTOS_COMITE_REQUERIDOS,
+        "puede_votar": puede_votar,
+        "motivo_no_puede_votar": motivo,
+    }
+
+
+@router.get("/comite", response_model=list[ComiteItemOut])
+def listar_comite(
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    solicitudes = db.execute(
+        select(SolicitudCredito)
+        .options(
+            joinedload(SolicitudCredito.socio),
+            joinedload(SolicitudCredito.producto).joinedload(ProductoCredito.moneda),
+            joinedload(SolicitudCredito.moneda),
+            joinedload(SolicitudCredito.evaluacion),
+            joinedload(SolicitudCredito.oficial),
+        )
+        .where(
+            SolicitudCredito.cooperativa_id == cooperativa_id,
+            SolicitudCredito.estado == "EN_COMITE",
+        )
+        .order_by(SolicitudCredito.fecha_solicitud, SolicitudCredito.id)
+    ).scalars().all()
+    return [_comite_item_out(db, solicitud, usuario) for solicitud in solicitudes]
+
+
+@router.post(
+    "/comite/{solicitud_id}/votos",
+    response_model=ComiteItemOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def votar_comite(
+    solicitud_id: int,
+    body: dict,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    if usuario.rol is None or usuario.rol.nombre not in ROLES_VOTANTES_COMITE:
+        raise HTTPException(status_code=403, detail="El rol del usuario no puede votar en el comité")
+    try:
+        voto_in = VotoComiteIn.model_validate(body)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail="El voto o comentario no es válido") from exc
+
+    solicitud = db.execute(
+        select(SolicitudCredito)
+        .options(
+            joinedload(SolicitudCredito.socio),
+            joinedload(SolicitudCredito.producto).joinedload(ProductoCredito.moneda),
+            joinedload(SolicitudCredito.moneda),
+            joinedload(SolicitudCredito.evaluacion),
+            joinedload(SolicitudCredito.oficial),
+        )
+        .where(
+            SolicitudCredito.id == solicitud_id,
+            SolicitudCredito.cooperativa_id == cooperativa_id,
+        )
+        .with_for_update(of=SolicitudCredito)
+    ).scalar_one_or_none()
+    if solicitud is None:
+        raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
+    if solicitud.estado != "EN_COMITE":
+        raise HTTPException(status_code=409, detail="La solicitud no está en comité")
+    if solicitud.usuario_id == usuario.id:
+        raise HTTPException(status_code=403, detail="El oficial que registró la solicitud no puede votar")
+    votos = _votos_ronda_comite(db, solicitud, solicitud.ronda_comite)
+    if any(existing.usuario_id == usuario.id for existing in votos):
+        raise HTTPException(status_code=409, detail="El usuario ya votó en esta ronda")
+
+    nuevo_voto = VotoComite(
+        solicitud_credito_id=solicitud.id,
+        cooperativa_id=cooperativa_id,
+        ronda=solicitud.ronda_comite,
+        usuario_id=usuario.id,
+        voto=voto_in.voto,
+        comentario=voto_in.comentario,
+    )
+    db.add(nuevo_voto)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        if "uq_voto_comite_solicitud_ronda_usuario" in str(exc.orig):
+            raise HTTPException(status_code=409, detail="El usuario ya votó en esta ronda") from exc
+        raise
+
+    registrar_accion(
+        db,
+        accion="VOTAR_COMITE",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Voto registrado para solicitud {solicitud.id}, ronda {solicitud.ronda_comite}: {voto_in.voto}",
+        request=request,
+    )
+    votos = _votos_ronda_comite(db, solicitud, solicitud.ronda_comite)
+    resultado = _resultado_votacion_comite(votos)
+    if resultado is not None:
+        solicitud.estado = resultado
+        solicitud.resultado_comite = resultado
+        solicitud.fecha_resolucion_comite = func.now()
+        solicitud.fecha_actualizacion = func.now()
+        registrar_accion(
+            db,
+            accion="RESOLVER_COMITE",
+            modulo="CREDITOS",
+            usuario_id=usuario.id,
+            cooperativa_id=cooperativa_id,
+            descripcion=f"Solicitud {solicitud.id} resuelta por comité en ronda {solicitud.ronda_comite}: {resultado}",
+            request=request,
+        )
+    db.commit()
+    db.refresh(solicitud)
+    return _comite_item_out(db, solicitud, usuario)
+
+
+@router.get(
+    "/solicitudes/{solicitud_id}/acta-comite",
+    response_model=ActaOut,
+)
+def obtener_acta_comite(
+    solicitud_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_lector(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    if solicitud.ronda_comite < 1:
+        raise HTTPException(status_code=409, detail="La solicitud nunca llegó al comité")
+    cooperativa = db.execute(
+        select(Cooperativa).where(Cooperativa.id == cooperativa_id)
+    ).scalar_one()
+    votos = db.execute(
+        select(VotoComite)
+        .options(joinedload(VotoComite.usuario).joinedload(Usuario.rol))
+        .where(
+            VotoComite.solicitud_credito_id == solicitud.id,
+            VotoComite.cooperativa_id == cooperativa_id,
+        )
+        .order_by(VotoComite.ronda, VotoComite.fecha, VotoComite.id)
+    ).scalars().all()
+    votos_por_ronda: dict[int, list[VotoComite]] = {}
+    for voto in votos:
+        votos_por_ronda.setdefault(voto.ronda, []).append(voto)
+
+    rondas = []
+    for numero_ronda in range(1, solicitud.ronda_comite + 1):
+        votos_ronda = votos_por_ronda.get(numero_ronda, [])
+        resultado = None
+        fecha_resolucion = None
+        if len(votos_ronda) >= VOTOS_COMITE_REQUERIDOS:
+            resultado = _resultado_votacion_comite(votos_ronda)
+            fecha_resolucion = votos_ronda[VOTOS_COMITE_REQUERIDOS - 1].fecha
+        if numero_ronda == solicitud.ronda_comite and solicitud.resultado_comite is not None:
+            resultado = solicitud.resultado_comite
+            fecha_resolucion = solicitud.fecha_resolucion_comite
+        rondas.append({
+            "ronda": numero_ronda,
+            "votos": [_voto_comite_out(voto) for voto in votos_ronda],
+            "resultado": resultado,
+            "fecha_resolucion": fecha_resolucion,
+        })
+    evaluacion = _evaluacion_reciente_comite(db, solicitud, cooperativa_id)
+    return {
+        "solicitud": _solicitud_out(solicitud),
+        "rondas": rondas,
+        "evaluacion": None if evaluacion is None else _evaluacion_crediticia_out(evaluacion),
+        "cooperativa": {"id": cooperativa.id, "nombre": cooperativa.nombre},
+    }
+
+
 @router.post(
     "/solicitudes/{solicitud_id}/evaluacion",
     response_model=EvaluacionCrediticiaOut,
@@ -639,9 +910,24 @@ def evaluar_solicitud_credito(
         nivel_riesgo=mora_resultado["nivel_riesgo"],
         version_modelo_mora=mora_resultado["version_modelo"],
     )
-    solicitud.estado = (
-        "EN_EVALUACION" if resultado["dictamen"] == "REVISION_MANUAL" else resultado["dictamen"]
+    estado_anterior = solicitud.estado
+    nuevo_estado = _estado_despues_evaluacion(
+        resultado["dictamen"], solicitud.monto, solicitud.producto.monto_aprobacion_directa
     )
+    solicitud.estado = nuevo_estado
+    if nuevo_estado == "EN_COMITE" and estado_anterior != "EN_COMITE":
+        solicitud.ronda_comite += 1
+        solicitud.resultado_comite = None
+        solicitud.fecha_resolucion_comite = None
+        registrar_accion(
+            db,
+            accion="DERIVAR_COMITE",
+            modulo="CREDITOS",
+            usuario_id=usuario.id,
+            cooperativa_id=cooperativa_id,
+            descripcion=f"Solicitud derivada al comité de crédito: {solicitud.id}, ronda {solicitud.ronda_comite}",
+            request=request,
+        )
     solicitud.fecha_actualizacion = func.now()
     db.add(evaluacion)
     registrar_accion(
@@ -697,6 +983,8 @@ def resolver_solicitud_crediticia(
 ):
     cooperativa_id = _validar_admin_cooperativa(usuario)
     solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    if solicitud.estado == "EN_COMITE":
+        raise HTTPException(status_code=409, detail="La solicitud se resuelve en comité")
     ultima_evaluacion = db.execute(
         select(EvaluacionCrediticia)
         .options(
@@ -1055,6 +1343,7 @@ def actualizar_producto_crediticio(
         "tasa_mora_anual": producto.tasa_mora_anual,
         "relacion_cuota_ingreso_max": producto.relacion_cuota_ingreso_max,
         "requiere_garantia": producto.requiere_garantia,
+        "monto_aprobacion_directa": producto.monto_aprobacion_directa,
     }
     values.update(changes)
     if "nombre" in changes and changes["nombre"] is not None:
@@ -2064,7 +2353,7 @@ def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_cur
         if credit.estado=="VIGENTE" and (credit.monto_aprobado-credit.saldo_pendiente)/credit.monto_aprobado < Decimal("0.70"): omitted+=1; continue
         db.execute(text("UPDATE oferta_recredito SET estado='EXPIRADA' WHERE socio_id=:socio_id AND estado='VIGENTE' AND fecha_vencimiento < :today"), {"socio_id": socio.id, "today": date.today()})
         if db.execute(select(OfertaRecredito.id).where(OfertaRecredito.socio_id==socio.id,OfertaRecredito.estado=="VIGENTE")).scalar_one_or_none(): omitted+=1; continue
-        if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==socio.id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION")))).scalar_one_or_none(): omitted+=1; continue
+        if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==socio.id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION","EN_COMITE")))).scalar_one_or_none(): omitted+=1; continue
         if db.execute(select(Morosidad.id).join(Credito, Credito.id == Morosidad.credito_id).where(Credito.socio_id == socio.id, Morosidad.estado == "EN_MORA")).scalar_one_or_none(): omitted+=1; continue
         late=db.execute(text("SELECT count(*) FROM pago_cuota p JOIN tabla_amortizacion t ON t.id=p.tabla_amortizacion_id WHERE p.credito_id=:cid AND p.dias_atraso > :grace"),{"cid":credit.id,"grace":product.dias_gracia_mora}).scalar_one()
         if late: omitted+=1; continue
@@ -2119,7 +2408,7 @@ def aceptar_oferta_recredito(oferta_id:int,request:Request,usuario:Usuario=Depen
     if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")
     if offer.estado=="VIGENTE" and offer.fecha_vencimiento<date.today(): offer.estado="EXPIRADA"
     if offer.estado!="VIGENTE": raise HTTPException(status_code=409,detail="La oferta no está vigente")
-    if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==offer.socio_id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION")))).scalar_one_or_none(): raise HTTPException(status_code=409,detail="El socio ya tiene una solicitud en curso")
+    if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==offer.socio_id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION","EN_COMITE")))).scalar_one_or_none(): raise HTTPException(status_code=409,detail="El socio ya tiene una solicitud en curso")
     socio=db.get(Socio,offer.socio_id); product=db.get(ProductoCredito,offer.producto_credito_id)
     evaluation=db.execute(select(EvaluacionCampo).where(EvaluacionCampo.socio_id==offer.socio_id).order_by(EvaluacionCampo.fecha.desc(),EvaluacionCampo.id.desc())).scalars().first()
     number=_siguiente_secuencia(db,coop_id,"SOLICITUD_CREDITO")

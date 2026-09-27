@@ -292,6 +292,7 @@ def scoring_fixture():
             tasa_mora_anual=Decimal("0.00"),
             relacion_cuota_ingreso_max=Decimal("40.00"),
             requiere_garantia=False,
+            monto_aprobacion_directa=Decimal("2000.00"),
             estado="ACTIVO",
         )
         db.add(product)
@@ -519,10 +520,31 @@ def test_manual_evaluation_can_be_re_evaluated_and_history_is_newest_first(
     )
     assert first.status_code == 201, first.text
     assert first.json()["dictamen"] == "REVISION_MANUAL"
+    first_round = scoring_client.get(
+        f"/api/v1/creditos/solicitudes/{request['request_id']}", headers=headers
+    )
+    assert first_round.json()["estado"] == "EN_COMITE"
+    assert first_round.json()["ronda_comite"] == 1
+    with SessionLocal() as db:
+        assert db.query(models.Bitacora).filter(
+            models.Bitacora.accion == "DERIVAR_COMITE",
+            models.Bitacora.descripcion.contains(str(request["request_id"])),
+        ).count() == 1
+    # Committee observation returns the request to the officer for correction.
+    with SessionLocal() as db:
+        db.query(models.SolicitudCredito).filter(
+            models.SolicitudCredito.id == request["request_id"]
+        ).update({"estado": "OBSERVADA", "resultado_comite": "OBSERVADA"})
+        db.commit()
     second = scoring_client.post(
         f"/api/v1/creditos/solicitudes/{request['request_id']}/evaluacion", headers=headers
     )
     assert second.status_code == 201, second.text
+    with SessionLocal() as db:
+        assert db.query(models.Bitacora).filter(
+            models.Bitacora.accion == "DERIVAR_COMITE",
+            models.Bitacora.descripcion.contains(str(request["request_id"])),
+        ).count() == 2
     history = scoring_client.get(
         f"/api/v1/creditos/solicitudes/{request['request_id']}/evaluaciones", headers=headers
     )
@@ -541,6 +563,21 @@ def test_admin_resolves_manual_review_with_justification_and_audit(scoring_clien
     )
     assert evaluated.status_code == 201, evaluated.text
     assert evaluated.json()["dictamen"] == "REVISION_MANUAL"
+
+    new_resolution = scoring_client.post(
+        f"/api/v1/creditos/solicitudes/{request['request_id']}/resolucion",
+        json={"decision": "APROBADO", "justificacion": "Requiere resolución de comité."},
+        headers={"Authorization": f"Bearer {admin['token']}"},
+    )
+    assert new_resolution.status_code == 409
+    assert new_resolution.json()["detail"] == "La solicitud se resuelve en comité"
+
+    # New requests route to committee, but pre-migration legacy requests remain resolvable.
+    with SessionLocal() as db:
+        db.query(models.SolicitudCredito).filter(
+            models.SolicitudCredito.id == request["request_id"]
+        ).update({"estado": "EN_EVALUACION"})
+        db.commit()
 
     response = scoring_client.post(
         f"/api/v1/creditos/solicitudes/{request['request_id']}/resolucion",
@@ -583,6 +620,12 @@ def test_resolution_rejects_wrong_role_tenant_short_reason_and_non_manual_state(
             headers={"Authorization": f"Bearer {officer_token}"},
         )
         assert response.status_code == 201, response.text
+
+    with SessionLocal() as db:
+        db.query(models.SolicitudCredito).filter(
+            models.SolicitudCredito.id == manual["request_id"]
+        ).update({"estado": "EN_EVALUACION"})
+        db.commit()
 
     route = f"/api/v1/creditos/solicitudes/{manual['request_id']}/resolucion"
     payload = {"decision": "RECHAZADO", "justificacion": "Revisión negativa documentada."}

@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 
 
@@ -228,6 +228,7 @@ class ProductoCreditoCreate(BaseModel):
     tasa_mora_anual: Decimal = Decimal("0.00")
     relacion_cuota_ingreso_max: Decimal = Decimal("40.00")
     requiere_garantia: bool = False
+    monto_aprobacion_directa: Decimal = Field(default=Decimal("0.00"), ge=0)
 
 
 class ProductoCreditoUpdate(BaseModel):
@@ -244,6 +245,7 @@ class ProductoCreditoUpdate(BaseModel):
     tasa_mora_anual: Decimal | None = None
     relacion_cuota_ingreso_max: Decimal | None = None
     requiere_garantia: bool | None = None
+    monto_aprobacion_directa: Decimal | None = Field(None, ge=0)
 
 
 class ProductoCreditoEstadoUpdate(BaseModel):
@@ -268,6 +270,7 @@ class ProductoCreditoOut(BaseModel):
     tasa_mora_anual: Decimal
     relacion_cuota_ingreso_max: Decimal
     requiere_garantia: bool
+    monto_aprobacion_directa: Decimal
     estado: str
     fecha_creacion: datetime
     fecha_actualizacion: datetime
@@ -442,6 +445,60 @@ class SolicitudOut(BaseModel):
     evaluacion: EvaluacionOut | None
     oficial: OficialResumen
     ultima_evaluacion: UltimaEvaluacionOut | None = None
+    ronda_comite: int = 0
+    resultado_comite: str | None = None
+
+
+class VotoComiteIn(BaseModel):
+    voto: Literal["APROBAR", "RECHAZAR", "OBSERVAR"]
+    comentario: str = Field(min_length=10)
+
+    @field_validator("comentario")
+    @classmethod
+    def comentario_no_vacio(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 10:
+            raise ValueError("El comentario debe tener al menos 10 caracteres")
+        return normalized
+
+
+class VotoUsuarioOut(BaseModel):
+    id: int
+    nombre: str
+    rol: str
+
+
+class VotoOut(BaseModel):
+    id: int
+    ronda: int
+    usuario: VotoUsuarioOut
+    voto: Literal["APROBAR", "RECHAZAR", "OBSERVAR"]
+    comentario: str
+    fecha: datetime
+
+
+class ComiteItemOut(BaseModel):
+    solicitud: SolicitudOut
+    evaluacion: EvaluacionCrediticiaOut | None
+    ronda: int
+    votos: list[VotoOut]
+    votos_requeridos: int = 3
+    puede_votar: bool
+    motivo_no_puede_votar: str | None
+
+
+class RondaActaOut(BaseModel):
+    ronda: int
+    votos: list[VotoOut]
+    resultado: str | None
+    fecha_resolucion: datetime | None
+
+
+class ActaOut(BaseModel):
+    solicitud: SolicitudOut
+    rondas: list[RondaActaOut]
+    evaluacion: EvaluacionCrediticiaOut | None
+    cooperativa: dict[str, int | str]
 
 
 class SolicitudSimulacionIn(BaseModel):

@@ -6,6 +6,7 @@ from sqlalchemy import (
     Date,
     Numeric,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     SmallInteger,
     String,
@@ -126,6 +127,7 @@ class Usuario(Base):
     __table_args__ = (
         UniqueConstraint("correo", name="uq_usuario_correo"),
         UniqueConstraint("uuid", name="uq_usuario_uuid"),
+        UniqueConstraint("id", "cooperativa_id", name="uq_usuario_id_cooperativa"),
         CheckConstraint(
             "estado IN ('ACTIVO','INACTIVO','BLOQUEADO')",
             name="chk_usuario_estado",
@@ -272,6 +274,7 @@ class ProductoCredito(Base):
     tasa_mora_anual = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
     relacion_cuota_ingreso_max = mapped_column(Numeric(5, 2), nullable=False, default=40, server_default="40.00")
     requiere_garantia: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    monto_aprobacion_directa = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0.00")
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVO", server_default="ACTIVO")
     fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     fecha_actualizacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
@@ -307,6 +310,7 @@ class SolicitudCredito(Base):
     __tablename__ = "solicitud_credito"
     __table_args__ = (
         UniqueConstraint("cooperativa_id", "numero_solicitud", name="uq_solicitud_credito_coop_numero"),
+        UniqueConstraint("id", "cooperativa_id", name="uq_solicitud_credito_id_cooperativa"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -329,6 +333,9 @@ class SolicitudCredito(Base):
     fecha_actualizacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     moneda_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("moneda.id"))
     cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    ronda_comite: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    resultado_comite: Mapped[str | None] = mapped_column(String(12))
+    fecha_resolucion_comite = mapped_column(TIMESTAMP(timezone=True))
 
     socio: Mapped["Socio"] = relationship()
     producto: Mapped["ProductoCredito | None"] = relationship()
@@ -384,6 +391,36 @@ class EvaluacionCrediticia(Base):
     cooperativa: Mapped["Cooperativa"] = relationship()
     usuario: Mapped["Usuario"] = relationship(foreign_keys=[usuario_id])
     resolucion_usuario: Mapped["Usuario | None"] = relationship(foreign_keys=[resolucion_usuario_id])
+
+
+class VotoComite(Base):
+    __tablename__ = "voto_comite"
+    __table_args__ = (
+        UniqueConstraint("solicitud_credito_id", "ronda", "usuario_id", name="uq_voto_comite_solicitud_ronda_usuario"),
+        ForeignKeyConstraint(
+            ["solicitud_credito_id", "cooperativa_id"],
+            ["solicitud_credito.id", "solicitud_credito.cooperativa_id"],
+            name="fk_voto_comite_solicitud_cooperativa",
+        ),
+        ForeignKeyConstraint(
+            ["usuario_id", "cooperativa_id"],
+            ["usuario.id", "usuario.cooperativa_id"],
+            name="fk_voto_comite_usuario_cooperativa",
+        ),
+        CheckConstraint("ronda > 0", name="ck_voto_comite_ronda"),
+        CheckConstraint("voto IN ('APROBAR','RECHAZAR','OBSERVAR')", name="ck_voto_comite_voto"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    solicitud_credito_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ronda: Mapped[int] = mapped_column(Integer, nullable=False)
+    usuario_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    voto: Mapped[str] = mapped_column(String(10), nullable=False)
+    comentario: Mapped[str] = mapped_column(Text, nullable=False)
+    fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    usuario: Mapped["Usuario"] = relationship()
 
 
 class Credito(Base):
