@@ -834,6 +834,45 @@ class PrediccionDeMorosidad(Base):
     fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
 
+class GestionCobranza(Base):
+    """Maps both legacy collection rows and W28 audited collection actions."""
+    __tablename__ = "historial_gestion_de_cobranza"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tipo_contacto: Mapped[str] = mapped_column(String(50), nullable=False)
+    resultado_gestion: Mapped[str] = mapped_column(Text, nullable=False)
+    fecha_compromiso_pago = mapped_column("fecha_de_compromiso_de_pago", Date)
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    fecha = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    alerta_id: Mapped[int | None] = mapped_column(BigInteger)
+    usuario: Mapped["Usuario | None"] = relationship()
+
+
+class AlertaCredito(Base):
+    __tablename__ = "alerta_credito"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    tabla_amortizacion_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tabla_amortizacion.id"))
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    severidad: Mapped[str] = mapped_column(String(12), nullable=False)
+    mensaje: Mapped[str] = mapped_column(Text, nullable=False)
+    datos = mapped_column(JSONB, nullable=False, server_default="{}")
+    estado: Mapped[str] = mapped_column(String(12), nullable=False, server_default="ACTIVA")
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_cierre = mapped_column(TIMESTAMP(timezone=True))
+    usuario_cierre_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    comentario_cierre: Mapped[str | None] = mapped_column(Text)
+    gestion_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("historial_gestion_de_cobranza.id"))
+    credito: Mapped["Credito"] = relationship()
+    cuota: Mapped["TablaAmortizacion | None"] = relationship()
+    usuario_cierre: Mapped["Usuario | None"] = relationship(foreign_keys=[usuario_cierre_id])
+    gestion: Mapped["GestionCobranza | None"] = relationship(foreign_keys=[gestion_id])
+
+
 class OfertaRecredito(Base):
     __tablename__ = "oferta_recredito"
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

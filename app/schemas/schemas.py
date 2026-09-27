@@ -673,6 +673,72 @@ class MoraCreditoOut(BaseModel):
     nivel_riesgo: str | None = None
 
 
+class GestionUsuarioOut(BaseModel):
+    id: int
+    nombre: str
+
+
+class GestionOut(BaseModel):
+    id: int
+    tipo_contacto: str
+    resultado_gestion: str
+    fecha_compromiso_pago: date | None
+    fecha: datetime
+    usuario: GestionUsuarioOut | None
+    alerta_id: int | None
+
+
+class AlertaCreditoOut(BaseModel):
+    id: int
+    numero_credito: str | None
+
+
+class AlertaSocioOut(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+
+
+class AlertaCuotaOut(BaseModel):
+    numero: int
+    fecha_vencimiento: date
+    cuota: Decimal
+
+
+class AlertaOut(BaseModel):
+    id: int
+    tipo: str
+    severidad: str
+    estado: str
+    mensaje: str
+    credito: AlertaCreditoOut
+    socio: AlertaSocioOut
+    cuota: AlertaCuotaOut | None
+    datos: dict
+    fecha_creacion: datetime
+    fecha_cierre: datetime | None
+    usuario_cierre: GestionUsuarioOut | None
+    comentario_cierre: str | None
+    gestion: GestionOut | None
+
+
+class GestionCreateIn(BaseModel):
+    tipo_contacto: Literal["LLAMADA", "VISITA", "MENSAJE", "OTRO"]
+    resultado_gestion: str = Field(..., min_length=10)
+    fecha_compromiso_pago: date | None = None
+
+    @field_validator("fecha_compromiso_pago")
+    @classmethod
+    def fecha_promesa_no_pasada(cls, value):
+        if value is not None and value < date.today():
+            raise ValueError("La fecha compromiso debe ser hoy o futura")
+        return value
+
+
+class DescartarAlertaIn(BaseModel):
+    comentario: str = Field(..., min_length=5)
+
+
 class CajaOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

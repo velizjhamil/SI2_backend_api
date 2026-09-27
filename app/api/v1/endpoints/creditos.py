@@ -4,7 +4,8 @@ import re
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from typing import Any
 from pydantic import ValidationError
 from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +32,9 @@ from app.models.models import (
     Usuario,
     PrediccionDeMorosidad,
     OfertaRecredito,
+    AlertaCredito,
+    GestionCobranza,
+    Bitacora,
     VotoComite,
     Cooperativa,
 )
@@ -61,7 +65,9 @@ from app.schemas.schemas import (
     MoraCreditoOut,
     OfertaOut, GeneracionRecreditosOut, OfertaAceptadaOut, DescartarRecreditoIn,
     VotoComiteIn, VotoOut, ComiteItemOut, ActaOut,
+    AlertaOut, GestionOut, GestionCreateIn, DescartarAlertaIn,
 )
+from app.services.alertas_mora import construir_candidatos_alerta, reconciliar_alertas, candidato_riesgo_alto
 
 router = APIRouter()
 ROLES_LECTURA_PRODUCTOS = {"ADMINISTRADOR", "CONTADOR", "CAJERO", "OFICIAL_CREDITO"}
@@ -2234,29 +2240,34 @@ def obtener_ficha_modelo_mora(usuario: Usuario = Depends(get_current_user)):
     return ficha_modelo()
 
 
-@router.post("/mora/prediccion")
-def actualizar_predicciones_mora(
-    request: Request,
-    usuario: Usuario = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    cooperativa_id = _validar_escritor_solicitud(usuario)
-    credits = db.execute(select(Credito).options(joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion)).where(Credito.cooperativa_id == cooperativa_id, Credito.estado == "VIGENTE")).unique().scalars().all()
+def _refrescar_predicciones_mora(db: Session, credits: list[Credito]) -> dict[str, int]:
+    """Shared side-effect-free-with-respect-to-request refresh logic used by both workflows."""
     counts = {"actualizados": 0, "bajo": 0, "medio": 0, "alto": 0}
     for credit in credits:
         req = credit.solicitud
-        eval_field = req.evaluacion
-        if eval_field is None:
+        ev = req.evaluacion if req else None
+        if ev is None or credit.socio is None:
             continue
         try:
-            installment = _cuota_estimada(Decimal(str(credit.monto_aprobado)), credit.plazo_meses, Decimal(str(credit.tasa_interes)), credit.tipo_amortizacion)
+            installment = _cuota_estimada(Decimal(str(credit.monto_aprobado)), credit.plazo_meses,
+                Decimal(str(credit.tasa_interes)), credit.tipo_amortizacion)
         except (ValueError, TypeError):
             continue
-        ratio = installment / Decimal(str(eval_field.ingreso_mensual)) * 100 if eval_field.ingreso_mensual else Decimal("0")
-        late = db.execute(text("SELECT count(*) FROM pago_cuota WHERE credito_id=:id AND dias_atraso > :grace"), {"id": credit.id, "grace": credit.producto.dias_gracia_mora if credit.producto else 0}).scalar_one()
-        eligible_savings = db.execute(select(func.coalesce(func.sum(CuentaAhorro.saldo_disponible), 0)).where(CuentaAhorro.socio_id == credit.socio_id, CuentaAhorro.moneda_id == credit.moneda_id, CuentaAhorro.estado == "ACTIVA")).scalar_one()
-        savings_ratio = Decimal(str(eligible_savings)) / Decimal(str(credit.monto_aprobado)) * 100 if credit.monto_aprobado else Decimal("0")
-        features = {"ratio_cuota_ingreso": ratio, "asfi": eval_field.calificacion_asfi or "A", "antiguedad_laboral_meses": eval_field.antiguedad_laboral_meses or 0, "endeudamiento": Decimal(str(eval_field.cuota_deudas_mensual or 0)) / Decimal(str(eval_field.ingreso_mensual)) * 100 if eval_field.ingreso_mensual else Decimal("0"), "antiguedad_socio_meses": max(0, (date.today().year-credit.socio.fecha_registro.year)*12+date.today().month-credit.socio.fecha_registro.month), "ahorro_ratio": savings_ratio, "atrasos_previos": int(late)}
+        income = Decimal(str(ev.ingreso_mensual or 0))
+        ratio = installment / income * Decimal("100") if income else Decimal("0")
+        grace = credit.producto.dias_gracia_mora if credit.producto else 0
+        late = db.execute(text("SELECT count(*) FROM pago_cuota WHERE credito_id=:id AND dias_atraso > :grace"),
+            {"id": credit.id, "grace": grace}).scalar_one()
+        savings = db.execute(select(func.coalesce(func.sum(CuentaAhorro.saldo_disponible), 0)).where(
+            CuentaAhorro.socio_id == credit.socio_id, CuentaAhorro.moneda_id == credit.moneda_id,
+            CuentaAhorro.estado == "ACTIVA")).scalar_one()
+        principal = Decimal(str(credit.monto_aprobado or 0))
+        savings_ratio = Decimal(str(savings)) / principal * 100 if principal else Decimal("0")
+        age = max(0, (date.today().year - credit.socio.fecha_registro.year) * 12 + date.today().month - credit.socio.fecha_registro.month)
+        features = {"ratio_cuota_ingreso": ratio, "asfi": ev.calificacion_asfi or "A",
+            "antiguedad_laboral_meses": ev.antiguedad_laboral_meses or 0,
+            "endeudamiento": Decimal(str(ev.cuota_deudas_mensual or 0)) / income * 100 if income else Decimal("0"),
+            "antiguedad_socio_meses": age, "ahorro_ratio": savings_ratio, "atrasos_previos": int(late)}
         predicted = predecir_mora(features)
         row = db.execute(select(PrediccionDeMorosidad).where(PrediccionDeMorosidad.credito_id == credit.id)).scalar_one_or_none()
         if row is None:
@@ -2268,9 +2279,221 @@ def actualizar_predicciones_mora(
         row.fecha = func.now()
         counts["actualizados"] += 1
         counts[predicted["nivel_riesgo"].lower()] += 1
+    return counts
+
+
+@router.post("/mora/prediccion")
+def actualizar_predicciones_mora(
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_escritor_solicitud(usuario)
+    credits = db.execute(select(Credito).options(joinedload(Credito.socio), joinedload(Credito.producto), joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion)).where(Credito.cooperativa_id == cooperativa_id, Credito.estado == "VIGENTE")).unique().scalars().all()
+    counts = _refrescar_predicciones_mora(db, credits)
     registrar_accion(db, accion="PREDECIR_MORA", modulo="CREDITOS", usuario_id=usuario.id, cooperativa_id=cooperativa_id, descripcion=f"Predicción informativa de mora actualizada para {counts['actualizados']} créditos vigentes", request=request)
     db.commit()
     return counts
+
+
+def _alerta_out(db: Session, alerta: AlertaCredito) -> dict:
+    credito = db.execute(select(Credito).options(
+        joinedload(Credito.socio), joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+        joinedload(Credito.cronograma),
+    ).where(Credito.id == alerta.credito_id)).unique().scalar_one()
+    socio = credito.socio or credito.solicitud.socio
+    cuota = next((item for item in credito.cronograma if item.id == alerta.tabla_amortizacion_id), None)
+    usuario = db.get(Usuario, alerta.usuario_cierre_id) if alerta.usuario_cierre_id else None
+    gestion = db.get(GestionCobranza, alerta.gestion_id) if alerta.gestion_id else None
+    gestion_user = db.get(Usuario, gestion.usuario_id) if gestion and gestion.usuario_id else None
+    return {
+        "id": alerta.id, "tipo": alerta.tipo, "severidad": alerta.severidad,
+        "estado": alerta.estado, "mensaje": alerta.mensaje,
+        "credito": {"id": credito.id, "numero_credito": credito.numero_credito},
+        "socio": {"id": socio.id, "nombre_completo": f"{socio.nombre} {socio.apellido}", "ci": socio.ci},
+        "cuota": None if cuota is None else {"numero": cuota.numero_cuota,
+            "fecha_vencimiento": cuota.fecha_vencimiento, "cuota": cuota.monto_cuota_total},
+        "datos": alerta.datos or {}, "fecha_creacion": alerta.fecha_creacion,
+        "fecha_cierre": alerta.fecha_cierre,
+        "usuario_cierre": None if usuario is None else {"id": usuario.id, "nombre": usuario.nombre},
+        "comentario_cierre": alerta.comentario_cierre,
+        "gestion": None if gestion is None else {"id": gestion.id, "tipo_contacto": gestion.tipo_contacto,
+            "resultado_gestion": gestion.resultado_gestion,
+            "fecha_compromiso_pago": gestion.fecha_compromiso_pago, "fecha": gestion.fecha,
+            "usuario": None if gestion_user is None else {"id": gestion_user.id, "nombre": gestion_user.nombre},
+            "alerta_id": gestion.alerta_id},
+    }
+
+
+def _validar_payload_alerta(schema, payload):
+    try:
+        return schema.model_validate(payload)
+    except ValidationError as exc:
+        detail = "; ".join(error["msg"] for error in exc.errors())
+        raise HTTPException(status_code=400, detail=detail) from exc
+
+
+@router.post("/alertas/monitoreo")
+def ejecutar_monitoreo_mora(request: Request, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    coop_id = _validar_evaluador_crediticio(usuario)
+    fecha = date.today()
+    creditos = db.execute(select(Credito).options(
+        joinedload(Credito.socio), joinedload(Credito.producto),
+        joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+        joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion),
+        selectinload(Credito.cronograma),
+    ).where(Credito.cooperativa_id == coop_id, Credito.estado == "VIGENTE")).unique().scalars().all()
+    _refrescar_predicciones_mora(db, creditos)
+    ids = [c.id for c in creditos]
+    existing = db.execute(select(AlertaCredito).where(
+        AlertaCredito.cooperativa_id == coop_id, AlertaCredito.estado.in_(("ACTIVA", "ATENDIDA", "DESCARTADA"))
+    )).scalars().all()
+    created = resolved = 0
+    for credito in creditos:
+        mora = _actualizar_morosidad_credito(db, credito, fecha)
+        _, grace = _configuracion_mora(credito)
+        candidates = construir_candidatos_alerta(credito.cronograma, fecha,
+            dias_gracia_mora=grace, en_mora=mora.estado == "EN_MORA")
+        prediction = db.execute(select(PrediccionDeMorosidad).where(
+            PrediccionDeMorosidad.credito_id == credito.id
+        )).scalar_one_or_none()
+        if prediction is not None:
+            risk_candidate = candidato_riesgo_alto(prediction.nivel_riesgo,
+                eligible=credito.solicitud is not None and credito.solicitud.evaluacion is not None,
+                probability=prediction.probabilidad_mora)
+            if risk_candidate is not None:
+                candidates.append(risk_candidate)
+        rows = [row for row in existing if row.credito_id == credito.id]
+        _, to_resolve, to_create = reconciliar_alertas(rows, candidates)
+        for row in to_resolve:
+            row.estado = "RESUELTA"; row.fecha_cierre = func.now(); resolved += 1
+        for candidate in to_create:
+            db.add(AlertaCredito(cooperativa_id=coop_id, credito_id=credito.id,
+                tabla_amortizacion_id=candidate["tabla_amortizacion_id"], tipo=candidate["tipo"],
+                severidad=candidate["severidad"], mensaje=candidate["mensaje"], datos=candidate["datos"]))
+            created += 1
+    # Close ACTIVE alerts for credits that became cancelled or otherwise left VIGENTE.
+    active_other = db.execute(select(AlertaCredito).join(Credito, Credito.id == AlertaCredito.credito_id)
+        .where(AlertaCredito.cooperativa_id == coop_id, AlertaCredito.estado == "ACTIVA", Credito.estado != "VIGENTE")).scalars().all()
+    for row in active_other:
+        row.estado = "RESUELTA"; row.fecha_cierre = func.now(); resolved += 1
+    registrar_accion(db, accion="MONITOREO_MORA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id, descripcion=f"Monitoreo de mora ejecutado para {len(creditos)} créditos", request=request)
+    db.flush()
+    counts = {severity: db.execute(select(func.count()).select_from(AlertaCredito).where(
+        AlertaCredito.cooperativa_id == coop_id, AlertaCredito.estado == "ACTIVA",
+        AlertaCredito.severidad == severity)).scalar_one() for severity in ("INFO", "ADVERTENCIA", "CRITICA")}
+    db.commit()
+    return {"fecha": fecha, "creditos_monitoreados": len(creditos), "alertas_creadas": created,
+        "alertas_resueltas": resolved, "activas_por_severidad": counts}
+
+
+@router.get("/alertas", response_model=list[AlertaOut])
+def listar_alertas_mora(estado: str = Query("ACTIVA"), tipo: str | None = None,
+    severidad: str | None = None, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    coop_id = _validar_lector(usuario)
+    query = select(AlertaCredito).where(AlertaCredito.cooperativa_id == coop_id, AlertaCredito.estado == estado)
+    if tipo: query = query.where(AlertaCredito.tipo == tipo)
+    if severidad: query = query.where(AlertaCredito.severidad == severidad)
+    rows = db.execute(query.order_by((AlertaCredito.severidad == "CRITICA").desc(), AlertaCredito.fecha_creacion.desc())).scalars().all()
+    return [_alerta_out(db, row) for row in rows]
+
+
+@router.post("/alertas/{alerta_id}/atender", response_model=AlertaOut)
+def atender_alerta_mora(alerta_id: int, payload: Any = Body(...), request: Request = None,
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    payload = _validar_payload_alerta(GestionCreateIn, payload)
+    coop_id = _validar_evaluador_crediticio(usuario)
+    alerta = db.execute(select(AlertaCredito).where(AlertaCredito.id == alerta_id,
+        AlertaCredito.cooperativa_id == coop_id).with_for_update()).scalar_one_or_none()
+    if alerta is None: raise HTTPException(status_code=404, detail="Alerta no encontrada")
+    if alerta.estado != "ACTIVA": raise HTTPException(status_code=409, detail="La alerta ya no está activa")
+    credito = db.get(Credito, alerta.credito_id)
+    gestion = GestionCobranza(tipo_contacto=payload.tipo_contacto, resultado_gestion=payload.resultado_gestion,
+        fecha_compromiso_pago=payload.fecha_compromiso_pago, credito_id=credito.id,
+        cooperativa_id=coop_id, usuario_id=usuario.id, alerta_id=alerta.id)
+    db.add(gestion); db.flush()
+    alerta.estado = "ATENDIDA"; alerta.fecha_cierre = func.now(); alerta.usuario_cierre_id = usuario.id; alerta.gestion_id = gestion.id
+    registrar_accion(db, accion="ATENDER_ALERTA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id, descripcion=f"Alerta {alerta.id} atendida", request=request)
+    db.commit(); db.refresh(alerta)
+    return _alerta_out(db, alerta)
+
+
+@router.post("/alertas/{alerta_id}/descartar", response_model=AlertaOut)
+def descartar_alerta_mora(alerta_id: int, payload: Any = Body(...), request: Request = None,
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    payload = _validar_payload_alerta(DescartarAlertaIn, payload)
+    coop_id = _validar_evaluador_crediticio(usuario)
+    alerta = db.execute(select(AlertaCredito).where(AlertaCredito.id == alerta_id,
+        AlertaCredito.cooperativa_id == coop_id).with_for_update()).scalar_one_or_none()
+    if alerta is None: raise HTTPException(status_code=404, detail="Alerta no encontrada")
+    if alerta.estado != "ACTIVA": raise HTTPException(status_code=409, detail="La alerta ya no está activa")
+    alerta.estado = "DESCARTADA"; alerta.fecha_cierre = func.now(); alerta.usuario_cierre_id = usuario.id
+    alerta.comentario_cierre = payload.comentario
+    registrar_accion(db, accion="DESCARTAR_ALERTA", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id, descripcion=f"Alerta {alerta.id} descartada", request=request)
+    db.commit(); db.refresh(alerta)
+    return _alerta_out(db, alerta)
+
+
+@router.get("/creditos/{credito_id}/gestiones", response_model=list[GestionOut])
+def listar_gestiones_cobranza(credito_id: int, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    coop_id = _validar_lector(usuario)
+    credito = db.execute(select(Credito).where(Credito.id == credito_id, Credito.cooperativa_id == coop_id)).scalar_one_or_none()
+    if credito is None: raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    rows = db.execute(select(GestionCobranza).where(GestionCobranza.credito_id == credito_id,
+        (GestionCobranza.cooperativa_id == coop_id) | (GestionCobranza.cooperativa_id.is_(None))).order_by(GestionCobranza.fecha.desc())).scalars().all()
+    return [{"id": row.id, "tipo_contacto": row.tipo_contacto, "resultado_gestion": row.resultado_gestion,
+        "fecha_compromiso_pago": row.fecha_compromiso_pago, "fecha": row.fecha,
+        "usuario": None if not row.usuario else {"id": row.usuario.id, "nombre": row.usuario.nombre},
+        "alerta_id": row.alerta_id} for row in rows]
+
+
+@router.get("/monitoreo/resumen")
+def obtener_resumen_monitoreo_mora(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    coop_id = _validar_lector(usuario)
+    creditos = db.execute(select(Credito).options(
+        joinedload(Credito.moneda), joinedload(Credito.socio),
+        joinedload(Credito.solicitud).joinedload(SolicitudCredito.socio),
+        joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
+        selectinload(Credito.cronograma), joinedload(Credito.producto),
+        joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
+    ).where(Credito.cooperativa_id == coop_id, Credito.estado == "VIGENTE")).unique().scalars().all()
+    portfolio = {}
+    risk_counts = {key: 0 for key in ("BAJO", "MEDIO", "ALTO", "SIN_PREDICCION")}
+    top = []
+    for credito in creditos:
+        currency_row = credito.moneda or (credito.solicitud.moneda if credito.solicitud else None)
+        currency = currency_row.codigo_iso if currency_row else "N/A"
+        row = portfolio.setdefault(currency, {"moneda": currency, "cartera_total": Decimal("0.00"), "cartera_en_mora": Decimal("0.00")})
+        balance = Decimal(str(credito.saldo_pendiente or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        row["cartera_total"] += balance
+        tasa, grace = _configuracion_mora(credito)
+        summary = resumir_morosidad(cuotas=credito.cronograma, fecha=date.today(), tasa_mora_anual=tasa, dias_gracia_mora=grace)
+        if summary["estado"] == "EN_MORA": row["cartera_en_mora"] += balance
+        prediction = db.execute(select(PrediccionDeMorosidad).where(PrediccionDeMorosidad.credito_id == credito.id)).scalar_one_or_none()
+        if prediction is None:
+            risk_counts["SIN_PREDICCION"] += 1
+        else:
+            risk_counts[prediction.nivel_riesgo if prediction.nivel_riesgo in risk_counts else "SIN_PREDICCION"] += 1
+            socio = credito.socio or credito.solicitud.socio
+            top.append({"credito_id": credito.id, "numero_credito": credito.numero_credito,
+                "socio": {"id": socio.id, "nombre_completo": f"{socio.nombre} {socio.apellido}"},
+                "probabilidad_mora": prediction.probabilidad_mora, "nivel_riesgo": prediction.nivel_riesgo,
+                "saldo_pendiente": balance})
+    for row in portfolio.values():
+        row["cartera_total"] = row["cartera_total"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        row["cartera_en_mora"] = row["cartera_en_mora"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        row["indice_mora"] = (row["cartera_en_mora"] / row["cartera_total"] * Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) if row["cartera_total"] else Decimal("0.00")
+    severities = {severity: db.execute(select(func.count()).select_from(AlertaCredito).where(
+        AlertaCredito.cooperativa_id == coop_id, AlertaCredito.estado == "ACTIVA", AlertaCredito.severidad == severity)).scalar_one()
+        for severity in ("INFO", "ADVERTENCIA", "CRITICA")}
+    last = db.execute(select(func.max(Bitacora.fecha_hora)).where(Bitacora.cooperativa_id == coop_id,
+        Bitacora.modulo == "CREDITOS", Bitacora.accion == "MONITOREO_MORA")).scalar_one()
+    top.sort(key=lambda item: Decimal(str(item["probabilidad_mora"])), reverse=True)
+    return {"por_moneda": list(portfolio.values()), "creditos_por_riesgo": risk_counts,
+        "alertas_activas": severities, "top_riesgo": top[:5], "ultima_ejecucion": last}
 
 
 @router.get("/evaluaciones/{evaluacion_id}/explicacion")
