@@ -83,6 +83,7 @@ def _limpiar_emision(ids):
     operador_id, socio_id, _, _, origen_id, abono_id, caja_id = ids
     with SessionLocal() as db:
         dpf_ids = db.execute(text("SELECT id FROM deposito_plazo_fijo WHERE socio_id=:id"), {"id": socio_id}).scalars().all()
+        db.execute(text("UPDATE dpf_cronograma SET transaccion_id=NULL WHERE deposito_plazo_fijo_id = ANY(:ids)"), {"ids": dpf_ids or [0]})
         db.execute(text("DELETE FROM transaccion WHERE deposito_plazo_fijo_id = ANY(:ids) OR cuenta_ahorro_id = ANY(:cuentas)"), {"ids": dpf_ids or [0], "cuentas": [origen_id, abono_id]})
         db.execute(text("DELETE FROM dpf_cronograma WHERE deposito_plazo_fijo_id = ANY(:ids)"), {"ids": dpf_ids or [0]})
         db.execute(text("DELETE FROM liquidacion WHERE deposito_plazo_fijo_id = ANY(:ids) OR dpf_renovado_id = ANY(:ids)"), {"ids": dpf_ids or [0]})

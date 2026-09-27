@@ -8,12 +8,14 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Integer,
+    Index,
     SmallInteger,
     String,
     Table,
     Text,
     UniqueConstraint,
     func,
+    text as sql_text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -788,6 +790,10 @@ class DeclaracionJuradaUIF(Base):
 
 class DepositoPlazoFijo(Base):
     __tablename__ = "deposito_plazo_fijo"
+    __table_args__ = (Index(
+        "uq_dpf_coop_numero_certificado", "cooperativa_id", "numero_certificado", unique=True,
+        postgresql_where=sql_text("numero_certificado IS NOT NULL"),
+    ),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     monto = mapped_column(Numeric(12, 2), nullable=False)
@@ -799,7 +805,7 @@ class DepositoPlazoFijo(Base):
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="VIGENTE")
     socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
     moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
-    numero_certificado: Mapped[str | None] = mapped_column(String(30), unique=True)
+    numero_certificado: Mapped[str | None] = mapped_column(String(30))
     modalidad_pago_interes: Mapped[str | None] = mapped_column(String(12), default="VENCIMIENTO")
     interes_bruto = mapped_column(Numeric(12, 2))
     retencion_rciva = mapped_column(Numeric(12, 2))
@@ -840,6 +846,8 @@ class DPFCronograma(Base):
     retencion_rciva = mapped_column(Numeric(12, 2), nullable=False)
     interes_neto = mapped_column(Numeric(12, 2), nullable=False)
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="PENDIENTE")
+    fecha_pago_real = mapped_column(TIMESTAMP(timezone=True))
+    transaccion_id: Mapped[int | None] = mapped_column(Integer)
 
 
 class Liquidacion(Base):
@@ -856,6 +864,8 @@ class Liquidacion(Base):
     usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
     cuenta_abono_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cuenta_ahorro.id"))
     dpf_renovado_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("deposito_plazo_fijo.id"))
+    interes_ya_pagado = mapped_column(Numeric(12, 2), nullable=False, default=0)
+    descuento_capital = mapped_column(Numeric(12, 2), nullable=False, default=0)
 
 
 class PrediccionDeMorosidad(Base):

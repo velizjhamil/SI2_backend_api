@@ -1210,6 +1210,42 @@ class DPFSimulacionIn(BaseModel):
     modalidad_pago_interes: Literal["VENCIMIENTO", "MENSUAL"]
 
 
+class DPFInteresReferenciaOut(BaseModel):
+    id: int
+    numero_certificado: str | None
+
+
+class DPFSocioInteresOut(BaseModel):
+    id: int
+    nombre_completo: str
+    ci: str
+
+
+class DPFCuentaInteresOut(BaseModel):
+    id: int
+    numero: str
+
+
+class PagoInteresOut(BaseModel):
+    cronograma_id: int
+    dpf: DPFInteresReferenciaOut
+    socio: DPFSocioInteresOut
+    numero: int
+    fecha_pago: date
+    fecha_pago_real: datetime | None
+    dias: int
+    interes_bruto: str
+    retencion_rciva: str
+    interes_neto: str
+    moneda: str
+    cuenta_abono: DPFCuentaInteresOut
+    transaccion_id: int | None
+
+
+class DPFInteresesProcesarIn(BaseModel):
+    fecha: date | None = None
+
+
 class DPFLiquidacionIn(BaseModel):
     tipo: Literal["LIQUIDACION", "CANCELACION", "RENOVACION"]
     capitalizar: bool = False

@@ -1,6 +1,6 @@
 """Fixed-term deposit API (CU-W17 and CU-W19)."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 
@@ -10,10 +10,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secuencia
 from app.api.v1.endpoints.caja import _resumen_sesion_arqueo, _sesion_abierta
-from app.api.v1.deps import get_db, require_operaciones
+from app.api.v1.deps import get_current_user, get_db, require_operaciones
 from app.core.bitacora import registrar_accion
 from app.models.models import Cooperativa, CuentaAhorro, DepositoPlazoFijo, DPFCronograma, Liquidacion, Moneda, Socio, TasaDPF, Usuario
-from app.schemas.schemas import DPFCreate, DPFLiquidacionIn, DPFSimulacionIn, MonedaOut
+from app.schemas.schemas import DPFCreate, DPFInteresesProcesarIn, DPFLiquidacionIn, DPFSimulacionIn, MonedaOut
 from app.services.uif import exigir_declaracion_si_corresponde, registrar_declaracion, requiere_declaracion, validar_declaracion
 
 router = APIRouter()
@@ -163,7 +163,7 @@ def _certificado_out(db: Session, dpf: DepositoPlazoFijo):
         "cronograma": [
             {"numero": item.numero, "fecha_pago": item.fecha_pago, "dias": item.dias,
              "interes_bruto": f"{item.interes_bruto:.2f}", "retencion_rciva": f"{item.retencion_rciva:.2f}",
-             "interes_neto": f"{item.interes_neto:.2f}", "estado": item.estado}
+             "interes_neto": f"{item.interes_neto:.2f}", "estado": item.estado, "fecha_pago_real": item.fecha_pago_real}
             for item in cronograma
         ],
         "declaracion_uif_id": dpf.declaracion_jurada_uif_id,
@@ -332,6 +332,96 @@ def listar_dpf(
     } for dpf, socio, moneda in rows]
 
 
+
+def _pago_interes_out(db: Session, row: DPFCronograma, dpf: DepositoPlazoFijo):
+    socio = db.get(Socio, dpf.socio_id)
+    cuenta = db.get(CuentaAhorro, dpf.cuenta_abono_id)
+    return {
+        "cronograma_id": row.id,
+        "dpf": {"id": dpf.id, "numero_certificado": dpf.numero_certificado},
+        "socio": {"id": socio.id, "nombre_completo": f"{socio.nombre} {socio.apellido}".strip(), "ci": socio.ci},
+        "numero": row.numero, "fecha_pago": row.fecha_pago, "fecha_pago_real": row.fecha_pago_real,
+        "dias": row.dias, "interes_bruto": f"{row.interes_bruto:.2f}",
+        "retencion_rciva": f"{row.retencion_rciva:.2f}", "interes_neto": f"{row.interes_neto:.2f}",
+        "moneda": db.get(Moneda, dpf.moneda_id).codigo_iso,
+        "cuenta_abono": {"id": cuenta.id, "numero": cuenta.numero}, "transaccion_id": row.transaccion_id,
+    }
+
+
+@router.post("/intereses/procesar")
+def procesar_intereses_dpf(
+    body: DPFInteresesProcesarIn | None = None,
+    request: Request = None,
+    usuario: Usuario = Depends(require_operaciones),
+    db: Session = Depends(get_db),
+):
+    if usuario.cooperativa_id is None or usuario.rol.nombre not in {"OFICIAL_CREDITO", "ADMINISTRADOR"}:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    fecha = (body.fecha if body else None) or date.today()
+    if fecha > date.today():
+        raise HTTPException(status_code=400, detail="La fecha no puede ser futura")
+    due = db.execute(
+        select(DPFCronograma, DepositoPlazoFijo)
+        .join(DepositoPlazoFijo, DepositoPlazoFijo.id == DPFCronograma.deposito_plazo_fijo_id)
+        .where(DepositoPlazoFijo.cooperativa_id == usuario.cooperativa_id,
+               DepositoPlazoFijo.estado == "VIGENTE", DepositoPlazoFijo.modalidad_pago_interes == "MENSUAL",
+               DPFCronograma.estado == "PENDIENTE", DPFCronograma.fecha_pago <= fecha)
+        .order_by(DPFCronograma.fecha_pago, DPFCronograma.id).with_for_update()
+    ).all()
+    payments, skipped = [], []
+    for row, dpf in due:
+        account = db.execute(select(CuentaAhorro).where(CuentaAhorro.id == dpf.cuenta_abono_id).with_for_update()).scalar_one_or_none()
+        if account is None or account.estado != "ACTIVA":
+            skipped.append({"dpf_id": dpf.id, "numero_certificado": dpf.numero_certificado, "motivo": "La cuenta de abono no está activa"})
+            continue
+        tx_id = db.execute(text("""INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id, deposito_plazo_fijo_id)
+            VALUES ('PAGO_INTERES_DPF', :monto, 'WEB', :moneda, :cuenta, :dpf) RETURNING id"""),
+            {"monto": row.interes_neto, "moneda": dpf.moneda_id, "cuenta": account.id, "dpf": dpf.id}).scalar_one()
+        account.saldo_disponible += row.interes_neto
+        row.estado = "PAGADO"
+        row.fecha_pago_real = datetime.now().astimezone()
+        row.transaccion_id = tx_id
+        payments.append(_pago_interes_out(db, row, dpf))
+        registrar_accion(db, accion="PAGO_INTERES", modulo="DPF", usuario_id=usuario.id,
+                         cooperativa_id=usuario.cooperativa_id,
+                         descripcion=f"Pago de interés DPF {dpf.numero_certificado}", request=request)
+    db.commit()
+    totals = {}
+    for payment in payments:
+        totals[payment["moneda"]] = totals.get(payment["moneda"], Decimal("0.00")) + Decimal(payment["interes_neto"])
+    return {"fecha": fecha, "dpf_procesados": len({p["dpf"]["id"] for p in payments}),
+            "cuotas_pagadas": len(payments), "total_neto_por_moneda": [
+                {"moneda": currency, "total": f"{amount:.2f}"} for currency, amount in sorted(totals.items())],
+            "pagos": payments, "omitidos": skipped}
+
+
+@router.get("/intereses/pagos")
+def listar_pagos_interes_dpf(
+    desde: date | None = Query(None), hasta: date | None = Query(None),
+    usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db),
+):
+    if usuario.cooperativa_id is None or usuario.rol.nombre not in {"OFICIAL_CREDITO", "ADMINISTRADOR", "CONTADOR"}:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    stmt = select(DPFCronograma, DepositoPlazoFijo).join(DepositoPlazoFijo).where(
+        DepositoPlazoFijo.cooperativa_id == usuario.cooperativa_id, DPFCronograma.estado == "PAGADO")
+    if desde: stmt = stmt.where(DPFCronograma.fecha_pago_real >= datetime.combine(desde, datetime.min.time(), tzinfo=timezone.utc))
+    if hasta: stmt = stmt.where(DPFCronograma.fecha_pago_real < datetime.combine(hasta + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc))
+    rows = db.execute(stmt.order_by(DPFCronograma.fecha_pago_real.desc(), DPFCronograma.id.desc())).all()
+    return [_pago_interes_out(db, row, dpf) for row, dpf in rows]
+
+
+@router.get("/{dpf_id}/intereses")
+def listar_intereses_dpf(dpf_id: int, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    if usuario.cooperativa_id is None or usuario.rol.nombre not in {"OFICIAL_CREDITO", "ADMINISTRADOR", "CONTADOR"}:
+        raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
+    dpf = db.execute(select(DepositoPlazoFijo).where(DepositoPlazoFijo.id == dpf_id,
+        DepositoPlazoFijo.cooperativa_id == usuario.cooperativa_id)).scalar_one_or_none()
+    if dpf is None: raise HTTPException(status_code=404, detail="DPF no encontrado")
+    rows = db.execute(select(DPFCronograma).where(DPFCronograma.deposito_plazo_fijo_id == dpf_id,
+        DPFCronograma.estado == "PAGADO").order_by(DPFCronograma.fecha_pago_real.desc())).scalars().all()
+    return [_pago_interes_out(db, row, dpf) for row in rows]
+
+
 @router.get("/{dpf_id}")
 def obtener_dpf(
     dpf_id: int,
@@ -379,9 +469,13 @@ def _preview_liquidacion(db: Session, usuario: Usuario, dpf: DepositoPlazoFijo, 
     early = today < dpf.fecha_vencimiento
     coop = db.get(Cooperativa, usuario.cooperativa_id)
     moneda = db.get(Moneda, dpf.moneda_id)
-    allowed = True
-    reason = None
+    allowed, reason = True, None
     applied_rate = dpf.tasa_interes_anual
+    paid_rows = db.execute(select(DPFCronograma).where(
+        DPFCronograma.deposito_plazo_fijo_id == dpf.id, DPFCronograma.estado == "PAGADO")).scalars().all()
+    paid_net = sum((item.interes_neto for item in paid_rows), Decimal("0.00"))
+    pending_rows = db.execute(select(DPFCronograma).where(
+        DPFCronograma.deposito_plazo_fijo_id == dpf.id, DPFCronograma.estado == "PENDIENTE")).scalars().all()
     if tipo == "CANCELACION":
         if not early:
             allowed, reason = False, "La cancelación solo se permite antes del vencimiento"
@@ -391,32 +485,30 @@ def _preview_liquidacion(db: Session, usuario: Usuario, dpf: DepositoPlazoFijo, 
         gross = _money(dpf.monto * applied_rate * Decimal(elapsed) / Decimal("36000"))
         exempt = moneda.codigo_iso == "BOB" and elapsed >= 30
         withholding = Decimal("0.00") if exempt else _money(gross * TAX_RATE)
-        net = gross - withholding
+        penalty_net = gross - withholding
+        net = max(Decimal("0.00"), penalty_net - paid_net)
+        capital_discount = max(Decimal("0.00"), paid_net - penalty_net)
+        capital = dpf.monto - capital_discount
     else:
         if early:
             allowed, reason = False, "La liquidación o renovación solo se permite al vencimiento"
-        gross = dpf.interes_bruto
-        withholding = dpf.retencion_rciva
-        net = dpf.interes_neto
-    total = dpf.monto + net
+        gross = sum((item.interes_bruto for item in pending_rows), Decimal("0.00"))
+        withholding = sum((item.retencion_rciva for item in pending_rows), Decimal("0.00"))
+        net = sum((item.interes_neto for item in pending_rows), Decimal("0.00"))
+        capital_discount = Decimal("0.00")
+        capital = dpf.monto
+    total = capital + net
     abono = db.get(CuentaAhorro, dpf.cuenta_abono_id)
     return {
-        "tipo": tipo,
-        "anticipada": early,
-        "dias_transcurridos": elapsed,
-        "tasa_aplicada": f"{applied_rate:.2f}",
-        "interes_bruto": f"{gross:.2f}",
-        "retencion_rciva": f"{withholding:.2f}",
-        "interes_neto": f"{net:.2f}",
-        "capital": f"{dpf.monto:.2f}",
-        "total_a_abonar": f"{total:.2f}",
+        "tipo": tipo, "anticipada": early, "dias_transcurridos": elapsed,
+        "tasa_aplicada": f"{applied_rate:.2f}", "interes_bruto": f"{gross:.2f}",
+        "retencion_rciva": f"{withholding:.2f}", "interes_neto": f"{net:.2f}",
+        "interes_ya_pagado": f"{paid_net:.2f}", "descuento_capital": f"{capital_discount:.2f}",
+        "capital": f"{capital:.2f}", "total_a_abonar": f"{total:.2f}",
         "cuenta_abono": {"id": abono.id, "numero": abono.numero},
-        "permitido": allowed,
-        "motivo": reason,
-        "gross_value": gross,
-        "withholding_value": withholding,
-        "net_value": net,
-        "capital_value": dpf.monto,
+        "permitido": allowed, "motivo": reason, "gross_value": gross,
+        "withholding_value": withholding, "net_value": net, "capital_value": capital,
+        "interes_ya_pagado_value": paid_net, "descuento_capital_value": capital_discount,
     }
 
 
@@ -429,7 +521,7 @@ def previsualizar_liquidacion(
 ):
     dpf = _obtener_dpf_tenant(db, usuario, dpf_id)
     preview = _preview_liquidacion(db, usuario, dpf, tipo)
-    for key in ("gross_value", "withholding_value", "net_value", "capital_value"):
+    for key in ("gross_value", "withholding_value", "net_value", "capital_value", "interes_ya_pagado_value", "descuento_capital_value"):
         preview.pop(key)
     return preview
 
@@ -494,6 +586,8 @@ def liquidar_dpf(
         usuario_id=usuario.id,
         cuenta_abono_id=abono.id,
         dpf_renovado_id=new_dpf.id if new_dpf else None,
+        interes_ya_pagado=preview["interes_ya_pagado_value"],
+        descuento_capital=preview["descuento_capital_value"],
     )
     db.add(liquidation)
     db.flush()
@@ -524,6 +618,8 @@ def liquidar_dpf(
         "interes_bruto": f"{preview['gross_value']:.2f}",
         "retencion_rciva": f"{preview['withholding_value']:.2f}",
         "interes_neto": f"{preview['net_value']:.2f}",
+        "interes_ya_pagado": f"{preview['interes_ya_pagado_value']:.2f}",
+        "descuento_capital": f"{preview['descuento_capital_value']:.2f}",
         "total_abonado": f"{account_credit:.2f}",
         "cuenta_abono": {"id": abono.id, "numero": abono.numero},
         "nuevo_dpf": _certificado_out(db, new_dpf) if new_dpf else None,
