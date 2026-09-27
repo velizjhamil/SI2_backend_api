@@ -1945,6 +1945,14 @@ def obtener_deuda_cuota(
     if credito.estado != "VIGENTE":
         raise HTTPException(status_code=409, detail="El crédito no está VIGENTE")
 
+    return _deuda_cuota_out(credito, fecha)
+
+
+def _deuda_cuota_out(credito: Credito, fecha: date | None = None) -> dict:
+    """Shared next-installment debt calculation for staff and socio APIs."""
+    if credito.estado != "VIGENTE":
+        raise HTTPException(status_code=409, detail="El crédito no está VIGENTE")
+
     cuota = next(
         (
             row for row in sorted(credito.cronograma, key=lambda row: row.numero_cuota)
@@ -2080,12 +2088,13 @@ def cobrar_cuota(
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    mobile_socio_id = getattr(request.state, "mobile_socio_id", None)
     if usuario.cooperativa_id is None:
         raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
     rol = usuario.rol.nombre if usuario.rol is not None else None
-    if body.modalidad == "EFECTIVO" and rol not in {"CAJERO", "OFICIAL_CREDITO", "ADMINISTRADOR"}:
+    if mobile_socio_id is None and body.modalidad == "EFECTIVO" and rol not in {"CAJERO", "OFICIAL_CREDITO", "ADMINISTRADOR"}:
         raise HTTPException(status_code=403, detail="Operación reservada al personal de caja")
-    if body.modalidad == "CUENTA" and rol not in {"OFICIAL_CREDITO", "ADMINISTRADOR"}:
+    if mobile_socio_id is None and body.modalidad == "CUENTA" and rol not in {"OFICIAL_CREDITO", "ADMINISTRADOR"}:
         raise HTTPException(status_code=403, detail="Operación reservada a oficiales de crédito y administradores")
 
     cooperativa_id = usuario.cooperativa_id
@@ -2098,7 +2107,8 @@ def cobrar_cuota(
             joinedload(Credito.solicitud).joinedload(SolicitudCredito.moneda),
             selectinload(Credito.cronograma),
         )
-        .where(Credito.id == credito_id, _credito_cooperativa_filter(cooperativa_id))
+        .where(Credito.id == credito_id, _credito_cooperativa_filter(cooperativa_id),
+               *([Credito.socio_id == mobile_socio_id] if mobile_socio_id is not None else []))
         .with_for_update(of=Credito)
     ).unique().scalar_one_or_none()
     if credito is None:
@@ -2134,23 +2144,25 @@ def cobrar_cuota(
     if body.modalidad == "CUENTA":
         if body.cuenta_ahorro_id is None:
             raise HTTPException(status_code=400, detail="Debe indicar una cuenta de ahorro")
-        cuenta = db.execute(
-            select(CuentaAhorro)
-            .options(joinedload(CuentaAhorro.moneda))
-            .where(
-                CuentaAhorro.id == body.cuenta_ahorro_id,
-                CuentaAhorro.socio_id == (credito.socio_id or credito.solicitud.socio_id),
+        account_query = select(CuentaAhorro).options(joinedload(CuentaAhorro.moneda)).where(
+            CuentaAhorro.id == body.cuenta_ahorro_id,
+            CuentaAhorro.socio_id == (credito.socio_id or credito.solicitud.socio_id),
+        )
+        if mobile_socio_id is None:
+            account_query = account_query.where(
                 CuentaAhorro.estado == "ACTIVA",
                 CuentaAhorro.moneda_id == (credito.moneda_id or credito.solicitud.moneda_id),
             )
-            .with_for_update(of=CuentaAhorro)
-        ).unique().scalar_one_or_none()
+        cuenta = db.execute(account_query.with_for_update(of=CuentaAhorro)).unique().scalar_one_or_none()
         if cuenta is None:
-            raise HTTPException(status_code=400, detail="La cuenta debe estar activa y pertenecer al socio en la misma moneda")
+            raise HTTPException(status_code=404 if mobile_socio_id is not None else 400,
+                                detail="Cuenta no encontrada" if mobile_socio_id is not None else "La cuenta debe estar activa y pertenecer al socio en la misma moneda")
+        if mobile_socio_id is not None and (cuenta.estado != "ACTIVA" or cuenta.moneda_id != (credito.moneda_id or credito.solicitud.moneda_id)):
+            raise HTTPException(status_code=422, detail="La cuenta debe estar activa y pertenecer al socio en la misma moneda")
         saldo_minimo = MONTO_MINIMO_APERTURA[cuenta.tipo_producto]
         if cuenta.saldo_disponible - total < saldo_minimo:
             raise HTTPException(
-                status_code=400,
+                status_code=422 if mobile_socio_id is not None else 400,
                 detail=f"Saldo insuficiente: debe mantener un saldo mínimo de {saldo_minimo:.2f}",
             )
     else:
@@ -2213,7 +2225,7 @@ def cobrar_cuota(
             registrar_accion(db, accion="LIBERAR_GARANTIA", modulo="CREDITOS", usuario_id=usuario.id,
                 cooperativa_id=cooperativa_id, descripcion=f"Garantía liberada por cancelación: {garantia.id}", request=request)
 
-    canal = "VENTANILLA" if body.modalidad == "EFECTIVO" else "WEB"
+    canal = "VENTANILLA" if body.modalidad == "EFECTIVO" else ("MOVIL" if mobile_socio_id is not None else "WEB")
     transaction_id = db.execute(
         text("""
             INSERT INTO transaccion (
@@ -2881,15 +2893,65 @@ def listar_ofertas_recredito(estado: str|None=Query(None),usuario: Usuario=Depen
     db.commit(); return result
 
 
+def descartar_oferta_core(db: Session, offer: OfertaRecredito, reason: str, usuario: Usuario,
+                          coop_id: int, request: Request, *, inactive_status: int = 409) -> dict:
+    if offer.estado != "VIGENTE":
+        raise HTTPException(status_code=inactive_status, detail="La oferta no está vigente")
+    offer.estado = "DESCARTADA"
+    offer.motivo_descarte = reason.strip()
+    registrar_accion(db, accion="DESCARTAR_RECREDITO", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id, descripcion=f"Oferta {offer.id} descartada", request=request)
+    db.commit()
+    db.refresh(offer)
+    return _oferta_out(db, offer)
+
+
+def aceptar_oferta_core(db: Session, offer: OfertaRecredito, usuario: Usuario, coop_id: int,
+                        request: Request, *, plazo_meses: int | None = None,
+                        inactive_status: int = 409) -> dict:
+    if offer.estado == "VIGENTE" and offer.fecha_vencimiento < date.today():
+        offer.estado = "EXPIRADA"
+    if offer.estado != "VIGENTE":
+        raise HTTPException(status_code=inactive_status, detail="La oferta no está vigente")
+    if db.execute(select(SolicitudCredito.id).where(
+        SolicitudCredito.socio_id == offer.socio_id,
+        SolicitudCredito.estado.in_(("PENDIENTE", "OBSERVADA", "EN_EVALUACION", "EN_COMITE")),
+    )).scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
+    socio = db.get(Socio, offer.socio_id)
+    product = db.get(ProductoCredito, offer.producto_credito_id)
+    evaluation = db.execute(select(EvaluacionCampo).where(EvaluacionCampo.socio_id == offer.socio_id)
+        .order_by(EvaluacionCampo.fecha.desc(), EvaluacionCampo.id.desc())).scalars().first()
+    number = _siguiente_secuencia(db, coop_id, "SOLICITUD_CREDITO")
+    solicitud = SolicitudCredito(monto=offer.monto_sugerido,
+        plazo_meses=plazo_meses or offer.plazo_meses, tasa_interes=offer.tasa_interes,
+        calificacion_asfi=evaluation.calificacion_asfi if evaluation else None,
+        tiene_deudas=bool(evaluation and evaluation.cuota_deudas_mensual > 0), estado="PENDIENTE",
+        socio_id=socio.id, usuario_id=usuario.id,
+        evaluacion_campo_id=evaluation.id if evaluation else None,
+        producto_credito_id=product.id, moneda_id=product.moneda_id,
+        numero_solicitud=f"SOL-{number:06d}", destino="OTRO",
+        destino_detalle=f"Re-crédito preaprobado (oferta #{offer.id})", cooperativa_id=coop_id)
+    db.add(solicitud)
+    db.flush()
+    offer.estado = "ACEPTADA"
+    offer.solicitud_generada_id = solicitud.id
+    registrar_accion(db, accion="ACEPTAR_RECREDITO", modulo="CREDITOS", usuario_id=usuario.id,
+        cooperativa_id=coop_id,
+        descripcion=f"Oferta de re-crédito {offer.id} aceptada; solicitud {solicitud.id}", request=request)
+    db.commit()
+    db.refresh(offer)
+    solicitud = _obtener_solicitud(db, coop_id, solicitud.id)
+    return {"oferta": _oferta_out(db, offer), "solicitud": _solicitud_out(solicitud)}
+
+
 @router.post("/recreditos/{oferta_id}/descartar", response_model=OfertaOut)
 def descartar_oferta_recredito(oferta_id:int,body:DescartarRecreditoIn,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db)):
     coop_id=_validar_escritor_solicitud(usuario); reason=body.motivo
     if not isinstance(reason,str) or len(reason.strip())<5: raise HTTPException(status_code=422,detail="El motivo debe contener al menos 5 caracteres")
     offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id)).scalar_one_or_none()
     if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")
-    if offer.estado!="VIGENTE": raise HTTPException(status_code=409,detail="La oferta no está vigente")
-    offer.estado="DESCARTADA"; offer.motivo_descarte=reason.strip()
-    registrar_accion(db,accion="DESCARTAR_RECREDITO",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Oferta {offer.id} descartada",request=request); db.commit(); db.refresh(offer); return _oferta_out(db,offer)
+    return descartar_oferta_core(db, offer, reason, usuario, coop_id, request)
 
 
 @router.post("/recreditos/{oferta_id}/aceptar",status_code=201,response_model=OfertaAceptadaOut)
@@ -2897,14 +2959,4 @@ def aceptar_oferta_recredito(oferta_id:int,request:Request,usuario:Usuario=Depen
     coop_id=_validar_escritor_solicitud(usuario)
     offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id).with_for_update()).scalar_one_or_none()
     if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")
-    if offer.estado=="VIGENTE" and offer.fecha_vencimiento<date.today(): offer.estado="EXPIRADA"
-    if offer.estado!="VIGENTE": raise HTTPException(status_code=409,detail="La oferta no está vigente")
-    if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==offer.socio_id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION","EN_COMITE")))).scalar_one_or_none(): raise HTTPException(status_code=409,detail="El socio ya tiene una solicitud en curso")
-    socio=db.get(Socio,offer.socio_id); product=db.get(ProductoCredito,offer.producto_credito_id)
-    evaluation=db.execute(select(EvaluacionCampo).where(EvaluacionCampo.socio_id==offer.socio_id).order_by(EvaluacionCampo.fecha.desc(),EvaluacionCampo.id.desc())).scalars().first()
-    number=_siguiente_secuencia(db,coop_id,"SOLICITUD_CREDITO")
-    solicitud=SolicitudCredito(monto=offer.monto_sugerido,plazo_meses=offer.plazo_meses,tasa_interes=offer.tasa_interes,calificacion_asfi=evaluation.calificacion_asfi if evaluation else None,tiene_deudas=bool(evaluation and evaluation.cuota_deudas_mensual>0),estado="PENDIENTE",socio_id=socio.id,usuario_id=usuario.id,evaluacion_campo_id=evaluation.id if evaluation else None,producto_credito_id=product.id,moneda_id=product.moneda_id,numero_solicitud=f"SOL-{number:06d}",destino="OTRO",destino_detalle=f"Re-crédito preaprobado (oferta #{offer.id})",cooperativa_id=coop_id)
-    db.add(solicitud); db.flush(); offer.estado="ACEPTADA"; offer.solicitud_generada_id=solicitud.id
-    registrar_accion(db,accion="ACEPTAR_RECREDITO",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Oferta de re-crédito {offer.id} aceptada; solicitud {solicitud.id}",request=request)
-    db.commit(); db.refresh(offer); solicitud=_obtener_solicitud(db,coop_id,solicitud.id)
-    return {"oferta":_oferta_out(db,offer),"solicitud":_solicitud_out(solicitud)}
+    return aceptar_oferta_core(db, offer, usuario, coop_id, request)
