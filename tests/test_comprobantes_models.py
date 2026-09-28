@@ -1,5 +1,7 @@
 """Schema contract for the first CU-W30 persistence slice."""
 
+from decimal import Decimal
+
 import pytest
 from pydantic import ValidationError
 
@@ -64,3 +66,31 @@ def test_parameter_schemas_require_positive_account_id_and_expose_defaults():
         "codigo": "111.01",
         "nombre": "Billetes y monedas",
     }
+
+
+def _line(debe="0", haber="0"):
+    return {"plan_cuenta_id": 1, "debe": debe, "haber": haber}
+
+
+def _voucher(lineas):
+    return {"tipo": "TRASPASO", "fecha_contable": "2026-09-27", "glosa": "Asiento de prueba", "moneda_id": 1, "lineas": lineas}
+
+
+def test_voucher_line_requires_exactly_one_positive_side_and_rounds_half_up():
+    assert schemas.ComprobanteLineaCreate.model_validate(_line(debe="10.005")).debe == Decimal("10.01")
+    for bad in (_line(), _line(debe="5", haber="5")):
+        with pytest.raises(ValidationError, match="exactamente uno de debe o haber"):
+            schemas.ComprobanteLineaCreate.model_validate(bad)
+    with pytest.raises(ValidationError):
+        schemas.ComprobanteLineaCreate.model_validate(_line(debe="-1"))
+
+
+def test_manual_voucher_requires_two_balanced_lines():
+    ok = schemas.ComprobanteManualCreate.model_validate(_voucher([_line(debe="10.00"), _line(haber="10.00")]))
+    assert sum(l.debe for l in ok.lineas) == sum(l.haber for l in ok.lineas) == Decimal("10.00")
+    with pytest.raises(ValidationError, match="al menos dos líneas"):
+        schemas.ComprobanteManualCreate.model_validate(_voucher([_line(debe="10.00")]))
+    with pytest.raises(ValidationError, match="iguales y mayores que cero"):
+        schemas.ComprobanteManualCreate.model_validate(_voucher([_line(debe="10.00"), _line(haber="9.99")]))
+    with pytest.raises(ValidationError, match="cinco caracteres"):
+        schemas.ComprobanteManualCreate.model_validate({**_voucher([_line(debe="1"), _line(haber="1")]), "glosa": " ab "})
