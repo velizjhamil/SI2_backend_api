@@ -1,5 +1,9 @@
 import importlib.util
+import os
+import re
 from pathlib import Path
+
+import pytest
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "generate_plan_cuentas.py"
 spec = importlib.util.spec_from_file_location("generate_plan_cuentas", SCRIPT)
@@ -20,8 +24,18 @@ def test_parser_joins_unaccounted_continuation_lines_and_classifies_mcef():
     assert "111.01" in by_code and by_code["111.01"]["nivel"] == 4
 
 
+def test_committed_migration_seeds_the_full_official_catalog():
+    migration = Path(__file__).parents[1] / "migrations" / "024_sprint11_plan_cuentas.sql"
+    codes = re.findall(r"VALUES \('(\d{3}\.\d{2})'", migration.read_text(encoding="utf-8"))
+    assert len(codes) == len(set(codes)) == 1997
+    assert {"400.00", "410.00", "500.00", "510.00", "139.01"} <= set(codes)
+
+
 def test_catalog_source_has_only_supported_levels_and_reports_deeper_codes():
-    source = Path("/home/yimy/proyectos/si2/investigacion/T02.txt")
+    # Text export of ASFI MCEF Titulo II (pdftotext -layout); not versioned, set SI2_MCEF_SOURCE to run.
+    source = Path(os.environ.get("SI2_MCEF_SOURCE", "data/asfi/T02.txt"))
+    if not source.is_file():
+        pytest.skip("MCEF source text not available; set SI2_MCEF_SOURCE")
     rows, omitted = generator.parse_mcef(source.read_text(encoding="utf-8"))
     assert rows
     assert {r["nivel"] for r in rows} == {1, 2, 3, 4}
