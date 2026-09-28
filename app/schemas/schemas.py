@@ -1308,3 +1308,44 @@ class OfertaAceptadaOut(BaseModel):
 
 class DescartarRecreditoIn(BaseModel):
     motivo: str = Field(min_length=5)
+
+
+class PlanCuentaAnaliticaCreate(BaseModel):
+    padre_id: int = Field(gt=0)
+    nombre: str = Field(min_length=1, max_length=200)
+    descripcion: str | None = Field(default=None, max_length=2000)
+
+
+class PlanCuentaAnaliticaUpdate(BaseModel):
+    nombre: str | None = Field(default=None, min_length=1, max_length=200)
+    descripcion: str | None = Field(default=None, max_length=2000)
+
+
+class PlanCuentaEstadoUpdate(BaseModel):
+    estado: Literal["ACTIVA", "INACTIVA"]
+    motivo: str = Field(min_length=5, max_length=1000)
+
+    @field_validator("motivo")
+    @classmethod
+    def validate_motivo(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("El motivo debe contener al menos cinco caracteres no blancos")
+        return value
+
+
+class PlanCuentaOut(BaseModel):
+    id: int
+    codigo: str
+    nombre: str
+    nivel: int
+    naturaleza: Literal["DEUDORA", "ACREEDORA"]
+    es_regularizadora: bool
+    es_oficial: bool
+    estado: Literal["ACTIVA", "INACTIVA"]
+    acepta_movimientos: bool
+    padre_id: int | None = None
+    padre_codigo: str | None = None
+    tiene_analiticas: bool = False
+
+    model_config = ConfigDict(from_attributes=True)

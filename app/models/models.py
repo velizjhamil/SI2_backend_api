@@ -937,3 +937,34 @@ class OfertaRecredito(Base):
     solicitud_generada_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("solicitud_credito.id"))
     usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
     motivo_descarte: Mapped[str | None] = mapped_column(Text)
+
+
+class PlanCuenta(Base):
+    """Official ASFI accounts and cooperative-scoped analytic accounts."""
+
+    __tablename__ = "plan_cuenta"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(30), nullable=False)
+    nombre: Mapped[str] = mapped_column(Text, nullable=False)
+    nivel: Mapped[int] = mapped_column(Integer, nullable=False)
+    tipo: Mapped[str] = mapped_column(String(50), nullable=False)
+    naturaleza: Mapped[str] = mapped_column(String(10), nullable=False)
+    es_regularizadora: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    es_oficial: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=True)
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVA", server_default="'ACTIVA'")
+    acepta_movimientos: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    descripcion: Mapped[str | None] = mapped_column(Text)
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=False), nullable=False, server_default=func.now())
+    plan_cuenta_padre_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("plan_cuenta.id"), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("naturaleza IN ('DEUDORA','ACREEDORA')", name="chk_plan_cuenta_naturaleza"),
+        CheckConstraint("estado IN ('ACTIVA','INACTIVA')", name="chk_plan_cuenta_estado"),
+        Index("uq_plan_cuenta_scope_codigo", sql_text("COALESCE(cooperativa_id, 0)"), "codigo", unique=True),
+        Index("idx_plan_cuenta_padre", "plan_cuenta_padre_id"),
+    )
+
+    padre: Mapped["PlanCuenta | None"] = relationship(remote_side="PlanCuenta.id", back_populates="hijos")
+    hijos: Mapped[list["PlanCuenta"]] = relationship(back_populates="padre")
