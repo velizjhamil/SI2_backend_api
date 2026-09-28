@@ -1,6 +1,6 @@
 """Tenant-scoped read-only management report endpoints (CU-W33)."""
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from uuid import uuid4
 
 import pytest
@@ -166,13 +166,19 @@ def test_indicators_report_management_ratios_and_executive_summary(report_case):
     with TestClient(app) as client:
         indicators = client.get("/api/v1/reportes/indicadores", headers=auth(report_case))
         summary = client.get("/api/v1/reportes/resumen-ejecutivo", headers=auth(report_case))
+        cutoff = date.today()
+        balance = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={cutoff}&moneda=BOB", headers=auth(report_case)).json()
     assert indicators.status_code == 200, indicators.text
     body = indicators.json()
     assert body["tipo"] == "indicadores de gestión"
     assert {row["clave"] for row in body["indicadores"]} == {"liquidez", "cobertura_previsiones", "roa", "roe"}
     assert all("definicion" in row and row["unidad"] == "%" for row in body["indicadores"])
     values = {row["clave"]: row["valor"] for row in body["indicadores"]}
-    assert values == {"liquidez": "133.33", "cobertura_previsiones": "10.00", "roa": "14.97", "roe": "89.79"}, body["indicadores"]
+    # ROA/ROE annualize by the days elapsed up to today, so derive the expectation for the run date.
+    annual = Decimal(balance["resultado_gestion"]) * 365 / ((cutoff - date(cutoff.year, 1, 1)).days + 1)
+    pct = lambda den: str((annual / Decimal(den) * 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    assert values == {"liquidez": "133.33", "cobertura_previsiones": "10.00",
+                      "roa": pct(balance["total_activo"]), "roe": pct(balance["total_patrimonio"])}, body["indicadores"]
     assert summary.status_code == 200, summary.text
     assert {"cartera", "captaciones", "indicadores"} <= summary.json().keys()
 
