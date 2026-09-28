@@ -94,6 +94,7 @@ def voucher_case():
     finally:
         with SessionLocal() as db:
             if ids["coops"]:
+                db.execute(text("DELETE FROM tipo_cambio WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
                 db.execute(text("DELETE FROM detalle_asiento WHERE comprobante_contable_id IN (SELECT id FROM comprobante_contable WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
                 db.execute(text("DELETE FROM comprobante_contable WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
                 db.execute(text("UPDATE dpf_cronograma SET transaccion_id=NULL WHERE deposito_plazo_fijo_id IN (SELECT id FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops))"), {"coops":ids["coops"]})
@@ -783,3 +784,193 @@ def test_void_requires_a_nonblank_reason(voucher_case):
         )
     assert response.status_code == 422
     assert "al menos cinco caracteres no blancos" in response.text
+
+
+def _add_statement_accounts(case):
+    """Create disposable tenant analytic accounts used by statement fixtures."""
+    parents_by_code = ("513.05", "411.04")
+    accounts = {}
+    with SessionLocal() as db:
+        for code in parents_by_code:
+            parent = db.query(models.PlanCuenta).filter_by(codigo=code, cooperativa_id=None).one()
+            account = models.PlanCuenta(
+                codigo=f"{code}.{case['ids']['coops'][0] % 10000:04d}",
+                nombre=f"Statement analytic {code}", nivel=5, tipo=parent.tipo,
+                naturaleza=parent.naturaleza, es_regularizadora=False, es_oficial=False,
+                cooperativa_id=case["ids"]["coops"][0], estado="ACTIVA",
+                acepta_movimientos=True, plan_cuenta_padre_id=parent.id,
+            )
+            db.add(account)
+            db.flush()
+            case["ids"]["accounts"].append(account.id)
+            accounts[code] = account.id
+        db.commit()
+    return accounts
+
+
+def _post_lines(case, lines, *, currency=1, date_value=None, glosa="Statement integration fixture"):
+    return {
+        "tipo": "TRASPASO", "fecha_contable": date_value or case["today"],
+        "glosa": glosa, "moneda_id": currency, "lineas": lines,
+    }
+
+
+def test_exchange_rates_validate_tenant_duplicate_base_and_future_dates(voucher_case):
+    case = voucher_case
+    today = date.today()
+    headers = auth(case["tokens"][0])
+    with TestClient(app) as client:
+        base = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 1, "fecha": today.isoformat(), "valor": "1.00000",
+        }, headers=headers)
+        future = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": (today + timedelta(days=1)).isoformat(), "valor": "6.90000",
+        }, headers=headers)
+        created = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": today.isoformat(), "valor": "6.90000",
+        }, headers=headers)
+        duplicate = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": today.isoformat(), "valor": "7.00000",
+        }, headers=headers)
+        listed = client.get(f"/api/v1/contabilidad/tipos-cambio?moneda_id=2&desde={today}&hasta={today}", headers=headers)
+        foreign = client.get(f"/api/v1/contabilidad/tipos-cambio?moneda_id=2", headers=auth(case["tokens"][1]))
+    assert base.status_code == 422, base.text
+    assert future.status_code == 422, future.text
+    assert created.status_code == 201, created.text
+    assert duplicate.status_code == 409, duplicate.text
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["valor"] == "6.90000"
+    assert foreign.status_code == 200 and foreign.json() == []
+    with SessionLocal() as db:
+        audit = db.query(models.Bitacora).filter_by(
+            usuario_id=case["ids"]["users"][0], modulo="CONTABILIDAD", accion="TIPO_CAMBIO_CREAR"
+        ).one_or_none()
+        assert audit is not None and audit.cooperativa_id == case["ids"]["coops"][0]
+
+
+def test_exchange_rate_update_corrects_value_and_is_tenant_scoped(voucher_case):
+    case = voucher_case
+    today = date.today()
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": today.isoformat(), "valor": "6.86000",
+        }, headers=auth(case["tokens"][0]))
+        assert created.status_code == 201, created.text
+        rate_id = created.json()["id"]
+        updated = client.put(f"/api/v1/contabilidad/tipos-cambio/{rate_id}", json={"valor": "6.87000"},
+                             headers=auth(case["tokens"][0]))
+        foreign_update = client.put(f"/api/v1/contabilidad/tipos-cambio/{rate_id}", json={"valor": "7.00000"},
+                                    headers=auth(case["tokens"][1]))
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["valor"] == "6.87000"
+    assert foreign_update.status_code == 404
+
+
+def test_balance_general_and_income_statement_reconcile_with_usd_conversion(voucher_case):
+    case = voucher_case
+    accounts = _add_statement_accounts(case)
+    today = date.today()
+    asset_id, liability_id = case["ids"]["accounts"][:2]
+    income_id, expense_id = accounts["513.05"], accounts["411.04"]
+    headers = auth(case["tokens"][0])
+    with TestClient(app) as client:
+        missing_rate = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=CONSOLIDADO", headers=headers)
+        rate = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": today.isoformat(), "valor": "6.86000",
+        }, headers=headers)
+        assert rate.status_code == 201, rate.text
+        income = client.post("/api/v1/contabilidad/comprobantes", json=_post_lines(case, [
+            {"plan_cuenta_id": asset_id, "debe": "100.00", "haber": "0"},
+            {"plan_cuenta_id": income_id, "debe": "0", "haber": "100.00"},
+        ], currency=2), headers=headers)
+        expense = client.post("/api/v1/contabilidad/comprobantes", json=_post_lines(case, [
+            {"plan_cuenta_id": expense_id, "debe": "30.00", "haber": "0"},
+            {"plan_cuenta_id": liability_id, "debe": "0", "haber": "30.00"},
+        ], currency=2), headers=headers)
+        balance = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=CONSOLIDADO", headers=headers)
+        results = client.get(f"/api/v1/contabilidad/estado-resultados?desde={today.replace(day=1)}&hasta={today}&moneda=CONSOLIDADO", headers=headers)
+        results_export = client.get(f"/api/v1/contabilidad/estado-resultados/export?desde={today.replace(day=1)}&hasta={today}&moneda=CONSOLIDADO", headers=headers)
+    assert income.status_code == expense.status_code == 201
+    assert balance.status_code == 200, balance.text
+    assert results.status_code == 200, results.text
+    assert len(results.json()["lineas"]) == 9
+    assert results.json()["formato"] == "MCEF grupos (Título II)"
+    assert results_export.status_code == 200 and results_export.content.startswith(b"\xef\xbb\xbf")
+    assert f"estado-resultados-{today.replace(day=1)}-{today}.csv" in results_export.headers["content-disposition"]
+    assert balance.json()["cuadra"] is True
+    assert balance.json()["total_activo"] == "686.00"
+    assert balance.json()["resultado_gestion"] == results.json()["resultado_neto_gestion"]
+    assert balance.json()["tipo_cambio"]["valor"] == "6.86000"
+    assert missing_rate.status_code == 422
+    assert f"vigente al {today}" in missing_rate.json()["detail"]
+
+
+def test_statement_levels_authorization_csv_and_reversal_net_out(voucher_case):
+    case = voucher_case
+    today = date.today()
+    asset_id, liability_id = case["ids"]["accounts"][:2]
+    headers = auth(case["tokens"][0])
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=_post_lines(case, [
+            {"plan_cuenta_id": asset_id, "debe": "25.00", "haber": "0"},
+            {"plan_cuenta_id": liability_id, "debe": "0", "haber": "25.00"},
+        ]), headers=headers)
+        assert created.status_code == 201, created.text
+        voided = client.post(f"/api/v1/contabilidad/comprobantes/{created.json()['id']}/anular",
+                             json={"motivo": "Cancel statement fixture"}, headers=headers)
+        active = client.post("/api/v1/contabilidad/comprobantes", json=_post_lines(case, [
+            {"plan_cuenta_id": asset_id, "debe": "10.00", "haber": "0"},
+            {"plan_cuenta_id": liability_id, "debe": "0", "haber": "10.00"},
+        ]), headers=headers)
+        level_two = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=BOB&nivel=2", headers=headers)
+        export = client.get(f"/api/v1/contabilidad/balance-general/export?fecha_corte={today}&moneda=BOB", headers=headers)
+        invalid_period = client.get("/api/v1/contabilidad/estado-resultados?desde=2025-12-31&hasta=2026-01-01&moneda=BOB", headers=headers)
+        denied = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}", headers=auth(case["tokens"][2]))
+    assert voided.status_code == 201, voided.text
+    assert level_two.status_code == 200, level_two.text
+    assert active.status_code == 201, active.text
+    assert level_two.json()["cuadra"] is True
+    assert level_two.json()["total_activo"] == "10.00"
+    assert all(not group["cuentas"] for section in level_two.json()["secciones"].values() for group in section.values())
+    assert export.status_code == 200 and export.content.startswith(b"\xef\xbb\xbf")
+    assert f"balance-general-{today}.csv" in export.headers["content-disposition"]
+    assert invalid_period.status_code == 422
+    assert denied.status_code == 403
+
+
+def test_consolidated_rounds_after_combining_analytic_accounts(voucher_case):
+    case = voucher_case
+    asset_id, liability_id = case["ids"]["accounts"][:2]
+    with SessionLocal() as db:
+        original = db.get(models.PlanCuenta, asset_id)
+        parent = db.get(models.PlanCuenta, original.plan_cuenta_padre_id)
+        second = models.PlanCuenta(
+            codigo=f"{parent.codigo}.{case['ids']['coops'][0] % 10000:04d}B",
+            nombre="Second analytic rounding fixture", nivel=5, tipo=parent.tipo,
+            naturaleza=parent.naturaleza, es_regularizadora=False, es_oficial=False,
+            cooperativa_id=case["ids"]["coops"][0], estado="ACTIVA", acepta_movimientos=True,
+            plan_cuenta_padre_id=parent.id,
+        )
+        db.add(second)
+        db.flush()
+        case["ids"]["accounts"].append(second.id)
+        second_id = second.id
+        db.commit()
+    today = date.today()
+    headers = auth(case["tokens"][0])
+    with TestClient(app) as client:
+        rate = client.post("/api/v1/contabilidad/tipos-cambio", json={
+            "moneda_id": 2, "fecha": today.isoformat(), "valor": "0.50000",
+        }, headers=headers)
+        assert rate.status_code == 201, rate.text
+        posted = client.post("/api/v1/contabilidad/comprobantes", json=_post_lines(case, [
+            {"plan_cuenta_id": asset_id, "debe": "0.01", "haber": "0"},
+            {"plan_cuenta_id": second_id, "debe": "0.01", "haber": "0"},
+            {"plan_cuenta_id": liability_id, "debe": "0", "haber": "0.02"},
+        ], currency=2), headers=headers)
+        report = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=CONSOLIDADO", headers=headers)
+    assert posted.status_code == 201, posted.text
+    assert report.status_code == 200, report.text
+    assert report.json()["total_activo"] == "0.01"
+    assert report.json()["total_pasivo"] == "0.01"
+    assert report.json()["cuadra"] is True

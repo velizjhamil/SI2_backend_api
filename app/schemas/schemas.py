@@ -213,6 +213,18 @@ class MonedaOut(BaseModel):
     simbolo: str
 
 
+class TipoCambioCreate(BaseModel):
+    moneda_id: int = Field(gt=0)
+    fecha: date
+    valor: Decimal = Field(gt=0, max_digits=12, decimal_places=5)
+    fuente: str = Field(default="BCB", min_length=1, max_length=30)
+
+
+class TipoCambioUpdate(BaseModel):
+    valor: Decimal = Field(gt=0, max_digits=12, decimal_places=5)
+    fuente: str | None = Field(default=None, min_length=1, max_length=30)
+
+
 class ProductoCreditoCreate(BaseModel):
     codigo: str
     nombre: str

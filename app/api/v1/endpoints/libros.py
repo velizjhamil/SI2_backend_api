@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_current_user, get_db
+from app.api.v1.endpoints.accounting_sql import nature_balance_delta_sql
 from app.models.models import Usuario
 
 router = APIRouter()
@@ -124,11 +125,12 @@ def _book_major(db, tenant, cuenta_id, desde, hasta, moneda_id, include):
     account_ids = child_posting if has_descendants else ([cuenta_id] if account["acepta_movimientos"] else [])
     if not account_ids:
         raise HTTPException(422, "La cuenta no tiene cuentas de movimiento")
-    rows = db.execute(text("""
+    balance_delta = nature_balance_delta_sql(":naturaleza", "d.debe", "d.haber")
+    rows = db.execute(text(f"""
         WITH scoped AS (
             SELECT c.id voucher_id,c.numero,c.tipo,c.estado,c.fecha_contable fecha,
                    COALESCE(d.orden,2147483647) orden,d.id detail_id,pc.codigo,d.glosa,d.debe,d.haber,
-                   CASE WHEN :naturaleza='DEUDORA' THEN d.debe-d.haber ELSE d.haber-d.debe END delta
+                   {balance_delta} delta
             FROM comprobante_contable c JOIN detalle_asiento d ON d.comprobante_contable_id=c.id
             JOIN plan_cuenta pc ON pc.id=d.plan_cuenta_id
             WHERE c.cooperativa_id=:tenant AND c.moneda_id=:moneda AND c.fecha_contable<=:hasta
@@ -180,7 +182,8 @@ def balance_comprobacion(desde: date | None = None, hasta: date | None = None, m
                          nivel: int = Query(4, ge=1, le=5), user: Usuario = Depends(get_current_user),
                          db: Session = Depends(get_db)):
     tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
-    rows = db.execute(text("""
+    balance_delta = nature_balance_delta_sql("a.naturaleza", "r.acumulado_debe", "r.acumulado_haber")
+    rows = db.execute(text(f"""
         WITH RECURSIVE accounts AS (
             SELECT id,codigo,nombre,naturaleza,nivel,plan_cuenta_padre_id
             FROM plan_cuenta WHERE cooperativa_id=:tenant OR cooperativa_id IS NULL
@@ -207,8 +210,7 @@ def balance_comprobacion(desde: date | None = None, hasta: date | None = None, m
             GROUP BY p.target_id
         ), classified AS (
             SELECT a.codigo,a.nombre,a.naturaleza,r.sum_debe,r.sum_haber,
-                   CASE WHEN a.naturaleza='DEUDORA' THEN r.acumulado_debe-r.acumulado_haber
-                        ELSE r.acumulado_haber-r.acumulado_debe END naturaleza_saldo
+                   {balance_delta} naturaleza_saldo
             FROM rolled r JOIN accounts a ON a.id=r.target_id
         ), balances AS (
             SELECT codigo,nombre,naturaleza,sum_debe,sum_haber,

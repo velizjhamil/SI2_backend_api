@@ -231,6 +231,23 @@ class Moneda(Base):
     es_moneda_base: Mapped[bool] = mapped_column(default=False)
 
 
+class TipoCambio(Base):
+    __tablename__ = "tipo_cambio"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "moneda_id", "fecha", name="uq_tipo_cambio_coop_moneda_fecha"),
+        CheckConstraint("valor > 0", name="chk_tipo_cambio_valor_positivo"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id", ondelete="CASCADE"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("moneda.id"), nullable=False)
+    fecha: Mapped[date] = mapped_column(Date, nullable=False)
+    valor = mapped_column(Numeric(12, 5), nullable=False)
+    fuente: Mapped[str] = mapped_column(String(30), nullable=False, default="BCB", server_default="BCB")
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    fecha_registro = mapped_column(TIMESTAMP(timezone=False), nullable=False, server_default=func.now())
+
+
 class CuentaAhorro(Base):
     __tablename__ = "cuenta_ahorro"
 
