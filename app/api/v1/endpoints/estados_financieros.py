@@ -231,10 +231,10 @@ def _balance_data(db, tenant, cutoff, mode, nivel):
         for group in values.values():
             group["monto"] = _money(group["monto"])
             group["cuentas"] = [dict(a, monto=_money(a["monto"])) for a in group["cuentas"].values() if a["monto"]]
-            if nivel == 2:
-                group["cuentas"] = []
             if not group["cuentas"] and group["codigo"] != "RESULTADO_GESTION":
                 group["_zero"] = True
+            if nivel == 2:
+                group["cuentas"] = []
         for code in [code for code, group in values.items() if group.get("_zero")]:
             del values[code]
     asset = totals["ACTIVO"].quantize(CENT, rounding=ROUND_HALF_UP)

@@ -888,9 +888,12 @@ def test_balance_general_and_income_statement_reconcile_with_usd_conversion(vouc
             {"plan_cuenta_id": liability_id, "debe": "0", "haber": "30.00"},
         ], currency=2), headers=headers)
         balance = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=CONSOLIDADO", headers=headers)
+        level_two = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={today}&moneda=CONSOLIDADO&nivel=2", headers=headers)
         results = client.get(f"/api/v1/contabilidad/estado-resultados?desde={today.replace(day=1)}&hasta={today}&moneda=CONSOLIDADO", headers=headers)
         results_export = client.get(f"/api/v1/contabilidad/estado-resultados/export?desde={today.replace(day=1)}&hasta={today}&moneda=CONSOLIDADO", headers=headers)
     assert income.status_code == expense.status_code == 201
+    groups_two = [g for section in level_two.json()["secciones"].values() for g in section.values()]
+    assert level_two.status_code == 200 and any(g["codigo"] != "RESULTADO_GESTION" for g in groups_two) and all(g["cuentas"] == [] for g in groups_two)
     assert balance.status_code == 200, balance.text
     assert results.status_code == 200, results.text
     assert len(results.json()["lineas"]) == 9
