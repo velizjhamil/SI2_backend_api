@@ -1,3 +1,5 @@
+from datetime import date, datetime
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -240,7 +242,7 @@ class CuentaAhorro(Base):
     estado: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVA")
     fecha_registro = mapped_column(Date, nullable=False, server_default=func.current_date())
     socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
-    moneda_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("moneda.id"), nullable=False)
+    moneda_id: Mapped[int] = mapped_column(Integer, ForeignKey("moneda.id"), nullable=False)
 
     socio: Mapped["Socio"] = relationship(back_populates="cuentas_ahorro")
     moneda: Mapped["Moneda"] = relationship()
@@ -968,3 +970,73 @@ class PlanCuenta(Base):
 
     padre: Mapped["PlanCuenta | None"] = relationship(remote_side="PlanCuenta.id", back_populates="hijos")
     hijos: Mapped[list["PlanCuenta"]] = relationship(back_populates="padre")
+
+
+class ComprobanteContable(Base):
+    """Accounting voucher header, tenant-scoped and linked to its source transaction."""
+
+    __tablename__ = "comprobante_contable"
+    __table_args__ = (
+        CheckConstraint("tipo IN ('INGRESO','EGRESO','TRASPASO')", name="chk_comprobante_tipo"),
+        CheckConstraint("estado IN ('REGISTRADO','ANULADO')", name="chk_comprobante_estado"),
+        CheckConstraint("origen IN ('MANUAL','AUTOMATICO')", name="chk_comprobante_origen"),
+        UniqueConstraint("cooperativa_id", "tipo", "gestion", "numero", name="uq_comprobante_coop_tipo_gestion_numero"),
+        Index(
+            "uq_comprobante_automatico_transaccion",
+            "transaccion_id",
+            unique=True,
+            postgresql_where=sql_text("origen = 'AUTOMATICO' AND revierte_a_id IS NULL AND transaccion_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tipo: Mapped[str] = mapped_column(String(50), nullable=False)
+    glosa: Mapped[str] = mapped_column(Text, nullable=False)
+    es_automatico: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    fecha: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=False), nullable=False, server_default=func.now())
+    # transaccion is intentionally SQL-only in this codebase and has no ORM table.
+    transaccion_id: Mapped[int | None] = mapped_column(Integer)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    numero: Mapped[str] = mapped_column(String(20), nullable=False)
+    gestion: Mapped[int] = mapped_column(Integer, nullable=False)
+    fecha_contable: Mapped[date] = mapped_column(Date, nullable=False)
+    moneda_id: Mapped[int] = mapped_column(SmallInteger, ForeignKey("moneda.id"), nullable=False)
+    estado: Mapped[str] = mapped_column(String(10), nullable=False, default="REGISTRADO", server_default="REGISTRADO")
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    origen: Mapped[str] = mapped_column(String(12), nullable=False)
+    comprobante_reversion_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("comprobante_contable.id"))
+    revierte_a_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("comprobante_contable.id"))
+    motivo_anulacion: Mapped[str | None] = mapped_column(Text)
+    fecha_registro: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=False), nullable=False, server_default=func.now())
+
+
+class DetalleAsiento(Base):
+    __tablename__ = "detalle_asiento"
+    __table_args__ = (
+        CheckConstraint(
+            "debe >= 0 AND haber >= 0 AND ((debe = 0) <> (haber = 0))",
+            name="chk_detalle_asiento_un_solo_lado",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    debe = mapped_column(Numeric(12, 2), nullable=False, default=0, server_default="0.00")
+    haber = mapped_column(Numeric(12, 2), nullable=False, default=0, server_default="0.00")
+    comprobante_contable_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("comprobante_contable.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_cuenta_id: Mapped[int] = mapped_column(Integer, ForeignKey("plan_cuenta.id"), nullable=False)
+    glosa: Mapped[str | None] = mapped_column(Text)
+    orden: Mapped[int | None] = mapped_column(Integer)
+
+
+class ParametroContable(Base):
+    __tablename__ = "parametro_contable"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "clave", name="uq_parametro_contable_coop_clave"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    clave: Mapped[str] = mapped_column(String(40), nullable=False)
+    plan_cuenta_id: Mapped[int] = mapped_column(Integer, ForeignKey("plan_cuenta.id"), nullable=False)

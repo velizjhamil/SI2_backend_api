@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Literal
 from uuid import UUID
 
@@ -1349,3 +1349,97 @@ class PlanCuentaOut(BaseModel):
     tiene_analiticas: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+ComprobanteTipo = Literal["INGRESO", "EGRESO", "TRASPASO"]
+ComprobanteEstado = Literal["REGISTRADO", "ANULADO"]
+ComprobanteOrigen = Literal["MANUAL", "AUTOMATICO"]
+
+
+class ParametroContableUpdate(BaseModel):
+    plan_cuenta_id: int = Field(gt=0)
+
+
+class ParametroContableOut(BaseModel):
+    clave: str
+    plan_cuenta_id: int
+    codigo: str
+    nombre: str
+
+
+class ComprobanteLineaCreate(BaseModel):
+    plan_cuenta_id: int = Field(gt=0)
+    debe: Decimal = Field(default=Decimal("0.00"), ge=0)
+    haber: Decimal = Field(default=Decimal("0.00"), ge=0)
+    glosa: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("debe", "haber")
+    @classmethod
+    def round_amount_to_cents(cls, value: Decimal) -> Decimal:
+        try:
+            rounded = value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        except InvalidOperation as exc:
+            raise ValueError("El importe no es válido") from exc
+        if rounded < 0 or rounded > Decimal("9999999999.99"):
+            raise ValueError("El importe debe estar entre cero y 9,999,999,999.99")
+        return rounded
+
+    @field_validator("glosa")
+    @classmethod
+    def normalize_line_glosa(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @model_validator(mode="after")
+    def validate_one_side(self):
+        if (self.debe > 0) == (self.haber > 0):
+            raise ValueError("Cada línea debe tener exactamente uno de debe o haber mayor que cero")
+        return self
+
+
+class ComprobanteManualCreate(BaseModel):
+    tipo: ComprobanteTipo
+    fecha_contable: date
+    glosa: str = Field(max_length=500)
+    moneda_id: int = Field(gt=0)
+    lineas: list[ComprobanteLineaCreate]
+
+    @field_validator("glosa")
+    @classmethod
+    def normalize_header_glosa(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("La glosa debe contener al menos cinco caracteres")
+        return value
+
+    @model_validator(mode="after")
+    def validate_balanced_lines(self):
+        if len(self.lineas) < 2:
+            raise ValueError("El comprobante debe contener al menos dos líneas")
+        total_debe = sum((line.debe for line in self.lineas), Decimal("0.00"))
+        total_haber = sum((line.haber for line in self.lineas), Decimal("0.00"))
+        if total_debe <= 0 or total_haber <= 0 or total_debe != total_haber:
+            raise ValueError("El debe y el haber deben ser iguales y mayores que cero")
+        return self
+
+
+class ComprobanteAnularCreate(BaseModel):
+    motivo: str = Field(max_length=1000)
+
+    @field_validator("motivo")
+    @classmethod
+    def normalize_motivo(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("El motivo debe contener al menos cinco caracteres no blancos")
+        return value
+
+
+class ComprobanteGenerarAutomaticos(BaseModel):
+    desde: date | None = None
+    hasta: date | None = None
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.desde and self.hasta and self.desde > self.hasta:
+            raise ValueError("La fecha desde no puede ser posterior a hasta")
+        return self

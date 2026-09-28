@@ -46,7 +46,10 @@ def plan_case():
                 for _ in range(quantity):
                     result = db.execute(text("INSERT INTO transaccion (tipo,monto,canal,control_caja_id,moneda_id) VALUES ('DEPOSITO',1,'VENTANILLA',:control,1) RETURNING id"), {"control": ids["controls"][index]})
                     tx_id = result.scalar_one(); ids["transactions"].append(tx_id)
-                    voucher_id = db.execute(text("INSERT INTO comprobante_contable (tipo,glosa,es_automatico,transaccion_id) VALUES ('INGRESO','Read endpoint test',FALSE,:tx) RETURNING id"), {"tx": tx_id}).scalar_one()
+                    voucher_id = db.execute(text("""INSERT INTO comprobante_contable
+                        (tipo,glosa,es_automatico,transaccion_id,cooperativa_id,numero,gestion,fecha_contable,moneda_id,estado,usuario_id,origen)
+                        VALUES ('INGRESO','Read endpoint test',FALSE,:tx,:coop,:numero,2026,CURRENT_DATE,1,'REGISTRADO',:user_id,'MANUAL')
+                        RETURNING id"""), {"tx": tx_id, "coop": ids["coops"][index], "numero": f"I-2026-{tx_id:06d}", "user_id": ids["users"][index]}).scalar_one()
                     ids["vouchers"].append(voucher_id)
                     detail_id = db.execute(text("INSERT INTO detalle_asiento (debe,haber,comprobante_contable_id,plan_cuenta_id) VALUES (1,0,:voucher,:account) RETURNING id"), {"voucher": voucher_id, "account": db.query(models.PlanCuenta.id).filter_by(codigo="111.01",cooperativa_id=None).one()[0]}).scalar_one()
                     ids["details"].append(detail_id)
@@ -168,7 +171,10 @@ def _attach_detail(plan_case, cooperative_index, account_id, debe="1.00", haber=
     with SessionLocal() as db:
         tx_id = db.execute(text("INSERT INTO transaccion (tipo,monto,canal,control_caja_id,moneda_id) VALUES ('DEPOSITO',1,'VENTANILLA',:control,1) RETURNING id"), {"control": ids["controls"][cooperative_index]}).scalar_one()
         ids["transactions"].append(tx_id)
-        voucher_id = db.execute(text("INSERT INTO comprobante_contable (tipo,glosa,es_automatico,transaccion_id) VALUES ('INGRESO','B3 test',FALSE,:tx) RETURNING id"), {"tx": tx_id}).scalar_one()
+        voucher_id = db.execute(text("""INSERT INTO comprobante_contable
+            (tipo,glosa,es_automatico,transaccion_id,cooperativa_id,numero,gestion,fecha_contable,moneda_id,estado,usuario_id,origen)
+            VALUES ('INGRESO','B3 test',FALSE,:tx,:coop,:numero,2026,CURRENT_DATE,1,'REGISTRADO',:user_id,'MANUAL')
+            RETURNING id"""), {"tx": tx_id, "coop": ids["coops"][cooperative_index], "numero": f"I-2026-{tx_id:06d}", "user_id": ids["users"][cooperative_index]}).scalar_one()
         ids["vouchers"].append(voucher_id)
         detail_id = db.execute(text("INSERT INTO detalle_asiento (debe,haber,comprobante_contable_id,plan_cuenta_id) VALUES (:debe,:haber,:voucher,:account) RETURNING id"), {"debe": debe, "haber": haber, "voucher": voucher_id, "account": account_id}).scalar_one()
         ids["details"].append(detail_id)
@@ -269,7 +275,7 @@ def test_deactivation_zero_balance_is_audited_and_other_tenant_is_hidden(plan_ca
 
 def test_delete_rejects_accounts_with_any_movements_and_audits_successful_delete(plan_case):
     own_id = plan_case["ids"]["analytics"][0]
-    _attach_detail(plan_case, 0, own_id, debe="0.00", haber="0.00")
+    _attach_detail(plan_case, 0, own_id, debe="0.01", haber="0.00")
     with TestClient(app) as client:
         blocked = client.delete(f"/api/v1/contabilidad/plan-cuentas/{own_id}", headers=auth(plan_case["tokens"][0]))
     assert blocked.status_code == 409
