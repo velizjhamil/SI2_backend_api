@@ -1,0 +1,596 @@
+"""Tenant-isolated integration coverage for CU-W30 manual vouchers."""
+
+from datetime import date
+from uuid import uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
+
+from app.core.security import create_access_token, hash_password
+from app.db.session import SessionLocal, engine
+from app.models import models
+
+try:
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+    from main import app
+except Exception:
+    app = None
+
+pytestmark = pytest.mark.skipif(app is None, reason="PostgreSQL unavailable")
+
+
+@pytest.fixture
+def voucher_case():
+    suffix = uuid4().hex[:10]
+    ids = {"coops": [], "users": [], "accounts": []}
+    tokens = []
+    try:
+        with SessionLocal() as db:
+            roles = {
+                name: db.query(models.Rol).filter_by(nombre=name).one()
+                for name in ("CONTADOR", "ADMINISTRADOR", "SOCIO")
+            }
+            parents = {
+                code: db.query(models.PlanCuenta).filter_by(codigo=code, cooperativa_id=None).one()
+                for code in ("111.00", "111.01", "212.01")
+            }
+            for index in range(2):
+                coop = models.Cooperativa(nombre=f"Voucher test {suffix}-{index}", estado="ACTIVO")
+                db.add(coop)
+                db.flush()
+                ids["coops"].append(coop.id)
+                role_name = "CONTADOR" if index == 0 else "ADMINISTRADOR"
+                user = models.Usuario(
+                    correo=f"voucher-{suffix}-{index}@test.invalid",
+                    contrasena=hash_password("Password123"),
+                    rol_id=roles[role_name].id,
+                    cooperativa_id=coop.id,
+                    nombre="Voucher test",
+                    estado="ACTIVO",
+                )
+                db.add(user)
+                db.flush()
+                ids["users"].append(user.id)
+                for code in ("111.01", "212.01"):
+                    parent = parents[code]
+                    account = models.PlanCuenta(
+                        codigo=f"{code}.{index + 1:02d}",
+                        nombre=f"Analytic {code} {suffix}-{index}",
+                        nivel=5,
+                        tipo=parent.tipo,
+                        naturaleza=parent.naturaleza,
+                        es_regularizadora=False,
+                        es_oficial=False,
+                        cooperativa_id=coop.id,
+                        estado="ACTIVA",
+                        acepta_movimientos=True,
+                        plan_cuenta_padre_id=parent.id,
+                    )
+                    db.add(account)
+                    db.flush()
+                    ids["accounts"].append(account.id)
+                token, _ = create_access_token(str(user.id), role_name, coop.id)
+                tokens.append(token)
+
+            denied = models.Usuario(
+                correo=f"voucher-denied-{suffix}@test.invalid",
+                contrasena=hash_password("Password123"),
+                rol_id=roles["SOCIO"].id,
+                cooperativa_id=ids["coops"][0],
+                nombre="Voucher denied",
+                estado="ACTIVO",
+            )
+            db.add(denied)
+            db.flush()
+            ids["users"].append(denied.id)
+            token, _ = create_access_token(str(denied.id), "SOCIO", ids["coops"][0])
+            tokens.append(token)
+            ids["official"] = {code: parent.id for code, parent in parents.items()}
+            db.commit()
+        yield {"ids": ids, "tokens": tokens, "today": date.today().isoformat()}
+    finally:
+        with SessionLocal() as db:
+            if ids["coops"]:
+                db.execute(text("DELETE FROM detalle_asiento WHERE comprobante_contable_id IN (SELECT id FROM comprobante_contable WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM comprobante_contable WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("UPDATE dpf_cronograma SET transaccion_id=NULL WHERE deposito_plazo_fijo_id IN (SELECT id FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops))"), {"coops":ids["coops"]})
+                db.execute(text("UPDATE pago_cuota SET transaccion_id=NULL WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM transaccion WHERE control_caja_id IN (SELECT cc.id FROM control_caja cc JOIN caja c ON c.id=cc.caja_id WHERE c.cooperativa_id = ANY(:coops)) OR cuenta_ahorro_id IN (SELECT a.id FROM cuenta_ahorro a JOIN socio s ON s.id=a.socio_id WHERE s.cooperativa_id = ANY(:coops)) OR pago_cuota_id IN (SELECT id FROM pago_cuota WHERE cooperativa_id=ANY(:coops)) OR credito_id IN (SELECT id FROM credito WHERE cooperativa_id=ANY(:coops)) OR deposito_plazo_fijo_id IN (SELECT id FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops)) OR liquidacion_id IN (SELECT l.id FROM liquidacion l JOIN deposito_plazo_fijo d ON d.id=l.deposito_plazo_fijo_id WHERE d.cooperativa_id=ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM pago_cuota WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM tabla_amortizacion WHERE credito_id IN (SELECT id FROM credito WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM credito WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM solicitud_credito WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM dpf_cronograma WHERE deposito_plazo_fijo_id IN (SELECT id FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops))"), {"coops":ids["coops"]})
+                db.execute(text("DELETE FROM liquidacion WHERE deposito_plazo_fijo_id IN (SELECT id FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops))"), {"coops":ids["coops"]})
+                db.execute(text("DELETE FROM deposito_plazo_fijo WHERE cooperativa_id=ANY(:coops)"), {"coops":ids["coops"]})
+                db.execute(text("DELETE FROM control_caja WHERE caja_id IN (SELECT id FROM caja WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM caja WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM cuenta_ahorro WHERE socio_id IN (SELECT id FROM socio WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM socio WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM detalle_asiento WHERE comprobante_contable_id IN (SELECT id FROM comprobante_contable WHERE cooperativa_id = ANY(:coops))"), {"coops": ids["coops"]})
+                db.execute(text("UPDATE comprobante_contable SET comprobante_reversion_id=NULL, revierte_a_id=NULL WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM comprobante_contable WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+                db.execute(text("DELETE FROM parametro_contable WHERE cooperativa_id = ANY(:coops)"), {"coops": ids["coops"]})
+            if ids["users"]:
+                db.execute(text("DELETE FROM bitacora WHERE usuario_id = ANY(:users)"), {"users": ids["users"]})
+                db.execute(text("DELETE FROM usuario WHERE id = ANY(:users)"), {"users": ids["users"]})
+            if ids["accounts"]:
+                db.execute(text("DELETE FROM plan_cuenta WHERE id = ANY(:accounts)"), {"accounts": ids["accounts"]})
+            if ids["coops"]:
+                db.execute(text("DELETE FROM cooperativa WHERE id = ANY(:coops)"), {"coops": ids["coops"]})
+            db.commit()
+
+
+def auth(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def manual_payload(case, *, tipo="TRASPASO", glosa="Manual test voucher", amount="10.00", fecha=None):
+    return {
+        "tipo": tipo,
+        "fecha_contable": fecha or case["today"],
+        "glosa": glosa,
+        "moneda_id": 1,
+        "lineas": [
+            {"plan_cuenta_id": case["ids"]["accounts"][0], "debe": amount, "haber": "0"},
+            {"plan_cuenta_id": case["ids"]["accounts"][1], "debe": "0", "haber": amount},
+        ],
+    }
+
+
+def test_create_rounds_half_up_and_list_detail_are_tenant_scoped_and_audited(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/contabilidad/comprobantes",
+            json=manual_payload(case, amount="10.005"),
+            headers=auth(case["tokens"][0]),
+        )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["numero"] == "T-2026-000001"
+    assert body["total_debe"] == "10.01"
+    assert body["total_haber"] == "10.01"
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/contabilidad/comprobantes?origen=MANUAL&q=Manual", headers=auth(case["tokens"][0]))
+        detail = client.get(f"/api/v1/contabilidad/comprobantes/{body['id']}", headers=auth(case["tokens"][0]))
+        foreign_detail = client.get(f"/api/v1/contabilidad/comprobantes/{body['id']}", headers=auth(case["tokens"][1]))
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == body["id"]
+    assert listed.json()["items"][0]["total_debe"] == listed.json()["items"][0]["total_haber"] == "10.01"
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["lineas"][0]["debe"] == "10.01"
+    assert detail.json()["lineas"][1]["haber"] == "10.01"
+    assert detail.json()["total_debe"] == detail.json()["total_haber"] == "10.01"
+    assert isinstance(body["total_debe"], str)
+    assert isinstance(detail.json()["lineas"][0]["debe"], str)
+    assert foreign_detail.status_code == 404
+    with SessionLocal() as db:
+        audit = db.query(models.Bitacora).filter_by(
+            usuario_id=case["ids"]["users"][0], modulo="CONTABILIDAD", accion="COMPROBANTE_CREAR_MANUAL"
+        ).one_or_none()
+        assert audit is not None
+        assert audit.cooperativa_id == case["ids"]["coops"][0]
+
+
+@pytest.mark.parametrize(
+    "mutate,expected_detail",
+    [
+        (lambda p: p.update(lineas=p["lineas"][:1]), "al menos dos líneas"),
+        (lambda p: p["lineas"][0].update(debe="0", haber="0"), "exactamente uno de debe o haber"),
+        (lambda p: p["lineas"][1].update(haber="9.99"), "deben ser iguales"),
+        (lambda p: p.update(glosa="  abc  "), "glosa debe contener al menos cinco caracteres"),
+        (lambda p: p.update(fecha_contable="2099-01-01"), "fecha contable no puede ser futura"),
+        (lambda p: p.update(moneda_id=999999), "la moneda seleccionada no existe"),
+    ],
+)
+def test_create_rejects_invalid_header_or_unbalanced_lines(voucher_case, mutate, expected_detail):
+    payload = manual_payload(voucher_case)
+    mutate(payload)
+    with TestClient(app) as client:
+        response = client.post("/api/v1/contabilidad/comprobantes", json=payload, headers=auth(voucher_case["tokens"][0]))
+    assert response.status_code == 422, response.text
+    assert expected_detail.lower() in response.text.lower()
+
+
+def test_body_validation_message_does_not_include_pydantic_prefix(voucher_case):
+    payload = manual_payload(voucher_case)
+    payload["glosa"] = "  "
+    with TestClient(app) as client:
+        response = client.post("/api/v1/contabilidad/comprobantes", json=payload, headers=auth(voucher_case["tokens"][0]))
+    assert response.status_code == 422
+    assert "Value error, " not in response.json()["detail"]
+    assert "glosa debe contener al menos cinco caracteres" in response.json()["detail"].lower()
+
+
+def test_void_response_amounts_are_fixed_decimal_strings(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case), headers=auth(case["tokens"][0]))
+        reversal = client.post(
+            f"/api/v1/contabilidad/comprobantes/{created.json()['id']}/anular",
+            json={"motivo": "Error de digitación"}, headers=auth(case["tokens"][0]),
+        )
+    assert reversal.status_code == 201
+    assert reversal.json()["total_debe"] == reversal.json()["total_haber"] == "10.00"
+    assert all(isinstance(line["debe"], str) and isinstance(line["haber"], str) for line in reversal.json()["lineas"])
+
+
+def test_create_rejects_nonmovement_inactive_foreign_and_analytic_parent_accounts(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        official_nonmovement = db.get(models.PlanCuenta, case["ids"]["official"]["111.00"])
+        inactive = models.PlanCuenta(
+            codigo=f"111.01.90.{uuid4().hex[:2]}", nombre="Inactive test", nivel=5, tipo="ACTIVO",
+            naturaleza="DEUDORA", es_regularizadora=False, es_oficial=False,
+            cooperativa_id=case["ids"]["coops"][0], estado="INACTIVA", acepta_movimientos=True,
+            plan_cuenta_padre_id=official_nonmovement.id,
+        )
+        db.add(inactive)
+        db.commit()
+        inactive_id = inactive.id
+    try:
+        cases = []
+        payload = manual_payload(case)
+        payload["lineas"][0]["plan_cuenta_id"] = case["ids"]["official"]["111.01"]  # has tenant analytic descendants
+        cases.append((payload, 422, "cuenta analítica"))
+        payload = manual_payload(case)
+        payload["lineas"][0]["plan_cuenta_id"] = case["ids"]["official"]["111.00"]  # official parent, not postable
+        cases.append((payload, 422, "no acepta movimientos"))
+        payload = manual_payload(case)
+        payload["lineas"][0]["plan_cuenta_id"] = inactive_id
+        cases.append((payload, 422, "no está activa"))
+        payload = manual_payload(case)
+        payload["lineas"][0]["plan_cuenta_id"] = case["ids"]["accounts"][2]
+        cases.append((payload, 404, "cuenta contable no encontrada"))
+        for payload, expected_status, detail in cases:
+            with TestClient(app) as client:
+                response = client.post("/api/v1/contabilidad/comprobantes", json=payload, headers=auth(case["tokens"][0]))
+            assert response.status_code == expected_status, response.text
+            assert detail.lower() in response.text.lower()
+    finally:
+        with SessionLocal() as db:
+            db.execute(text("DELETE FROM plan_cuenta WHERE id=:id"), {"id": inactive_id})
+            db.commit()
+
+
+def test_create_requires_accounting_role_and_generates_correlative_numbers_by_type(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        denied = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case), headers=auth(case["tokens"][2]))
+        first = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case), headers=auth(case["tokens"][0]))
+        second = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case), headers=auth(case["tokens"][0]))
+        other_type = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case, tipo="INGRESO"), headers=auth(case["tokens"][0]))
+    assert denied.status_code == 403
+    assert first.json()["numero"] == "T-2026-000001"
+    assert second.json()["numero"] == "T-2026-000002"
+    assert other_type.json()["numero"] == "I-2026-000001"
+
+
+def test_void_creates_linked_reversal_with_swapped_lines_and_audit(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case), headers=auth(case["tokens"][0]))
+        voucher_id = created.json()["id"]
+        voided = client.post(
+            f"/api/v1/contabilidad/comprobantes/{voucher_id}/anular",
+            json={"motivo": "Error de digitación"},
+            headers=auth(case["tokens"][0]),
+        )
+        repeated = client.post(
+            f"/api/v1/contabilidad/comprobantes/{voucher_id}/anular",
+            json={"motivo": "Segundo intento"},
+            headers=auth(case["tokens"][0]),
+        )
+    assert created.status_code == 201, created.text
+    assert voided.status_code == 201, voided.text
+    assert repeated.status_code == 409
+    reversal = voided.json()
+    assert reversal["numero"] == "T-2026-000002"
+    assert reversal["revierte_a_id"] == voucher_id
+    assert reversal["total_debe"] == reversal["total_haber"] == "10.00"
+    with TestClient(app) as client:
+        original = client.get(f"/api/v1/contabilidad/comprobantes/{voucher_id}", headers=auth(case["tokens"][0]))
+        reversed_detail = client.get(f"/api/v1/contabilidad/comprobantes/{reversal['id']}", headers=auth(case["tokens"][0]))
+    assert original.json()["estado"] == "ANULADO"
+    assert original.json()["comprobante_reversion_id"] == reversal["id"]
+    assert original.json()["motivo_anulacion"] == "Error de digitación"
+    assert reversed_detail.json()["revierte_a_id"] == voucher_id
+    assert reversed_detail.json()["lineas"][0]["haber"] == "10.00"
+    assert reversed_detail.json()["lineas"][0]["debe"] == "0.00"
+
+
+def test_automatic_generation_reports_pending_sources_and_is_idempotent(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/contabilidad/comprobantes/generar-automaticos",
+            json={}, headers=auth(case["tokens"][0]),
+        )
+        second = client.post(
+            "/api/v1/contabilidad/comprobantes/generar-automaticos",
+            json={}, headers=auth(case["tokens"][0]),
+        )
+    assert first.status_code == 200, first.text
+    assert first.json() == {"procesadas": 0, "generados": 0, "omitidas": [], "por_tipo": {}}
+    assert second.status_code == 200, second.text
+    assert second.json() == {"procesadas": 0, "generados": 0, "omitidas": [], "por_tipo": {}}
+    with SessionLocal() as db:
+        audits = db.query(models.Bitacora).filter_by(
+            usuario_id=case["ids"]["users"][0], modulo="CONTABILIDAD", accion="COMPROBANTES_GENERAR_AUTOMATICOS"
+        ).count()
+        assert audits == 2
+
+
+def test_automatic_generation_posts_cash_deposit_once_with_balanced_currency_lines(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        coop_id = case["ids"]["coops"][0]
+        for key, account_id in (("CAJA", case["ids"]["accounts"][0]), ("AHORRO_VISTA", case["ids"]["accounts"][1])):
+            db.add(models.ParametroContable(cooperativa_id=coop_id, clave=key, plan_cuenta_id=account_id))
+        user_id = case["ids"]["users"][0]
+        socio_id = db.execute(text("INSERT INTO socio(ci,nombre,apellido,cooperativa_id) VALUES (:ci,'Test','Member',:coop) RETURNING id"), {"ci":f"T{uuid4().hex[:15]}","coop":coop_id}).scalar_one()
+        cuenta_id = db.execute(text("INSERT INTO cuenta_ahorro(numero,fecha_registro,socio_id,moneda_id,tipo_producto) VALUES (:num,CURRENT_DATE,:socio,1,'VISTA') RETURNING id"), {"num":f"TEST-{uuid4().hex[:8]}","socio":socio_id}).scalar_one()
+        caja_id = db.execute(text("INSERT INTO caja(nombre,cooperativa_id) VALUES ('Test till',:coop) RETURNING id"), {"coop":coop_id}).scalar_one()
+        control_id = db.execute(text("INSERT INTO control_caja(monto_apertura,saldo_sistema,fecha_apertura,caja_id,usuario_id) VALUES (0,0,CURRENT_TIMESTAMP,:caja,:user) RETURNING id"), {"caja":caja_id,"user":user_id}).scalar_one()
+        trans_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,control_caja_id,moneda_id,cuenta_ahorro_id) VALUES ('DEPOSITO',25.50,'VENTANILLA',:control,1,:cuenta) RETURNING id"), {"control":control_id,"cuenta":cuenta_id}).scalar_one()
+        withdrawal_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,control_caja_id,moneda_id,cuenta_ahorro_id) VALUES ('RETIRO',5,'VENTANILLA',:control,1,:cuenta) RETURNING id"), {"control":control_id,"cuenta":cuenta_id}).scalar_one()
+        opening_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id) VALUES ('APERTURA',10,'WEB',1,:cuenta) RETURNING id"), {"cuenta":cuenta_id}).scalar_one()
+        db.commit()
+        ids = {"socio":socio_id,"cuenta":cuenta_id,"caja":caja_id,"control":control_id,"trans":trans_id,"withdrawal":withdrawal_id,"opening":opening_id}
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/v1/contabilidad/comprobantes/generar-automaticos", json={}, headers=auth(case["tokens"][0]))
+            rerun = client.post("/api/v1/contabilidad/comprobantes/generar-automaticos", json={}, headers=auth(case["tokens"][0]))
+        assert response.status_code == 200, response.text
+        assert response.json()["generados"] == 2
+        assert response.json()["omitidas"] == [{"transaccion_id": ids["opening"], "tipo": "APERTURA", "motivo": "Movimiento de cuenta sin fuente de caja explícita; no se infiere una contrapartida"}]
+        assert rerun.json()["generados"] == 0
+        with SessionLocal() as db:
+            voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=ids["trans"], origen="AUTOMATICO").one()
+            lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=voucher.id).order_by(models.DetalleAsiento.orden).all()
+            assert voucher.tipo == "INGRESO"
+            assert voucher.moneda_id == 1
+            assert [line.plan_cuenta_id for line in lines] == case["ids"]["accounts"][:2]
+            assert [(line.debe, line.haber) for line in lines] == [(25.50, 0), (0, 25.50)]
+            withdrawal = db.query(models.ComprobanteContable).filter_by(transaccion_id=ids["withdrawal"]).one()
+            withdrawal_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=withdrawal.id).order_by(models.DetalleAsiento.orden).all()
+            assert withdrawal.tipo == "EGRESO"
+            assert [(line.debe,line.haber) for line in withdrawal_lines] == [(5,0),(0,5)]
+    finally:
+        with SessionLocal() as db:
+            db.execute(text("DELETE FROM detalle_asiento WHERE comprobante_contable_id IN (SELECT id FROM comprobante_contable WHERE transaccion_id = ANY(:ids))"), {"ids":[ids["trans"],ids["withdrawal"]]})
+            db.execute(text("DELETE FROM comprobante_contable WHERE transaccion_id = ANY(:ids)"), {"ids":[ids["trans"],ids["withdrawal"]]})
+            db.execute(text("DELETE FROM transaccion WHERE id = ANY(:ids)"), {"ids":[ids["trans"],ids["withdrawal"],ids["opening"]]})
+            db.execute(text("DELETE FROM control_caja WHERE id=:id"), {"id":ids["control"]})
+            db.execute(text("DELETE FROM caja WHERE id=:id"), {"id":ids["caja"]})
+            db.execute(text("DELETE FROM cuenta_ahorro WHERE id=:id"), {"id":ids["cuenta"]})
+            db.execute(text("DELETE FROM socio WHERE id=:id"), {"id":ids["socio"]})
+            db.commit()
+
+
+def test_automatic_generation_posts_transfer_once_from_reciprocal_pair(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        coop_id, user_id = case["ids"]["coops"][0], case["ids"]["users"][0]
+        db.add(models.ParametroContable(cooperativa_id=coop_id, clave="CAJA", plan_cuenta_id=case["ids"]["accounts"][0]))
+        db.add(models.ParametroContable(cooperativa_id=coop_id, clave="AHORRO_VISTA", plan_cuenta_id=case["ids"]["accounts"][1]))
+        socio_id = db.execute(text("INSERT INTO socio(ci,nombre,apellido,cooperativa_id) VALUES (:ci,'Transfer','Member',:coop) RETURNING id"), {"ci":f"T{uuid4().hex[:15]}","coop":coop_id}).scalar_one()
+        ids = []
+        for index in range(2):
+            ids.append(db.execute(text("INSERT INTO cuenta_ahorro(numero,fecha_registro,socio_id,moneda_id,tipo_producto) VALUES (:num,CURRENT_DATE,:socio,1,'VISTA') RETURNING id"), {"num":f"TR-{uuid4().hex[:8]}","socio":socio_id}).scalar_one())
+        salida = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id) VALUES ('TRANSFERENCIA_SALIDA',12.34,'WEB',1,:account) RETURNING id"), {"account":ids[0]}).scalar_one()
+        entrada = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,transaccion_contraparte_id) VALUES ('TRANSFERENCIA_ENTRADA',12.34,'WEB',1,:account,:salida) RETURNING id"), {"account":ids[1],"salida":salida}).scalar_one()
+        db.execute(text("UPDATE transaccion SET transaccion_contraparte_id=:entrada WHERE id=:salida"), {"entrada":entrada,"salida":salida})
+        db.commit()
+    with TestClient(app) as client:
+        result = client.post("/api/v1/contabilidad/comprobantes/generar-automaticos", json={}, headers=auth(case["tokens"][0]))
+    assert result.status_code == 200, result.text
+    assert result.json()["generados"] == 1
+    assert result.json()["por_tipo"] == {"TRASPASO":1}
+    assert result.json()["omitidas"] == [{"transaccion_id":entrada,"tipo":"TRANSFERENCIA_ENTRADA","motivo":"Entrada de transferencia cubierta por la salida contraparte; no se duplica"}]
+
+
+def test_automatic_generation_uses_persisted_payment_components(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        coop_id, user_id = case["ids"]["coops"][0], case["ids"]["users"][0]
+        source_keys = (("CAJA",None),("AHORRO_VISTA",None),("CARTERA_VIGENTE","131.05"),("INTERES_CARTERA","513.05"),("INTERES_PENAL","515.03"))
+        for key, code in source_keys:
+            account_id = case["ids"]["accounts"][0] if key == "CAJA" else case["ids"]["accounts"][1] if key == "AHORRO_VISTA" else db.query(models.PlanCuenta).filter_by(codigo=code, cooperativa_id=None).one().id
+            db.add(models.ParametroContable(cooperativa_id=coop_id, clave=key, plan_cuenta_id=account_id))
+        socio_id = db.execute(text("INSERT INTO socio(ci,nombre,apellido,cooperativa_id) VALUES (:ci,'Pay','Member',:coop) RETURNING id"), {"ci":f"P{uuid4().hex[:15]}","coop":coop_id}).scalar_one()
+        solicitud_id = db.execute(text("INSERT INTO solicitud_credito(monto,plazo_meses,tasa_interes,socio_id,usuario_id,cooperativa_id,moneda_id) VALUES (1000,12,10,:socio,:user,:coop,1) RETURNING id"), {"socio":socio_id,"user":user_id,"coop":coop_id}).scalar_one()
+        credito_id = db.execute(text("INSERT INTO credito(monto_aprobado,saldo_pendiente,solicitud_credito_id,cooperativa_id,socio_id,moneda_id) VALUES (1000,900,:solicitud,:coop,:socio,1) RETURNING id"), {"solicitud":solicitud_id,"coop":coop_id,"socio":socio_id}).scalar_one()
+        cuota_id = db.execute(text("INSERT INTO tabla_amortizacion(numero_cuota,fecha_vencimiento,monto_capital,monto_interes,monto_cuota_total,credito_id) VALUES (1,CURRENT_DATE,100,8,108,:credito) RETURNING id"), {"credito":credito_id}).scalar_one()
+        pago_id = db.execute(text("INSERT INTO pago_cuota(monto_capital,monto_interes_pagado,monto_mora,tabla_amortizacion_id,credito_id,cooperativa_id,modalidad,monto_total,usuario_id) VALUES (100,8,2,:cuota,:credito,:coop,'EFECTIVO',110,:user) RETURNING id"), {"cuota":cuota_id,"credito":credito_id,"coop":coop_id,"user":user_id}).scalar_one()
+        caja_id = db.execute(text("INSERT INTO caja(nombre,cooperativa_id) VALUES ('Payment till',:coop) RETURNING id"), {"coop":coop_id}).scalar_one()
+        control_id = db.execute(text("INSERT INTO control_caja(monto_apertura,saldo_sistema,fecha_apertura,caja_id,usuario_id) VALUES (0,0,CURRENT_TIMESTAMP,:caja,:user) RETURNING id"), {"caja":caja_id,"user":user_id}).scalar_one()
+        trans_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,control_caja_id,moneda_id,pago_cuota_id) VALUES ('PAGO_CUOTA',110,'VENTANILLA',:control,1,:pago) RETURNING id"), {"control":control_id,"pago":pago_id}).scalar_one()
+        account_id = db.execute(text("INSERT INTO cuenta_ahorro(numero,fecha_registro,socio_id,moneda_id,tipo_producto) VALUES (:num,CURRENT_DATE,:socio,1,'VISTA') RETURNING id"), {"num":f"LOAN-{uuid4().hex[:8]}","socio":socio_id}).scalar_one()
+        disbursement_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,credito_id) VALUES ('DESEMBOLSO_CREDITO',50,'WEB',1,:account,:credito) RETURNING id"), {"account":account_id,"credito":credito_id}).scalar_one()
+        cash_disbursement_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,control_caja_id,moneda_id,credito_id) VALUES ('RETIRO',40,'VENTANILLA',:control,1,:credito) RETURNING id"), {"control":control_id,"credito":credito_id}).scalar_one()
+        db.execute(text("UPDATE pago_cuota SET transaccion_id=:trans WHERE id=:pago"), {"trans":trans_id,"pago":pago_id})
+        db.commit()
+    with TestClient(app) as client:
+        response = client.post("/api/v1/contabilidad/comprobantes/generar-automaticos", json={}, headers=auth(case["tokens"][0]))
+    assert response.status_code == 200, response.text
+    assert response.json()["generados"] == 3, response.json()
+    with SessionLocal() as db:
+        voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=trans_id).one()
+        lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=voucher.id).order_by(models.DetalleAsiento.orden).all()
+        assert voucher.tipo == "INGRESO"
+        assert sum(line.debe for line in lines) == sum(line.haber for line in lines) == 110
+        assert [(line.debe,line.haber) for line in lines] == [(110,0),(0,100),(0,8),(0,2)]
+        disbursement = db.query(models.ComprobanteContable).filter_by(transaccion_id=disbursement_id).one()
+        disb_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=disbursement.id).order_by(models.DetalleAsiento.orden).all()
+        assert [(line.debe,line.haber) for line in disb_lines] == [(50,0),(0,50)]
+        cash_disbursement = db.query(models.ComprobanteContable).filter_by(transaccion_id=cash_disbursement_id).one()
+        cash_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=cash_disbursement.id).order_by(models.DetalleAsiento.orden).all()
+        assert cash_disbursement.tipo == "EGRESO"
+        assert [(line.debe,line.haber) for line in cash_lines] == [(40,0),(0,40)]
+
+
+def test_automatic_generation_uses_persisted_dpf_cronograma_gross_tax_and_net(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        coop_id, user_id = case["ids"]["coops"][0], case["ids"]["users"][0]
+        for key, code, account_id in (("AHORRO_VISTA",None,case["ids"]["accounts"][1]),("CAJA",None,case["ids"]["accounts"][0]),("INTERES_DPF","411.04",None),("RETENCION_RCIVA","242.03",None),("DPF_31_60","213.02",None)):
+            if account_id is None:
+                account_id = db.query(models.PlanCuenta).filter_by(codigo=code,cooperativa_id=None).one().id
+            db.add(models.ParametroContable(cooperativa_id=coop_id,clave=key,plan_cuenta_id=account_id))
+        socio_id = db.execute(text("INSERT INTO socio(ci,nombre,apellido,cooperativa_id) VALUES (:ci,'DPF','Member',:coop) RETURNING id"), {"ci":f"D{uuid4().hex[:15]}","coop":coop_id}).scalar_one()
+        cuenta_id = db.execute(text("INSERT INTO cuenta_ahorro(numero,fecha_registro,socio_id,moneda_id,tipo_producto) VALUES (:num,CURRENT_DATE,:socio,1,'VISTA') RETURNING id"), {"num":f"DPF-{uuid4().hex[:8]}","socio":socio_id}).scalar_one()
+        dpf_id = db.execute(text("INSERT INTO deposito_plazo_fijo(monto,tasa_interes_anual,plazo_dias,fecha_inicio,fecha_vencimiento,interes_calculado,socio_id,moneda_id,cooperativa_id,cuenta_abono_id) VALUES (1000,10,30,CURRENT_DATE,CURRENT_DATE+30,10,:socio,1,:coop,:cuenta) RETURNING id"), {"socio":socio_id,"coop":coop_id,"cuenta":cuenta_id}).scalar_one()
+        trans_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,deposito_plazo_fijo_id) VALUES ('PAGO_INTERES_DPF',9.50,'WEB',1,:cuenta,:dpf) RETURNING id"), {"cuenta":cuenta_id,"dpf":dpf_id}).scalar_one()
+        db.execute(text("INSERT INTO dpf_cronograma(deposito_plazo_fijo_id,numero,fecha_pago,dias,interes_bruto,retencion_rciva,interes_neto,estado,transaccion_id) VALUES (:dpf,1,CURRENT_DATE,30,10,0.50,9.50,'PAGADO',:trans)"), {"dpf":dpf_id,"trans":trans_id})
+        issue_dpf_id = db.execute(text("INSERT INTO deposito_plazo_fijo(monto,tasa_interes_anual,plazo_dias,fecha_inicio,fecha_vencimiento,interes_calculado,socio_id,moneda_id,cooperativa_id) VALUES (500,8,45,CURRENT_DATE,CURRENT_DATE+45,5,:socio,1,:coop) RETURNING id"), {"socio":socio_id,"coop":coop_id}).scalar_one()
+        caja_id = db.execute(text("INSERT INTO caja(nombre,cooperativa_id) VALUES ('DPF till',:coop) RETURNING id"), {"coop":coop_id}).scalar_one()
+        control_id = db.execute(text("INSERT INTO control_caja(monto_apertura,saldo_sistema,fecha_apertura,caja_id,usuario_id) VALUES (0,0,CURRENT_TIMESTAMP,:caja,:user) RETURNING id"), {"caja":caja_id,"user":user_id}).scalar_one()
+        issue_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,control_caja_id,moneda_id,deposito_plazo_fijo_id) VALUES ('DEPOSITO',500,'VENTANILLA',:control,1,:dpf) RETURNING id"), {"control":control_id,"dpf":issue_dpf_id}).scalar_one()
+        account_issue_dpf = db.execute(text("INSERT INTO deposito_plazo_fijo(monto,tasa_interes_anual,plazo_dias,fecha_inicio,fecha_vencimiento,interes_calculado,socio_id,moneda_id,cooperativa_id) VALUES (600,8,45,CURRENT_DATE,CURRENT_DATE+45,6,:socio,1,:coop) RETURNING id"), {"socio":socio_id,"coop":coop_id}).scalar_one()
+        account_issue_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,deposito_plazo_fijo_id) VALUES ('DEPOSITO',600,'WEB',1,:cuenta,:dpf) RETURNING id"), {"cuenta":cuenta_id,"dpf":account_issue_dpf}).scalar_one()
+        legacy_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,deposito_plazo_fijo_id) VALUES ('APERTURA_DPF',600,'WEB',1,:dpf) RETURNING id"), {"dpf":account_issue_dpf}).scalar_one()
+        liquidation_id = db.execute(text("INSERT INTO liquidacion(monto_capital_retornado,monto_interes_pagado,tipo_operacion,deposito_plazo_fijo_id,retencion_rciva,usuario_id,cuenta_abono_id) VALUES (1000,20,'LIQUIDACION',:dpf,0,:user,:cuenta) RETURNING id"), {"dpf":issue_dpf_id,"user":user_id,"cuenta":cuenta_id}).scalar_one()
+        liquidation_tx_id = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,deposito_plazo_fijo_id,liquidacion_id) VALUES ('DEPOSITO',1020,'WEB',1,:cuenta,:dpf,:liquidacion) RETURNING id"), {"cuenta":cuenta_id,"dpf":issue_dpf_id,"liquidacion":liquidation_id}).scalar_one()
+        renewed_dpf = db.execute(text("INSERT INTO deposito_plazo_fijo(monto,tasa_interes_anual,plazo_dias,fecha_inicio,fecha_vencimiento,interes_calculado,socio_id,moneda_id,cooperativa_id) VALUES (800,8,45,CURRENT_DATE,CURRENT_DATE+45,8,:socio,1,:coop) RETURNING id"), {"socio":socio_id,"coop":coop_id}).scalar_one()
+        renewal_original = db.execute(text("INSERT INTO deposito_plazo_fijo(monto,tasa_interes_anual,plazo_dias,fecha_inicio,fecha_vencimiento,interes_calculado,socio_id,moneda_id,cooperativa_id) VALUES (1000,8,45,CURRENT_DATE,CURRENT_DATE+45,8,:socio,1,:coop) RETURNING id"), {"socio":socio_id,"coop":coop_id}).scalar_one()
+        renewal_id = db.execute(text("INSERT INTO liquidacion(monto_capital_retornado,monto_interes_pagado,tipo_operacion,deposito_plazo_fijo_id,retencion_rciva,usuario_id,cuenta_abono_id,dpf_renovado_id) VALUES (1000,20,'RENOVACION',:dpf,0,:user,:cuenta,:renewed) RETURNING id"), {"dpf":renewal_original,"user":user_id,"cuenta":cuenta_id,"renewed":renewed_dpf}).scalar_one()
+        renewal_payout = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,deposito_plazo_fijo_id,liquidacion_id) VALUES ('DEPOSITO',1020,'WEB',1,:cuenta,:dpf,:liquidation) RETURNING id"), {"cuenta":cuenta_id,"dpf":renewal_original,"liquidation":renewal_id}).scalar_one()
+        renewal_investment = db.execute(text("INSERT INTO transaccion(tipo,monto,canal,moneda_id,cuenta_ahorro_id,deposito_plazo_fijo_id,liquidacion_id) VALUES ('RETIRO',800,'WEB',1,:cuenta,:dpf,:liquidation) RETURNING id"), {"cuenta":cuenta_id,"dpf":renewed_dpf,"liquidation":renewal_id}).scalar_one()
+        db.commit()
+    with TestClient(app) as client:
+        response = client.post("/api/v1/contabilidad/comprobantes/generar-automaticos",json={},headers=auth(case["tokens"][0]))
+    assert response.status_code == 200, response.text
+    assert response.json()["generados"] == 6, response.json()
+    assert response.json()["omitidas"] == [{"transaccion_id":legacy_id,"tipo":"APERTURA_DPF","motivo":"APERTURA_DPF solo aparece en datos legacy y no tiene escritor runtime"}]
+    with SessionLocal() as db:
+        voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=trans_id).one()
+        lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=voucher.id).order_by(models.DetalleAsiento.orden).all()
+        assert [(line.debe,line.haber) for line in lines] == [(10,0),(0,9.50),(0,0.50)]
+        issue_voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=issue_id).one()
+        issue_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=issue_voucher.id).order_by(models.DetalleAsiento.orden).all()
+        assert issue_voucher.tipo == "INGRESO"
+        assert [(line.debe,line.haber) for line in issue_lines] == [(500,0),(0,500)]
+        account_issue = db.query(models.ComprobanteContable).filter_by(transaccion_id=account_issue_id).one()
+        assert account_issue.tipo == "TRASPASO"
+        liquidation_voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=liquidation_tx_id).one()
+        liquidation_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=liquidation_voucher.id).order_by(models.DetalleAsiento.orden).all()
+        assert sum(line.debe for line in liquidation_lines) == sum(line.haber for line in liquidation_lines) == 1020
+        renewal_voucher = db.query(models.ComprobanteContable).filter_by(transaccion_id=renewal_investment).one()
+        renewal_lines = db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=renewal_voucher.id).order_by(models.DetalleAsiento.orden).all()
+        assert [(line.debe,line.haber) for line in renewal_lines] == [(800,0),(0,800)]
+
+
+def test_automatic_voucher_cannot_be_manually_voided(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        automatic = models.ComprobanteContable(
+            tipo="INGRESO", glosa="Automatic fixture", es_automatico=True,
+            cooperativa_id=case["ids"]["coops"][0], numero="I-2026-000099", gestion=2026,
+            fecha_contable=date.today(), moneda_id=1, estado="REGISTRADO", origen="AUTOMATICO",
+        )
+        db.add(automatic)
+        db.flush()
+        db.add(models.DetalleAsiento(debe=1, haber=0, comprobante_contable_id=automatic.id, plan_cuenta_id=case["ids"]["accounts"][0]))
+        db.add(models.DetalleAsiento(debe=0, haber=1, comprobante_contable_id=automatic.id, plan_cuenta_id=case["ids"]["accounts"][1]))
+        db.commit()
+        voucher_id = automatic.id
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/v1/contabilidad/comprobantes/{voucher_id}/anular",
+            json={"motivo": "Error de digitación"},
+            headers=auth(case["tokens"][0]),
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Los comprobantes automáticos se revierten con la operación de origen"
+
+
+def test_accounting_parameters_get_defaults_and_update_analytic_account_is_tenant_scoped(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        official_credit = db.query(models.PlanCuenta).filter_by(codigo="131.05",cooperativa_id=None).one().id
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/contabilidad/parametros-contables", headers=auth(case["tokens"][0]))
+        updated = client.put(
+            "/api/v1/contabilidad/parametros-contables/CAJA",
+            json={"plan_cuenta_id":case["ids"]["accounts"][0]},
+            headers=auth(case["tokens"][0]),
+        )
+        rejected_parent = client.put(
+            "/api/v1/contabilidad/parametros-contables/CAJA",
+            json={"plan_cuenta_id":case["ids"]["official"]["111.01"]},
+            headers=auth(case["tokens"][0]),
+        )
+        denied = client.get("/api/v1/contabilidad/parametros-contables", headers=auth(case["tokens"][2]))
+        foreign = client.put(
+            "/api/v1/contabilidad/parametros-contables/CAJA",
+            json={"plan_cuenta_id":case["ids"]["accounts"][2]},
+            headers=auth(case["tokens"][0]),
+        )
+        allowed_official = client.put(
+            "/api/v1/contabilidad/parametros-contables/CARTERA_VIGENTE",
+            json={"plan_cuenta_id":official_credit},
+            headers=auth(case["tokens"][0]),
+        )
+        rejected_wrong_account = client.put(
+            "/api/v1/contabilidad/parametros-contables/CARTERA_VIGENTE",
+            json={"plan_cuenta_id":case["ids"]["accounts"][0]},
+            headers=auth(case["tokens"][0]),
+        )
+    assert listed.status_code == 200, listed.text
+    assert len(listed.json()) == 18
+    assert {item["clave"] for item in listed.json()} >= {"CAJA","AHORRO_VISTA","CARTERA_VIGENTE","INTERES_DPF"}
+    assert next(item for item in listed.json() if item["clave"]=="CAJA")["plan_cuenta_id"] == case["ids"]["accounts"][0]
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["plan_cuenta_id"] == case["ids"]["accounts"][0]
+    assert rejected_parent.status_code == 422
+    assert "analítica" in rejected_parent.text.lower()
+    assert denied.status_code == 403
+    assert foreign.status_code == 404
+    assert allowed_official.status_code == 200, allowed_official.text
+    assert rejected_wrong_account.status_code == 422
+    assert "MCEF 131.05" in rejected_wrong_account.text
+    with SessionLocal() as db:
+        audit_count = db.query(models.Bitacora).filter_by(
+            usuario_id=case["ids"]["users"][0], modulo="CONTABILIDAD", accion="PARAMETRO_CONTABLE_ACTUALIZAR"
+        ).count()
+        assert audit_count == 2
+
+
+def test_accounting_parameter_rejects_inactive_and_nonmovement_accounts(voucher_case):
+    case = voucher_case
+    with SessionLocal() as db:
+        parent = db.get(models.PlanCuenta,case["ids"]["official"]["111.00"])
+        inactive = models.PlanCuenta(
+            codigo=f"111.00.90.{uuid4().hex[:2]}",nombre="Inactive parameter test",nivel=5,
+            tipo=parent.tipo,naturaleza=parent.naturaleza,es_regularizadora=False,es_oficial=False,
+            cooperativa_id=case["ids"]["coops"][0],estado="INACTIVA",acepta_movimientos=True,
+            plan_cuenta_padre_id=parent.id,
+        )
+        db.add(inactive); db.commit(); inactive_id=inactive.id
+    try:
+        with TestClient(app) as client:
+            inactive_response=client.put("/api/v1/contabilidad/parametros-contables/CAJA",json={"plan_cuenta_id":inactive_id},headers=auth(case["tokens"][0]))
+            parent_response=client.put("/api/v1/contabilidad/parametros-contables/CAJA",json={"plan_cuenta_id":case["ids"]["official"]["111.00"]},headers=auth(case["tokens"][0]))
+        assert inactive_response.status_code == 422
+        assert "activa" in inactive_response.text.lower()
+        assert parent_response.status_code == 422
+        assert "movimientos" in parent_response.text.lower()
+    finally:
+        with SessionLocal() as db:
+            db.execute(text("DELETE FROM plan_cuenta WHERE id=:id"),{"id":inactive_id});db.commit()
+
+
+def test_void_requires_a_nonblank_reason(voucher_case):
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/contabilidad/comprobantes/999999999/anular",
+            json={"motivo": "     "},
+            headers=auth(voucher_case["tokens"][0]),
+        )
+    assert response.status_code == 422
+    assert "al menos cinco caracteres no blancos" in response.text
