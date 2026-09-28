@@ -69,9 +69,9 @@ tenant = the user's cooperative; other tenants' analytic accounts are invisible 
 - [x] B1 (Codex): generator script + migration 024 (applied twice on local coopDB), models/schemas.
 - [x] B2 (Codex): read endpoints (list, tree, detail, resumen) + tests.
 - [x] B3 (Codex): analytic create/edit/state/delete + tests (tenant isolation, official immutability, balance guard).
-- [ ] F1 (Antigravity): contador page "Plan de Cuentas" (tree by class, search, detail panel, create/edit analytic,
+- [x] F1 (Antigravity): contador page "Plan de Cuentas" (tree by class, search, detail panel, create/edit analytic,
       activate/deactivate with reason, delete) wired to the API; route in the contador area (also reachable by admin).
-- [ ] V1 (Orchestrator): full suite, DB intact, migration replay, E2E, build/lint, commits, RDD.
+- [x] V1 (Orchestrator): full suite, DB intact, migration replay, E2E, build/lint, commits, RDD.
 
 ## Acceptance criteria
 - Catalog contains the official MCEF accounts with correct codes, parents, nature (400 = GASTOS, 500 = INGRESOS),
@@ -110,3 +110,4 @@ tenant = the user's cooperative; other tenants' analytic accounts are invisible 
 - 2026-09-27 (orchestrator verification): migration 024 replayed a third time by the orchestrator (exit 0, only skip NOTICEs); catalog 1997 official accounts; spot-check 400.00 GASTOS DEUDORA, 500.00 INGRESOS ACREEDORA, 139.00/139.01 regularizing ACREEDORA, 311.02 Certificados de aportaciones; legacy detalle_asiento now 111.01, 131.05, 131.05. Full suite `5 failed, 310 passed` (same 5 pre-existing); DB snapshot identical before/after. E2E over HTTP with contador@test.com: cajero/socio 403; tree without clase 422; analytic under non-subcuenta 422; blank name 422; 111.01.01/111.01.02 created with server-generated codes; duplicate name 409; official edit/delete 403; deactivate without reason 422, with reason OK; delete analytic 204.
 - Known scope limit: 941 deeper official codes (875 `.M.NN` and 66 other) are not seeded because the contract limited the official catalog to levels 1-4; revisit if W34 needs them.
 - Frontend review found raw FastAPI validation arrays passed to setError (React crash risk) → correction sent to Antigravity.
+- 2026-09-27 (commits/review): backend split into 379fdfb (migration data), cb5053d (generator), e30e294 (API), 805c622 (portable catalog test, RDD correction: test read the MCEF source from an absolute home path; now counts rows in the committed migration and skips the source-based test unless SI2_MCEF_SOURCE is set). RDD: migration slice exceeds the native reviewer context budget even alone (2043 generated lines) — unreviewed natively, reproducible from the reviewed generator; generator slice approved after correction; API slice approved. Frontend e8d8ebe approved (advisory: tree/detail request races, refresh collapses tree, cannot clear descripcion — follow-ups). Frontend error helper `getApiErrorMessage` handles FastAPI validation arrays.
