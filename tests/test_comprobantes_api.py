@@ -1,10 +1,11 @@
 """Tenant-isolated integration coverage for CU-W30 manual vouchers."""
 
-from datetime import date
+from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 from sqlalchemy import text
 
 from app.core.security import create_access_token, hash_password
@@ -174,6 +175,194 @@ def test_create_rounds_half_up_and_list_detail_are_tenant_scoped_and_audited(vou
         ).one_or_none()
         assert audit is not None
         assert audit.cooperativa_id == case["ids"]["coops"][0]
+
+
+def test_libro_diario_returns_page_and_range_totals(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/contabilidad/comprobantes",
+            json=manual_payload(case, amount="13.25"),
+            headers=auth(case["tokens"][0]),
+        )
+        assert created.status_code == 201, created.text
+        response = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta={case['today']}&limit=1&offset=0",
+            headers=auth(case["tokens"][0]),
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total"] == 1
+    assert body["totales_periodo"] == {"debe": "13.25", "haber": "13.25"}
+    assert len(body["items"]) == 1
+    assert body["items"][0]["numero"] == created.json()["numero"]
+    assert body["items"][0]["lineas"][0]["cuenta"]["codigo"]
+
+
+def test_libro_diario_rejects_invalid_range(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta=2020-01-01",
+            headers=auth(case["tokens"][0]),
+        )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "La fecha desde no puede ser posterior a hasta"
+
+
+@pytest.mark.parametrize(
+    "query,detail",
+    [
+        ("desde=2024-01-01&hasta=2025-01-02", "El rango de fechas no puede exceder 366 días"),
+        ("moneda_id=999", "La moneda indicada no existe"),
+    ],
+)
+def test_libro_diario_validates_period_and_currency(voucher_case, query, detail):
+    case = voucher_case
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/contabilidad/libro-diario?{query}",
+                              headers=auth(case["tokens"][0]))
+    assert response.status_code == 422
+    assert response.json()["detail"] == detail
+
+
+def test_libro_diario_and_mayor_are_tenant_scoped(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case, amount="8.00"),
+                              headers=auth(case["tokens"][0]))
+        foreign_daily = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][1]))
+        foreign_account = client.get(
+            f"/api/v1/contabilidad/libro-mayor?cuenta_id={case['ids']['accounts'][0]}&desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][1]))
+    assert created.status_code == 201
+    assert foreign_daily.status_code == 200
+    assert foreign_daily.json()["total"] == 0
+    assert foreign_account.status_code == 404
+
+
+def test_libro_diario_isolates_currency(voucher_case):
+    case = voucher_case
+    bob = manual_payload(case, amount="11.00")
+    usd = manual_payload(case, amount="23.00")
+    usd["moneda_id"] = 2
+    with TestClient(app) as client:
+        first = client.post("/api/v1/contabilidad/comprobantes", json=bob, headers=auth(case["tokens"][0]))
+        second = client.post("/api/v1/contabilidad/comprobantes", json=usd, headers=auth(case["tokens"][0]))
+        bob_book = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta={case['today']}&moneda_id=1",
+            headers=auth(case["tokens"][0]))
+        usd_book = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta={case['today']}&moneda_id=2",
+            headers=auth(case["tokens"][0]))
+    assert first.status_code == second.status_code == 201
+    assert bob_book.json()["total"] == usd_book.json()["total"] == 1
+    assert bob_book.json()["items"][0]["id"] == first.json()["id"]
+    assert usd_book.json()["items"][0]["id"] == second.json()["id"]
+
+
+def test_major_and_trial_balance_aggregate_in_sql(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes",
+                              json=manual_payload(case, amount="19.00"),
+                              headers=auth(case["tokens"][0]))
+        assert created.status_code == 201, created.text
+        captured = []
+        def record_sql(conn, cursor, statement, parameters, context, executemany):
+            normalized = " ".join(statement.lower().split())
+            if "comprobante_contable" in normalized and "detalle_asiento" in normalized:
+                captured.append(normalized)
+        event.listen(engine, "before_cursor_execute", record_sql)
+        try:
+            mayor = client.get(
+                f"/api/v1/contabilidad/libro-mayor?cuenta_id={case['ids']['accounts'][0]}&desde={case['today']}&hasta={case['today']}",
+                headers=auth(case["tokens"][0]))
+            balance = client.get(
+                f"/api/v1/contabilidad/balance-comprobacion?desde={case['today']}&hasta={case['today']}",
+                headers=auth(case["tokens"][0]))
+        finally:
+            event.remove(engine, "before_cursor_execute", record_sql)
+    assert mayor.status_code == balance.status_code == 200
+    assert mayor.json()["saldo_final"] == "19.00"
+    assert balance.json()["cuadra"] is True
+    assert any("sum(" in sql and "over (" in sql for sql in captured), captured
+    assert any("sum(" in sql and "group by" in sql for sql in captured), captured
+
+
+def test_libro_mayor_running_balance_and_title_account_rollup(voucher_case):
+    case = voucher_case
+    previous_day = (date.fromisoformat(case["today"]) - timedelta(days=1)).isoformat()
+    with TestClient(app) as client:
+        opening = client.post("/api/v1/contabilidad/comprobantes",
+                              json=manual_payload(case, amount="12.60", fecha=previous_day),
+                              headers=auth(case["tokens"][0]))
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case, amount="27.40"),
+                              headers=auth(case["tokens"][0]))
+        assert opening.status_code == 201, opening.text
+        assert created.status_code == 201, created.text
+        posting = client.get(
+            f"/api/v1/contabilidad/libro-mayor?cuenta_id={case['ids']['accounts'][0]}&desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+        title = client.get(
+            f"/api/v1/contabilidad/libro-mayor?cuenta_id={case['ids']['official']['111.01']}&desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+    assert posting.status_code == title.status_code == 200, (posting.text, title.text)
+    assert posting.json()["saldo_inicial"] == "12.60"
+    assert posting.json()["movimientos"][0]["saldo"] == posting.json()["saldo_final"] == "40.00"
+    assert posting.json()["totales"] == {"debe": "27.40", "haber": "0.00"}
+    assert title.json()["saldo_final"] == "40.00"
+    assert len(title.json()["movimientos"]) == 1
+
+
+def test_balance_comprobacion_is_balanced_and_exports_csv_with_bom(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case, amount="30.00"),
+                              headers=auth(case["tokens"][0]))
+        assert created.status_code == 201, created.text
+        response = client.get(
+            f"/api/v1/contabilidad/balance-comprobacion?desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+        exported = client.get(
+            f"/api/v1/contabilidad/libro-diario/export?desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+    assert response.status_code == 200, response.text
+    assert response.json()["cuadra"] is True, response.json()
+    assert response.json()["totales"]["sumas_debe"] == response.json()["totales"]["sumas_haber"] == "30.00"
+    assert exported.status_code == 200
+    assert exported.content.startswith(b"\xef\xbb\xbf")
+    assert f"libro-diario-{case['today']}-{case['today']}.csv" in exported.headers["content-disposition"]
+    assert b"30.00" in exported.content
+
+
+def test_libro_diario_keeps_voided_voucher_and_reversal_net_zero(voucher_case):
+    case = voucher_case
+    with TestClient(app) as client:
+        created = client.post("/api/v1/contabilidad/comprobantes", json=manual_payload(case, amount="17.00"),
+                              headers=auth(case["tokens"][0]))
+        original_id = created.json()["id"]
+        reversal = client.post(f"/api/v1/contabilidad/comprobantes/{original_id}/anular",
+                               json={"motivo": "Test reversal"}, headers=auth(case["tokens"][0]))
+        daily = client.get(
+            f"/api/v1/contabilidad/libro-diario?desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+        major = client.get(
+            f"/api/v1/contabilidad/libro-mayor?cuenta_id={case['ids']['accounts'][0]}&desde={case['today']}&hasta={case['today']}",
+            headers=auth(case["tokens"][0]))
+    assert reversal.status_code == 201, reversal.text
+    assert daily.status_code == 200
+    entries = daily.json()["items"]
+    original = next(row for row in entries if row["id"] == original_id)
+    inverse = next(row for row in entries if row["id"] == reversal.json()["id"])
+    assert original["estado"] == "ANULADO"
+    assert original["anulado_por_numero"] == inverse["numero"]
+    assert inverse["revierte_a_numero"] == original["numero"]
+    assert daily.json()["totales_periodo"] == {"debe": "34.00", "haber": "34.00"}
+    assert major.status_code == 200
+    assert major.json()["saldo_final"] == "0.00"
 
 
 @pytest.mark.parametrize(
