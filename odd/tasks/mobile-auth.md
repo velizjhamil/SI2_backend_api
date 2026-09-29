@@ -43,7 +43,9 @@ restarts, session validation/expiry handling, and a real logout.
 - [x] T2 (Copilot): global session handling for 401 in existing services + tests.
 - [x] T3 (Copilot): Login screen (biometric button state, opt-in prompt, role message), Perfil (biometric switch,
       logout with confirmation) + widget tests.
-- [x] V1 (Orchestrator): flutter analyze/test, backend smoke against /auth/*, commit, RDD.
+- [ ] V1 (Orchestrator): flutter analyze/test, backend smoke against /auth/*, commit, RDD.
+      Partial: tests/analyze/smoke and commits done; RDD of the correction 26e5c0d is NOT closed
+      (stopped terminally with captured_artifacts_unverifiable — see Progress).
 
 ## Checks
 - `/home/yimy/flutter/bin/flutter test` (baseline 43 passed) and `flutter analyze` (no new errors/warnings).
