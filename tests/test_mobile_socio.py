@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(app is None, reason="PostgreSQL unavailable")
 @pytest.fixture
 def socio_case():
     suffix = uuid4().hex[:10]
-    ids = {"coop": None, "user": None, "socio": None, "foreign_socio": None, "accounts": [], "products": [], "requests": [], "credits": [], "installments": [], "dpfs": [], "dpf_schedules": [], "offers": [], "generated_requests": []}
+    ids = {"coop": None, "user": None, "staff_user": None, "socio": None, "foreign_socio": None, "accounts": [], "products": [], "requests": [], "mobile_requests": [], "credits": [], "installments": [], "dpfs": [], "dpf_schedules": [], "offers": [], "generated_requests": []}
     try:
         with SessionLocal() as db:
             coop = models.Cooperativa(nombre=f"Mobile {suffix}", estado="ACTIVO")
@@ -31,6 +31,9 @@ def socio_case():
             role = db.query(models.Rol).filter_by(nombre="SOCIO").one()
             user = models.Usuario(correo=f"mobile-{suffix}@test.invalid", contrasena=hash_password("Password123"), rol_id=role.id, cooperativa_id=coop.id, nombre="Mobile test", estado="ACTIVO")
             db.add(user); db.flush(); ids["user"] = user.id
+            staff_role = db.query(models.Rol).filter_by(nombre="OFICIAL_CREDITO").one()
+            staff_user = models.Usuario(correo=f"mobile-staff-{suffix}@test.invalid", contrasena=hash_password("Password123"), rol_id=staff_role.id, cooperativa_id=coop.id, nombre="Mobile staff", estado="ACTIVO")
+            db.add(staff_user); db.flush(); ids["staff_user"] = staff_user.id
             member = models.Socio(cooperativa_id=coop.id, ci=f"MOB-{suffix}", nombre="Mobile", apellido="Test", estado="ACTIVO", usuario_id=user.id)
             db.add(member); db.flush(); ids["socio"] = member.id
             foreign_member = models.Socio(cooperativa_id=coop.id, ci=f"MOB-F-{suffix}", nombre="Foreign", apellido="Test", estado="ACTIVO", fecha_registro=date.today())
@@ -46,7 +49,7 @@ def socio_case():
                 db.add(wrong_currency_account); db.flush(); ids["accounts"].append(wrong_currency_account.id)
             product = models.ProductoCredito(cooperativa_id=coop.id, codigo=f"MOB-{suffix}", nombre="Mobile Loan", moneda_id=currency.id, monto_min=Decimal("100"), monto_max=Decimal("5000"), plazo_min_meses=1, plazo_max_meses=24, tasa_interes_anual=Decimal("12"), tipo_amortizacion="FRANCES", dias_gracia_mora=0, tasa_mora_anual=Decimal("0"), relacion_cuota_ingreso_max=Decimal("50"), estado="ACTIVO")
             db.add(product); db.flush(); ids["products"].append(product.id)
-            request = models.SolicitudCredito(monto=Decimal("1000"), plazo_meses=2, tasa_interes=Decimal("12"), estado="DESEMBOLSADO", socio_id=member.id, usuario_id=user.id, producto_credito_id=product.id, moneda_id=currency.id, numero_solicitud=f"MOB-{suffix}", destino="CONSUMO", cooperativa_id=coop.id)
+            request = models.SolicitudCredito(monto=Decimal("1000"), plazo_meses=2, tasa_interes=Decimal("12"), estado="DESEMBOLSADO", socio_id=foreign_member.id, usuario_id=user.id, producto_credito_id=product.id, moneda_id=currency.id, numero_solicitud=f"MOB-{suffix}", destino="CONSUMO", cooperativa_id=coop.id)
             db.add(request); db.flush(); ids["requests"].append(request.id)
             credit = models.Credito(monto_aprobado=Decimal("1000"), saldo_pendiente=Decimal("1000"), estado="VIGENTE", solicitud_credito_id=request.id, numero_credito=f"MOB-{suffix}", cooperativa_id=coop.id, socio_id=member.id, producto_credito_id=product.id, moneda_id=currency.id, tasa_interes=Decimal("12"), plazo_meses=2, tipo_amortizacion="FRANCES", fecha_desembolso=date.today(), modalidad_desembolso="CUENTA", usuario_id=user.id)
             db.add(credit); db.flush(); ids["credits"].append(credit.id)
@@ -54,7 +57,8 @@ def socio_case():
             db.add(installment); db.flush(); ids["installments"].append(installment.id)
             db.commit()
             token, _ = create_access_token(str(user.id), "SOCIO", coop.id)
-            yield {"token": token, "socio": member.id, "account": account.id, "ids": ids}
+            staff_token, _ = create_access_token(str(staff_user.id), "OFICIAL_CREDITO", coop.id)
+            yield {"token": token, "staff_token": staff_token, "socio": member.id, "account": account.id, "ids": ids}
     finally:
         with SessionLocal() as db:
             if ids["credits"]:
@@ -80,6 +84,12 @@ def socio_case():
                 db.execute(text("DELETE FROM secuencia_documento WHERE cooperativa_id=:id AND tipo='PAGO_CUOTA'"), {"id": ids["coop"]})
             if ids["requests"]:
                 db.execute(delete(models.SolicitudCredito).where(models.SolicitudCredito.id.in_(ids["requests"])))
+            if ids["mobile_requests"]:
+                db.execute(delete(models.EvaluacionCrediticia).where(models.EvaluacionCrediticia.solicitud_credito_id.in_(ids["mobile_requests"])))
+                db.execute(delete(models.SolicitudCredito).where(models.SolicitudCredito.id.in_(ids["mobile_requests"])))
+            fixture_socio_ids = [value for value in (ids["socio"], ids["foreign_socio"]) if value is not None]
+            if fixture_socio_ids:
+                db.execute(delete(models.EvaluacionCampo).where(models.EvaluacionCampo.socio_id.in_(fixture_socio_ids)))
             if ids["products"]:
                 db.execute(delete(models.ProductoCredito).where(models.ProductoCredito.id.in_(ids["products"])))
             if ids["socio"]:
@@ -89,6 +99,9 @@ def socio_case():
             if ids["user"]:
                 db.execute(delete(models.Bitacora).where(models.Bitacora.usuario_id == ids["user"]))
                 db.execute(delete(models.Usuario).where(models.Usuario.id == ids["user"]))
+            if ids["staff_user"]:
+                db.execute(delete(models.Bitacora).where(models.Bitacora.usuario_id == ids["staff_user"]))
+                db.execute(delete(models.Usuario).where(models.Usuario.id == ids["staff_user"]))
             if ids["coop"]:
                 db.execute(delete(models.Cooperativa).where(models.Cooperativa.id == ids["coop"]))
             db.commit()
@@ -96,6 +109,10 @@ def socio_case():
 
 def auth(case):
     return {"Authorization": f"Bearer {case['token']}"}
+
+
+def staff_auth(case):
+    return {"Authorization": f"Bearer {case['staff_token']}"}
 
 
 def add_offer(case, *, days=10):
@@ -117,6 +134,121 @@ def test_mobile_statement_returns_account_and_zeroed_range(socio_case):
     assert body["cuenta"]["id"] == socio_case["account"]
     assert body["saldo_inicial"] == body["saldo_final"] == "75.00"
     assert body["total"] == 0 and body["movimientos"] == []
+
+
+def test_mobile_credit_products_and_simulation(socio_case):
+    headers = auth(socio_case)
+    with TestClient(app) as client:
+        products = client.get("/api/v1/socio/productos-credito", headers=headers)
+        simulation = client.get("/api/v1/socio/creditos/simulacion", headers=headers, params={
+            "producto_id": socio_case["ids"]["products"][0], "monto": "1000.00", "plazo_meses": 12,
+        })
+    assert products.status_code == 200, products.text
+    assert any(row["id"] == socio_case["ids"]["products"][0] for row in products.json())
+    assert simulation.status_code == 200, simulation.text
+    body = simulation.json()
+    assert body["cuota_estimada"] and body["total_intereses"] and body["total_a_pagar"]
+    assert len(body["cronograma"]) == 12
+    assert all(isinstance(body[key], str) and len(body[key].rsplit(".", 1)[-1]) == 2
+               for key in ("cuota_estimada", "total_intereses", "total_a_pagar"))
+
+
+def test_mobile_simulation_rejects_out_of_range_values(socio_case):
+    with TestClient(app) as client:
+        response = client.get("/api/v1/socio/creditos/simulacion", headers=auth(socio_case), params={
+            "producto_id": socio_case["ids"]["products"][0], "monto": "99.00", "plazo_meses": 12,
+        })
+    assert response.status_code == 422
+    assert response.json()["detail"] == "El monto está fuera del rango permitido para el producto"
+
+
+def test_mobile_create_list_detail_cancel_and_staff_tolerance(socio_case):
+    body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1200.00", "plazo_meses": 12,
+        "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "2500.00",
+        "egreso_mensual": "900.00", "actividad_economica": "Comercio", "fuente_ingresos": "INDEPENDIENTE"}}
+    with TestClient(app) as client:
+        created = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        assert created.status_code == 201, created.text
+        row = created.json(); socio_case["ids"]["mobile_requests"].append(row["id"])
+        assert row["canal_origen"] == "MOVIL" and row["requiere_evaluacion"] is True
+        assert row["monto"] == "1200.00"
+        with SessionLocal() as db:
+            stored = db.get(models.SolicitudCredito, row["id"])
+            assert stored.evaluacion_campo_id is None
+            assert stored.datos_declarados["ingreso_mensual"] == "2500.00"
+        listed = client.get("/api/v1/socio/solicitudes", headers=auth(socio_case))
+        detailed = client.get(f"/api/v1/socio/solicitudes/{row['id']}", headers=auth(socio_case))
+        staff_list = client.get("/api/v1/creditos/solicitudes", headers=staff_auth(socio_case))
+        staff_detail = client.get(f"/api/v1/creditos/solicitudes/{row['id']}", headers=staff_auth(socio_case))
+        score = client.post(f"/api/v1/creditos/solicitudes/{row['id']}/evaluacion", headers=staff_auth(socio_case))
+        canceled = client.post(f"/api/v1/socio/solicitudes/{row['id']}/cancelar", headers=auth(socio_case), json={"motivo": "Cambio de planes"})
+    assert listed.status_code == 200 and row["id"] in {r["id"] for r in listed.json()}
+    assert detailed.status_code == 200 and detailed.json()["linea_tiempo"]
+    assert staff_list.status_code == 200 and next(x for x in staff_list.json() if x["id"] == row["id"])["requiere_evaluacion"] is True
+    assert staff_detail.status_code == 200 and staff_detail.json()["canal_origen"] == "MOVIL"
+    assert score.status_code == 422 and score.json()["detail"] == "Falta la evaluación de campo del oficial"
+    assert canceled.status_code == 200 and canceled.json()["estado"] == "ANULADA"
+
+
+def test_mobile_duplicate_and_foreign_request_are_rejected(socio_case):
+    body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1200", "plazo_meses": 12,
+        "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "2500",
+        "egreso_mensual": "900", "actividad_economica": "Comercio", "fuente_ingresos": "INDEPENDIENTE"}}
+    with TestClient(app) as client:
+        first = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        assert first.status_code == 201, first.text
+        socio_case["ids"]["mobile_requests"].append(first.json()["id"])
+        duplicate = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        foreign = client.get(f"/api/v1/socio/solicitudes/{socio_case['ids']['requests'][0]}", headers=auth(socio_case))
+    assert duplicate.status_code == 409
+    assert foreign.status_code == 404
+
+
+def test_mobile_request_can_be_completed_by_w21_officer(socio_case):
+    body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1300.00", "plazo_meses": 12,
+        "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "3000.00",
+        "egreso_mensual": "1000.00", "actividad_economica": "Comercio", "fuente_ingresos": "INDEPENDIENTE"}}
+    evaluation = {"ingreso_mensual": "2800.00", "egreso_mensual": "1100.00",
+        "cuota_deudas_mensual": "100.00", "actividad_economica": "Tienda minorista",
+        "fuente_ingresos": "INDEPENDIENTE", "antiguedad_laboral_meses": 36,
+        "calificacion_asfi": "A"}
+    with TestClient(app) as client:
+        created = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        assert created.status_code == 201, created.text
+        row = created.json(); socio_case["ids"]["mobile_requests"].append(row["id"])
+        assert row["canal_origen"] == "MOVIL" and row["requiere_evaluacion"] is True
+        staff_list = client.get("/api/v1/creditos/solicitudes", headers=staff_auth(socio_case))
+        staff_detail = client.get(f"/api/v1/creditos/solicitudes/{row['id']}", headers=staff_auth(socio_case))
+        updated = client.put(f"/api/v1/creditos/solicitudes/{row['id']}", headers=staff_auth(socio_case),
+            json={"evaluacion": evaluation})
+        after_list = client.get("/api/v1/creditos/solicitudes", headers=staff_auth(socio_case))
+        after_detail = client.get(f"/api/v1/creditos/solicitudes/{row['id']}", headers=staff_auth(socio_case))
+    assert staff_list.status_code == staff_detail.status_code == 200
+    for result in (staff_list.json(),):
+        staff_row = next(item for item in result if item["id"] == row["id"])
+        assert staff_row["canal_origen"] == "MOVIL" and staff_row["requiere_evaluacion"] is True
+    assert staff_detail.json()["canal_origen"] == "MOVIL"
+    assert staff_detail.json()["requiere_evaluacion"] is True
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["evaluacion"]["ingreso_mensual"] == "2800.00"
+    assert updated.json()["requiere_evaluacion"] is False
+    after_row = next(item for item in after_list.json() if item["id"] == row["id"])
+    assert after_row["canal_origen"] == "MOVIL" and after_row["requiere_evaluacion"] is False
+    assert after_detail.json()["canal_origen"] == "MOVIL"
+    assert after_detail.json()["requiere_evaluacion"] is False
+
+
+def test_w23_rejects_mobile_request_without_officer_evaluation(socio_case):
+    body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1300.00", "plazo_meses": 12,
+        "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "3000.00",
+        "egreso_mensual": "1000.00", "actividad_economica": "Comercio", "fuente_ingresos": "INDEPENDIENTE"}}
+    with TestClient(app) as client:
+        created = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        assert created.status_code == 201, created.text
+        row = created.json(); socio_case["ids"]["mobile_requests"].append(row["id"])
+        response = client.post(f"/api/v1/creditos/solicitudes/{row['id']}/evaluacion", headers=staff_auth(socio_case))
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Falta la evaluación de campo del oficial"
 
 
 def test_mobile_statement_calculates_full_range_before_pagination(socio_case):

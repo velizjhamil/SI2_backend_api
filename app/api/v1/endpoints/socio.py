@@ -3,19 +3,178 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_current_socio, get_db
-from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
+from app.api.v1.endpoints.ahorros import _siguiente_secuencia
+from app.core.bitacora import registrar_accion
+from app.services.amortizacion import generar_plan_pagos
+from app.services.credit_request_rules import cancel_credit_request, has_in_progress_request, validate_base_credit_request
+from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, ProductoCredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
 from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut
 
 router = APIRouter()
 CENT = Decimal("0.01")
 
 
+class DatosDeclarados(BaseModel):
+    ingreso_mensual: Decimal = Field(gt=0)
+    egreso_mensual: Decimal = Field(ge=0)
+    actividad_economica: str = Field(min_length=1, max_length=150)
+    fuente_ingresos: str
+
+    @field_validator("fuente_ingresos")
+    @classmethod
+    def validate_source(cls, value):
+        if value not in {"DEPENDIENTE", "INDEPENDIENTE", "MIXTO"}:
+            raise ValueError("La fuente de ingresos no es válida")
+        return value
+
+
+class SolicitudMovilCreate(BaseModel):
+    producto_id: int
+    monto: Decimal = Field(gt=0)
+    plazo_meses: int = Field(gt=0)
+    destino: str
+    destino_detalle: str | None = None
+    datos_declarados: DatosDeclarados
+
+
+class SolicitudMovilCancel(BaseModel):
+    motivo: str
+
+
+@router.post("/solicitudes", status_code=status.HTTP_201_CREATED)
+def crear_solicitud_movil(
+    body: SolicitudMovilCreate, request: Request,
+    socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db),
+):
+    product = db.execute(select(ProductoCredito).options(joinedload(ProductoCredito.moneda)).where(
+        ProductoCredito.id == body.producto_id,
+        ProductoCredito.cooperativa_id == socio.cooperativa_id,
+    )).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(status_code=404, detail="Producto crediticio no encontrado")
+    validate_base_credit_request(product, monto=body.monto, plazo_meses=body.plazo_meses,
+        destino=body.destino, destino_detalle=body.destino_detalle)
+    if has_in_progress_request(db, socio.id):
+        raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
+    number = _siguiente_secuencia(db, socio.cooperativa_id, "SOLICITUD_CREDITO")
+    row = SolicitudCredito(monto=body.monto, plazo_meses=body.plazo_meses,
+        tasa_interes=product.tasa_interes_anual, estado="PENDIENTE", socio_id=socio.id,
+        usuario_id=socio.usuario_id, producto_credito_id=product.id, moneda_id=product.moneda_id,
+        numero_solicitud=f"SOL-{number:06d}", destino=body.destino,
+        destino_detalle=(body.destino_detalle or "").strip() or None,
+        cooperativa_id=socio.cooperativa_id, canal_origen="MOVIL",
+        datos_declarados=body.datos_declarados.model_dump(mode="json"))
+    db.add(row); db.flush()
+    registrar_accion(db, accion="REGISTRAR_SOLICITUD", modulo="CREDITOS",
+        usuario_id=socio.usuario_id, cooperativa_id=socio.cooperativa_id,
+        descripcion=f"Solicitud móvil registrada: {row.id} ({row.numero_solicitud})", request=request)
+    db.commit(); db.refresh(row)
+    return _solicitud_movil_out(row)
+
+
+def _solicitud_movil_out(row: SolicitudCredito):
+    return {"id": row.id, "numero_solicitud": row.numero_solicitud,
+        "producto": row.producto.nombre if row.producto else None,
+        "monto": _money(row.monto), "plazo_meses": row.plazo_meses, "destino": row.destino,
+        "estado": row.estado, "canal_origen": row.canal_origen,
+        "fecha_solicitud": row.fecha_solicitud.isoformat(),
+        "requiere_evaluacion": row.evaluacion_campo_id is None,
+        "motivo": row.motivo_anulacion or row.observaciones}
+
+
+@router.get("/solicitudes")
+def listar_solicitudes_movil(socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    rows = db.execute(select(SolicitudCredito).options(joinedload(SolicitudCredito.producto)).where(
+        SolicitudCredito.socio_id == socio.id,
+        SolicitudCredito.cooperativa_id == socio.cooperativa_id,
+    ).order_by(SolicitudCredito.fecha_solicitud.desc(), SolicitudCredito.id.desc())).scalars().all()
+    return [_solicitud_movil_out(row) for row in rows]
+
+
+@router.get("/solicitudes/{solicitud_id}")
+def detalle_solicitud_movil(solicitud_id: int, socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    row = db.execute(select(SolicitudCredito).options(joinedload(SolicitudCredito.producto)).where(
+        SolicitudCredito.id == solicitud_id, SolicitudCredito.socio_id == socio.id,
+        SolicitudCredito.cooperativa_id == socio.cooperativa_id,
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
+    result = _solicitud_movil_out(row)
+    result["linea_tiempo"] = [{"estado": row.estado, "fecha": row.fecha_actualizacion.isoformat(),
+        "motivo": row.motivo_anulacion or row.observaciones}]
+    return result
+
+
+@router.post("/solicitudes/{solicitud_id}/cancelar")
+def cancelar_solicitud_movil(solicitud_id: int, body: SolicitudMovilCancel, request: Request,
+    socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    row = db.execute(select(SolicitudCredito).where(
+        SolicitudCredito.id == solicitud_id, SolicitudCredito.socio_id == socio.id,
+        SolicitudCredito.cooperativa_id == socio.cooperativa_id,
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Solicitud de crédito no encontrada")
+    cancel_credit_request(db, row, motivo=body.motivo, request=request, user_id=socio.usuario_id,
+        cooperativa_id=socio.cooperativa_id, require_mobile_eligibility=True)
+    db.commit(); db.refresh(row)
+    return _solicitud_movil_out(row)
+
+
 def _money(value: Decimal) -> str:
     return f"{value.quantize(CENT, rounding=ROUND_HALF_UP):.2f}"
+
+
+@router.get("/productos-credito")
+def listar_productos_credito_socio(socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    products = db.execute(
+        select(ProductoCredito).options(joinedload(ProductoCredito.moneda)).where(
+            ProductoCredito.cooperativa_id == socio.cooperativa_id,
+            ProductoCredito.estado == "ACTIVO",
+        ).order_by(ProductoCredito.nombre, ProductoCredito.id)
+    ).scalars().all()
+    return [{
+        "id": item.id, "codigo": item.codigo, "nombre": item.nombre,
+        "moneda": item.moneda.codigo_iso, "monto_min": _money(item.monto_min),
+        "monto_max": _money(item.monto_max), "plazo_min_meses": item.plazo_min_meses,
+        "plazo_max_meses": item.plazo_max_meses,
+        "tasa_interes_anual": _money(item.tasa_interes_anual),
+        "tipo_amortizacion": item.tipo_amortizacion,
+        "requiere_garantia": item.requiere_garantia,
+    } for item in products]
+
+
+@router.get("/creditos/simulacion")
+def simular_credito_socio(
+    producto_id: int, monto: Decimal = Query(..., gt=0), plazo_meses: int = Query(..., gt=0),
+    socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db),
+):
+    product = db.execute(select(ProductoCredito).where(
+        ProductoCredito.id == producto_id,
+        ProductoCredito.cooperativa_id == socio.cooperativa_id,
+    )).scalar_one_or_none()
+    if product is None:
+        raise HTTPException(status_code=404, detail="Producto crediticio no encontrado")
+    if product.estado != "ACTIVO":
+        raise HTTPException(status_code=422, detail="El producto crediticio no está activo")
+    if monto < product.monto_min or monto > product.monto_max:
+        raise HTTPException(status_code=422, detail="El monto está fuera del rango permitido para el producto")
+    if plazo_meses < product.plazo_min_meses or plazo_meses > product.plazo_max_meses:
+        raise HTTPException(status_code=422, detail="El plazo está fuera del rango permitido para el producto")
+    plan = generar_plan_pagos(monto=monto, tasa_anual=product.tasa_interes_anual,
+        plazo_meses=plazo_meses, tipo_amortizacion=product.tipo_amortizacion, fecha_desembolso=date.today())
+    return {
+        "cuota_estimada": _money(plan["cuotas"][0]["cuota"]),
+        "total_intereses": _money(plan["total_interes"]),
+        "total_a_pagar": _money(plan["total_pagar"]),
+        "cronograma": [{"numero": row["numero"], "capital": _money(row["capital"]),
+            "interes": _money(row["interes"]), "cuota": _money(row["cuota"]),
+            "saldo": _money(row["saldo_final"])} for row in plan["cuotas"]],
+    }
 
 
 def _sentido(tipo: str) -> str:

@@ -557,6 +557,8 @@ class SolicitudOut(BaseModel):
     ronda_comite: int = 0
     resultado_comite: str | None = None
     cobertura: CoberturaOut | None = None
+    canal_origen: str = "VENTANILLA"
+    requiere_evaluacion: bool = False
 
 
 class VotoComiteIn(BaseModel):

@@ -385,6 +385,8 @@ class SolicitudCredito(Base):
     ronda_comite: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     resultado_comite: Mapped[str | None] = mapped_column(String(12))
     fecha_resolucion_comite = mapped_column(TIMESTAMP(timezone=True))
+    canal_origen: Mapped[str] = mapped_column(String(12), nullable=False, default="VENTANILLA", server_default="VENTANILLA")
+    datos_declarados: Mapped[dict | None] = mapped_column(JSONB)
 
     socio: Mapped["Socio"] = relationship()
     producto: Mapped["ProductoCredito | None"] = relationship()

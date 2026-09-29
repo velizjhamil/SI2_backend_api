@@ -17,6 +17,11 @@ from app.core.bitacora import registrar_accion
 from app.services.amortizacion import calcular_cuota_inicial, generar_plan_pagos
 from app.services.cobro_cuotas import calcular_mora, resumir_morosidad
 from app.services.scoring import score_application
+from app.services.credit_request_rules import (
+    cancel_credit_request,
+    has_in_progress_request,
+    validate_base_credit_request,
+)
 from app.models.models import (
     Credito,
     CuentaAhorro,
@@ -74,16 +79,6 @@ from app.services.alertas_mora import construir_candidatos_alerta, reconciliar_a
 router = APIRouter()
 ROLES_LECTURA_PRODUCTOS = {"ADMINISTRADOR", "CONTADOR", "CAJERO", "OFICIAL_CREDITO"}
 CENTAVO = Decimal("0.01")
-DESTINOS_SOLICITUD = {
-    "CAPITAL_TRABAJO",
-    "ACTIVO_FIJO",
-    "CONSUMO",
-    "VIVIENDA",
-    "EDUCACION",
-    "SALUD",
-    "REFINANCIAMIENTO",
-    "OTRO",
-}
 FUENTES_INGRESOS = {"DEPENDIENTE", "INDEPENDIENTE", "MIXTO"}
 CALIFICACIONES_ASFI = {"A", "B", "C", "D", "E", "F"}
 ROLES_ESCRITURA_SOLICITUD = {"ADMINISTRADOR", "OFICIAL_CREDITO"}
@@ -261,6 +256,8 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
         "estado": solicitud.estado,
         "ronda_comite": solicitud.ronda_comite,
         "resultado_comite": solicitud.resultado_comite,
+        "canal_origen": solicitud.canal_origen or "VENTANILLA",
+        "requiere_evaluacion": solicitud.evaluacion_campo_id is None,
         "socio": {
             "id": socio.id,
             "nombre_completo": f"{socio.nombre} {socio.apellido}",
@@ -408,20 +405,12 @@ def simular_solicitud_credito(
 
 
 def _validar_datos_solicitud(producto: ProductoCredito, datos: dict) -> None:
-    if producto.estado != "ACTIVO":
-        raise HTTPException(status_code=400, detail="El producto crediticio no está activo")
     monto = datos.get("monto")
     plazo = datos.get("plazo_meses")
-    if monto is None or monto < producto.monto_min or monto > producto.monto_max:
-        raise HTTPException(status_code=400, detail="El monto está fuera del rango permitido para el producto")
-    if plazo is None or plazo < producto.plazo_min_meses or plazo > producto.plazo_max_meses:
-        raise HTTPException(status_code=400, detail="El plazo está fuera del rango permitido para el producto")
     destino = datos.get("destino")
-    if destino not in DESTINOS_SOLICITUD:
-        raise HTTPException(status_code=400, detail="El destino de la solicitud no es válido")
     detalle = datos.get("destino_detalle")
-    if destino == "OTRO" and (not isinstance(detalle, str) or not detalle.strip()):
-        raise HTTPException(status_code=400, detail="Debe detallar el destino cuando selecciona OTRO")
+    validate_base_credit_request(producto, monto=monto, plazo_meses=plazo,
+        destino=destino, destino_detalle=detalle)
     evaluacion = datos.get("evaluacion") or {}
     if evaluacion.get("fuente_ingresos") not in FUENTES_INGRESOS:
         raise HTTPException(status_code=400, detail="La fuente de ingresos no es válida")
@@ -474,12 +463,7 @@ def crear_solicitud_credito(
     datos = body.model_dump()
     datos["evaluacion"] = body.evaluacion.model_dump()
     _validar_datos_solicitud(producto, datos)
-    if db.execute(
-        select(SolicitudCredito.id).where(
-            SolicitudCredito.socio_id == socio.id,
-            SolicitudCredito.estado.in_(("PENDIENTE", "OBSERVADA", "EN_EVALUACION", "EN_COMITE")),
-        )
-    ).scalar_one_or_none() is not None:
+    if has_in_progress_request(db, socio.id):
         raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
 
     evaluacion_data = body.evaluacion.model_dump()
@@ -869,6 +853,8 @@ def evaluar_solicitud_credito(
         raise HTTPException(status_code=409, detail="La solicitud no está disponible para evaluación")
     if solicitud.producto is None:
         raise HTTPException(status_code=409, detail="La solicitud no tiene producto crediticio")
+    if solicitud.evaluacion_campo_id is None or solicitud.evaluacion is None:
+        raise HTTPException(status_code=422, detail="Falta la evaluación de campo del oficial")
 
     historial = db.execute(
         text(
@@ -1269,23 +1255,8 @@ def anular_solicitud_credito(
 ):
     cooperativa_id = _validar_escritor_solicitud(usuario)
     solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
-    if solicitud.estado not in ESTADOS_EDITABLES_SOLICITUD:
-        raise HTTPException(status_code=409, detail="La solicitud ya no se puede anular")
-    motivo = body.motivo.strip()
-    if len(motivo) < 5:
-        raise HTTPException(status_code=400, detail="El motivo de anulación debe tener al menos 5 caracteres")
-    solicitud.estado = "ANULADA"
-    solicitud.motivo_anulacion = motivo
-    solicitud.fecha_actualizacion = func.now()
-    registrar_accion(
-        db,
-        accion="ANULAR_SOLICITUD",
-        modulo="CREDITOS",
-        usuario_id=usuario.id,
-        cooperativa_id=cooperativa_id,
-        descripcion=f"Solicitud de crédito anulada: {solicitud.id} ({solicitud.numero_solicitud})",
-        request=request,
-    )
+    cancel_credit_request(db, solicitud, motivo=body.motivo, request=request,
+        user_id=usuario.id, cooperativa_id=cooperativa_id, require_mobile_eligibility=False)
     db.commit()
     db.refresh(solicitud)
     return _solicitud_out(_obtener_solicitud(db, cooperativa_id, solicitud.id))
@@ -2858,7 +2829,7 @@ def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_cur
         if credit.estado=="VIGENTE" and (credit.monto_aprobado-credit.saldo_pendiente)/credit.monto_aprobado < Decimal("0.70"): omitted+=1; continue
         db.execute(text("UPDATE oferta_recredito SET estado='EXPIRADA' WHERE socio_id=:socio_id AND estado='VIGENTE' AND fecha_vencimiento < :today"), {"socio_id": socio.id, "today": date.today()})
         if db.execute(select(OfertaRecredito.id).where(OfertaRecredito.socio_id==socio.id,OfertaRecredito.estado=="VIGENTE")).scalar_one_or_none(): omitted+=1; continue
-        if db.execute(select(SolicitudCredito.id).where(SolicitudCredito.socio_id==socio.id,SolicitudCredito.estado.in_(("PENDIENTE","OBSERVADA","EN_EVALUACION","EN_COMITE")))).scalar_one_or_none(): omitted+=1; continue
+        if has_in_progress_request(db, socio.id): omitted+=1; continue
         if db.execute(select(Morosidad.id).join(Credito, Credito.id == Morosidad.credito_id).where(Credito.socio_id == socio.id, Morosidad.estado == "EN_MORA")).scalar_one_or_none(): omitted+=1; continue
         late=db.execute(text("SELECT count(*) FROM pago_cuota p JOIN tabla_amortizacion t ON t.id=p.tabla_amortizacion_id WHERE p.credito_id=:cid AND p.dias_atraso > :grace"),{"cid":credit.id,"grace":product.dias_gracia_mora}).scalar_one()
         if late: omitted+=1; continue
@@ -2915,10 +2886,7 @@ def aceptar_oferta_core(db: Session, offer: OfertaRecredito, usuario: Usuario, c
         offer.estado = "EXPIRADA"
     if offer.estado != "VIGENTE":
         raise HTTPException(status_code=inactive_status, detail="La oferta no está vigente")
-    if db.execute(select(SolicitudCredito.id).where(
-        SolicitudCredito.socio_id == offer.socio_id,
-        SolicitudCredito.estado.in_(("PENDIENTE", "OBSERVADA", "EN_EVALUACION", "EN_COMITE")),
-    )).scalar_one_or_none():
+    if has_in_progress_request(db, offer.socio_id):
         raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
     socio = db.get(Socio, offer.socio_id)
     product = db.get(ProductoCredito, offer.producto_credito_id)
