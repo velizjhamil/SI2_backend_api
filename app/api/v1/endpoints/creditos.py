@@ -20,6 +20,8 @@ from app.services.scoring import score_application
 from app.services.credit_request_rules import (
     cancel_credit_request,
     has_in_progress_request,
+    requires_field_evaluation,
+    requires_field_evaluation_clause,
     validate_base_credit_request,
 )
 from app.models.models import (
@@ -59,6 +61,7 @@ from app.schemas.schemas import (
     SolicitudCreditoUpdate,
     SolicitudOut,
     SocioResumen,
+    EvaluacionOut,
     EvaluacionCrediticiaOut,
     ResolucionSolicitudIn,
     PlanPagosOut,
@@ -257,7 +260,7 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
         "ronda_comite": solicitud.ronda_comite,
         "resultado_comite": solicitud.resultado_comite,
         "canal_origen": solicitud.canal_origen or "VENTANILLA",
-        "requiere_evaluacion": solicitud.evaluacion_campo_id is None,
+        "requiere_evaluacion": requires_field_evaluation(solicitud),
         "socio": {
             "id": socio.id,
             "nombre_completo": f"{socio.nombre} {socio.apellido}",
@@ -1040,6 +1043,8 @@ def listar_solicitudes_credito(
     socio_ci: str | None = Query(None),
     desde: date | None = Query(None),
     hasta: date | None = Query(None),
+    requiere_evaluacion: bool | None = Query(None),
+    canal_origen: str | None = Query(None, pattern="^(VENTANILLA|MOVIL)$"),
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -1067,10 +1072,57 @@ def listar_solicitudes_credito(
         query = query.where(cast(SolicitudCredito.fecha_solicitud, Date) >= desde)
     if hasta is not None:
         query = query.where(cast(SolicitudCredito.fecha_solicitud, Date) <= hasta)
+    if requiere_evaluacion is not None:
+        predicate = requires_field_evaluation_clause()
+        query = query.where(predicate if requiere_evaluacion else ~predicate)
+    if canal_origen is not None:
+        query = query.where(SolicitudCredito.canal_origen == canal_origen)
     solicitudes = db.execute(
         query.order_by(SolicitudCredito.fecha_solicitud.desc(), SolicitudCredito.id.desc())
     ).unique().scalars().all()
     return [_solicitud_out(solicitud) for solicitud in solicitudes]
+
+
+@router.get("/solicitudes/{solicitud_id}/ficha-campo")
+def obtener_ficha_campo(
+    solicitud_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    socio = solicitud.socio
+    producto = solicitud.producto
+    return {
+        "solicitud": {
+            "id": solicitud.id,
+            "numero_solicitud": solicitud.numero_solicitud,
+            "producto": producto.nombre if producto is not None else None,
+            "monto": solicitud.monto,
+            "plazo_meses": solicitud.plazo_meses,
+            "destino": solicitud.destino,
+            "destino_detalle": solicitud.destino_detalle,
+            "estado": solicitud.estado,
+            "canal_origen": solicitud.canal_origen or "VENTANILLA",
+            "requiere_evaluacion": requires_field_evaluation(solicitud),
+        },
+        "socio": {
+            "id": socio.id,
+            "nombre_completo": f"{socio.nombre} {socio.apellido}",
+            "ci": socio.ci,
+            "telefono": socio.telefono,
+            "direccion": socio.direccion,
+        },
+        "datos_declarados": solicitud.datos_declarados,
+        "evaluacion": (
+            EvaluacionOut.model_validate(solicitud.evaluacion).model_dump(mode="json")
+            if solicitud.evaluacion is not None else None
+        ),
+        "catalogos": {
+            "fuentes_ingresos": sorted(FUENTES_INGRESOS),
+            "calificaciones_asfi": sorted(CALIFICACIONES_ASFI),
+        },
+    }
 
 
 @router.get("/solicitudes/{solicitud_id}", response_model=SolicitudOut)

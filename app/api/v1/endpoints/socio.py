@@ -11,7 +11,12 @@ from app.api.v1.deps import get_current_socio, get_db
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.services.amortizacion import generar_plan_pagos
-from app.services.credit_request_rules import cancel_credit_request, has_in_progress_request, validate_base_credit_request
+from app.services.credit_request_rules import (
+    cancel_credit_request,
+    has_in_progress_request,
+    requires_field_evaluation,
+    validate_base_credit_request,
+)
 from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, ProductoCredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
 from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut
 
@@ -83,7 +88,7 @@ def _solicitud_movil_out(row: SolicitudCredito):
         "monto": _money(row.monto), "plazo_meses": row.plazo_meses, "destino": row.destino,
         "estado": row.estado, "canal_origen": row.canal_origen,
         "fecha_solicitud": row.fecha_solicitud.isoformat(),
-        "requiere_evaluacion": row.evaluacion_campo_id is None,
+        "requiere_evaluacion": requires_field_evaluation(row),
         "motivo": row.motivo_anulacion or row.observaciones}
 
 

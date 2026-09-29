@@ -1,6 +1,7 @@
 """Integration tests for CU-W21 loan request registration."""
 
 import pytest
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
@@ -230,6 +231,89 @@ def test_credit_request_models_and_schemas_are_defined():
 
 
 @pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_mobile_field_worklist_filters_and_field_sheet_are_tenant_scoped(client, loan_fixture):
+    suffix = loan_fixture["suffix"]
+    with SessionLocal() as db:
+        officer_id = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["id"]
+        socio_id = loan_fixture["local_socio_id"]
+        product_id = loan_fixture["product_ids"][0]
+        currency_id = db.query(models.Moneda.id).filter_by(codigo_iso="BOB").scalar()
+        evaluation = models.EvaluacionCampo(
+            ingreso_mensual=Decimal("5000"), egreso_mensual=Decimal("2000"),
+            capacidad_pago=Decimal("3000"), cuota_deudas_mensual=Decimal("0"),
+            fecha=date.today(),
+            actividad_economica="Comercio", fuente_ingresos="INDEPENDIENTE",
+            antiguedad_laboral_meses=24, calificacion_asfi="A", usuario_id=officer_id,
+            socio_id=loan_fixture["second_local_socio_id"], observaciones="Visita verificada",
+        )
+        db.add(evaluation)
+        db.flush()
+        pending = models.SolicitudCredito(
+            monto=Decimal("1200"), plazo_meses=12, tasa_interes=Decimal("18"),
+            estado="PENDIENTE", socio_id=socio_id, usuario_id=officer_id,
+            producto_credito_id=product_id, moneda_id=currency_id,
+            numero_solicitud=f"M8-{suffix}-1", destino="CAPITAL_TRABAJO",
+            destino_detalle="Mercadería", cooperativa_id=loan_fixture["coop_ids"][0],
+            canal_origen="MOVIL", datos_declarados={"ingreso_mensual": "6000"},
+        )
+        complete = models.SolicitudCredito(
+            monto=Decimal("1300"), plazo_meses=12, tasa_interes=Decimal("18"),
+            estado="PENDIENTE", socio_id=loan_fixture["second_local_socio_id"], usuario_id=officer_id,
+            producto_credito_id=product_id, moneda_id=currency_id,
+            numero_solicitud=f"M8-{suffix}-2", destino="CAPITAL_TRABAJO",
+            cooperativa_id=loan_fixture["coop_ids"][0], canal_origen="VENTANILLA",
+            evaluacion=evaluation,
+        )
+        foreign = models.SolicitudCredito(
+            monto=Decimal("1400"), plazo_meses=12, tasa_interes=Decimal("18"),
+            estado="PENDIENTE", socio_id=loan_fixture["foreign_socio_id"], usuario_id=officer_id,
+            producto_credito_id=product_id, moneda_id=currency_id,
+            numero_solicitud=f"M8-{suffix}-3", destino="CAPITAL_TRABAJO",
+            cooperativa_id=loan_fixture["coop_ids"][1], canal_origen="MOVIL",
+        )
+        db.add_all([pending, complete, foreign])
+        db.commit()
+        pending_id, complete_id, foreign_id = pending.id, complete.id, foreign.id
+
+    headers = _auth(loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"])
+    base = "/api/v1/creditos/solicitudes"
+    todo = client.get(base, headers=headers, params={"requiere_evaluacion": "true"})
+    assert todo.status_code == 200
+    assert {row["id"] for row in todo.json()} == {pending_id}
+    mobile = client.get(base, headers=headers, params={"canal_origen": "MOVIL"})
+    assert mobile.status_code == 200
+    assert {row["id"] for row in mobile.json()} == {pending_id}
+    completed = client.get(base, headers=headers, params={"requiere_evaluacion": "false"})
+    assert completed.status_code == 200
+    assert {row["id"] for row in completed.json()} == {complete_id}
+    invalid = client.get(base, headers=headers, params={"canal_origen": "APP"})
+    assert invalid.status_code == 422
+
+    sheet = client.get(f"{base}/{pending_id}/ficha-campo", headers=headers)
+    assert sheet.status_code == 200
+    data = sheet.json()
+    assert data["solicitud"] == {
+        "id": pending_id, "numero_solicitud": f"M8-{suffix}-1", "producto": "Loan Product FRANCES",
+        "monto": 1200.0, "plazo_meses": 12, "destino": "CAPITAL_TRABAJO",
+        "destino_detalle": "Mercadería", "estado": "PENDIENTE", "canal_origen": "MOVIL",
+        "requiere_evaluacion": True,
+    }
+    assert data["socio"]["id"] == loan_fixture["local_socio_id"]
+    assert data["datos_declarados"] == {"ingreso_mensual": "6000"}
+    assert data["evaluacion"] is None
+    assert data["catalogos"] == {
+        "fuentes_ingresos": ["DEPENDIENTE", "INDEPENDIENTE", "MIXTO"],
+        "calificaciones_asfi": ["A", "B", "C", "D", "E", "F"],
+    }
+    foreign_sheet = client.get(f"{base}/{foreign_id}/ficha-campo", headers=headers)
+    assert foreign_sheet.status_code == 404
+    admin_headers = _auth(loan_fixture["users"][(1, "ADMINISTRADOR")]["token"])
+    admin_sheet = client.get(f"{base}/{complete_id}/ficha-campo", headers=admin_headers)
+    assert admin_sheet.status_code == 200
+    assert admin_sheet.json()["evaluacion"]["observaciones"] == "Visita verificada"
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
 def test_credit_socio_search_is_tenant_scoped_and_limited(client, loan_fixture):
     suffix = loan_fixture["suffix"]
     with SessionLocal() as db:
@@ -272,7 +356,7 @@ def test_credit_simulation_uses_french_and_german_installment_formulas(client, l
     token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
     french = client.post(
         "/api/v1/creditos/solicitudes/simulacion",
-        json={"producto_id": loan_fixture["product_ids"][0], "monto": "1200.00", "plazo_meses": 12,
+        json={"producto_id": loan_fixture["product_ids"][0], "monto": 1200.0, "plazo_meses": 12,
               "ingreso_mensual": "5000.00", "egreso_mensual": "2000.00", "cuota_deudas_mensual": "500.00"},
         headers=_auth(token),
     )
@@ -285,7 +369,7 @@ def test_credit_simulation_uses_french_and_german_installment_formulas(client, l
 
     german = client.post(
         "/api/v1/creditos/solicitudes/simulacion",
-        json={"producto_id": loan_fixture["product_ids"][1], "monto": "1200.00", "plazo_meses": 12},
+        json={"producto_id": loan_fixture["product_ids"][1], "monto": 1200.0, "plazo_meses": 12},
         headers=_auth(token),
     )
     assert german.status_code == 200, german.text
@@ -307,7 +391,7 @@ def test_credit_simulation_reports_out_of_range_and_rejects_foreign_product(clie
 
     foreign = client.post(
         "/api/v1/creditos/solicitudes/simulacion",
-        json={"producto_id": 999999999, "monto": "1200.00", "plazo_meses": 12},
+        json={"producto_id": 999999999, "monto": 1200.0, "plazo_meses": 12},
         headers=_auth(token),
     )
     assert foreign.status_code == 404

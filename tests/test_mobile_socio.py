@@ -190,6 +190,32 @@ def test_mobile_create_list_detail_cancel_and_staff_tolerance(socio_case):
     assert canceled.status_code == 200 and canceled.json()["estado"] == "ANULADA"
 
 
+def test_canceled_mobile_request_does_not_require_field_evaluation(socio_case):
+    body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1200.00", "plazo_meses": 12,
+        "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "2500.00",
+        "egreso_mensual": "900.00", "actividad_economica": "Comercio", "fuente_ingresos": "INDEPENDIENTE"}}
+    with TestClient(app) as client:
+        created = client.post("/api/v1/socio/solicitudes", headers=auth(socio_case), json=body)
+        assert created.status_code == 201, created.text
+        row = created.json()
+        socio_case["ids"]["mobile_requests"].append(row["id"])
+        canceled = client.post(f"/api/v1/socio/solicitudes/{row['id']}/cancelar", headers=auth(socio_case),
+            json={"motivo": "Cambio de planes"})
+        worklist = client.get("/api/v1/creditos/solicitudes", headers=staff_auth(socio_case),
+            params={"requiere_evaluacion": "true", "canal_origen": "MOVIL"})
+        staff_list = client.get("/api/v1/creditos/solicitudes", headers=staff_auth(socio_case))
+        ficha = client.get(f"/api/v1/creditos/solicitudes/{row['id']}/ficha-campo", headers=staff_auth(socio_case))
+        mobile_list = client.get("/api/v1/socio/solicitudes", headers=auth(socio_case))
+
+    assert canceled.status_code == 200 and canceled.json()["requiere_evaluacion"] is False
+    assert worklist.status_code == 200 and row["id"] not in {item["id"] for item in worklist.json()}
+    assert staff_list.status_code == 200
+    assert next(item for item in staff_list.json() if item["id"] == row["id"])["requiere_evaluacion"] is False
+    assert ficha.status_code == 200 and ficha.json()["solicitud"]["requiere_evaluacion"] is False
+    assert mobile_list.status_code == 200
+    assert next(item for item in mobile_list.json() if item["id"] == row["id"])["requiere_evaluacion"] is False
+
+
 def test_mobile_duplicate_and_foreign_request_are_rejected(socio_case):
     body = {"producto_id": socio_case["ids"]["products"][0], "monto": "1200", "plazo_meses": 12,
         "destino": "CONSUMO", "datos_declarados": {"ingreso_mensual": "2500",

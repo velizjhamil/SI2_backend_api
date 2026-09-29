@@ -1,7 +1,7 @@
 """Shared business rules for staff and mobile credit-request workflows."""
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core.bitacora import registrar_accion
@@ -13,6 +13,22 @@ DESTINOS_SOLICITUD = {
 }
 ESTADOS_SOLICITUD_EN_CURSO = ("PENDIENTE", "OBSERVADA", "EN_EVALUACION", "EN_COMITE")
 ESTADOS_SOLICITUD_ANULABLES_W21 = {"PENDIENTE", "OBSERVADA"}
+
+
+def requires_field_evaluation(solicitud: SolicitudCredito) -> bool:
+    """Return whether a request is both unevaluated and still in progress."""
+    return (
+        solicitud.evaluacion_campo_id is None
+        and solicitud.estado in ESTADOS_SOLICITUD_EN_CURSO
+    )
+
+
+def requires_field_evaluation_clause():
+    """SQL form of the shared field-evaluation eligibility predicate."""
+    return and_(
+        SolicitudCredito.evaluacion_campo_id.is_(None),
+        SolicitudCredito.estado.in_(ESTADOS_SOLICITUD_EN_CURSO),
+    )
 
 
 def validate_base_credit_request(product, *, monto, plazo_meses, destino, destino_detalle):
