@@ -38,8 +38,8 @@ to see the dictamen. Photos/GPS (CU-M9) and offline sync (CU-M11) are later feat
 
 ## Tasks
 - [x] B1 (Codex): list filters + ficha-campo + tests.
-- [ ] M1 (Antigravity): role routing + Campo module + tests (after payload capture).
-- [ ] V1 (Orchestrator): suite, DB intact, E2E + payload capture, flutter test/analyze, commits.
+- [x] M1 (Antigravity): role routing + Campo module + tests (after payload capture).
+- [x] V1 (Orchestrator): suite, DB intact, E2E + payload capture, flutter test/analyze, commits.
 
 ## Checks
 - Backend strict TDD (baseline 488 passed / 5 pre-existing / 1 skipped); own-cooperative fixtures, cleanup deletes
@@ -58,3 +58,4 @@ to see the dictamen. Photos/GPS (CU-M9) and offline sync (CU-M11) are later feat
 - 2026-09-29: B1 completed. Strict TDD RED observed after temporarily disabling the filter parameter (worklist included the complete request); restored implementation and fixed fixture evaluation ownership / decimal expectation. GREEN: focused M8 test 1 passed; `tests/test_solicitud_credito.py` 15 passed. Full `.venv/bin/python -m pytest -q`: 489 passed, 5 failed, 1 skipped; failures were existing multi-tenant access and savings API expectations (missing required fields). Counts before: coop=1, user=20, bitacora=7641; after: coop=1, user=20, bitacora=7704. Bitacora delta +63 from full-suite activity; no rows deleted.
 - Parent spot-check: the focused M8 test passed (1 passed); counts remained coop=1, user=20, bitacora=7704 before/after. `git diff --check` passed.
 - 2026-09-30 (orchestrator verification): E2E socio → SOL-000005 (MOVIL) → oficial worklist, ficha-campo (socio telefono/direccion null in demo data; catalogos present), invalid calificación 400, evaluation saved (requiere_evaluacion false), scoring 910 APROBADO (reglas-v2); socio cannot open ficha (403); unknown canal filter 422. Defect found: the worklist listed SOL-000004 (ANULADA) — Codex now defines requiere_evaluacion = no evaluation AND in-progress state (reusing the existing in-progress constant) for the list filter, SolicitudOut/ficha-campo and /socio/solicitudes; verified live (worklist excludes closed requests). Affected tests 44 passed. Real payloads captured into SI2_mobile_app/test/fixtures/m8/ (no tokens). Known bitacora leak cleaned.
+- 2026-09-30 (mobile): Antigravity's Campo module (role routing OFICIAL_CREDITO → /campo, worklist with canal selector, ficha, evaluation form, PUT evaluation, scoring view) verified — flutter test 81 passed, analyze 0 errors/warnings, fixtures read from test/fixtures/m8 (relative), auth change limited to tracking/clearing `currentRole`. Mobile commit on feat/mobile-evaluacion-campo. RDD for M7/M8 backend and mobile not run (paused by the user).
