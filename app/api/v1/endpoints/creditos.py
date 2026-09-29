@@ -1601,6 +1601,8 @@ def actualizar_producto_crediticio(
         "tasa_mora_anual": producto.tasa_mora_anual,
         "relacion_cuota_ingreso_max": producto.relacion_cuota_ingreso_max,
         "requiere_garantia": producto.requiere_garantia,
+        "tipo_credito_asfi": producto.tipo_credito_asfi,
+        "sector_productivo": producto.sector_productivo,
         "monto_aprobacion_directa": producto.monto_aprobacion_directa,
     }
     values.update(changes)

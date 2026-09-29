@@ -1,7 +1,7 @@
 from uuid import uuid4
 """CU-W23 part 2 additive API and persistence contract tests."""
 from pathlib import Path
-from sqlalchemy import inspect
+from sqlalchemy import inspect, or_
 from app.db.session import engine
 from app.models import models
 from app.schemas import schemas
@@ -151,11 +151,19 @@ def recredito_case():
                 db.query(models.SolicitudCredito).filter(models.SolicitudCredito.id.in_(ids["requests"])).delete(synchronize_session=False)
             if ids.get("credit_evals"): db.query(models.EvaluacionCrediticia).filter(models.EvaluacionCrediticia.id.in_(ids["credit_evals"])).delete(synchronize_session=False)
             if ids["evals"]: db.query(models.EvaluacionCampo).filter(models.EvaluacionCampo.id.in_(ids["evals"])).delete(synchronize_session=False)
-            if ids["users"]: db.query(models.Bitacora).filter(models.Bitacora.usuario_id.in_(ids["users"])).delete(synchronize_session=False)
             if ids["socios"]: db.query(models.Socio).filter(models.Socio.id.in_(ids["socios"])).delete(synchronize_session=False)
             if ids["product"]: db.query(models.ProductoCredito).filter(models.ProductoCredito.id==ids["product"]).delete(synchronize_session=False)
-            if ids["users"]: db.query(models.Usuario).filter(models.Usuario.id.in_(ids["users"])).delete(synchronize_session=False)
-            if ids["coops"]: db.query(models.Cooperativa).filter(models.Cooperativa.id.in_(ids["coops"])).delete(synchronize_session=False)
+            audit_scope = []
+            if ids["users"]:
+                audit_scope.append(models.Bitacora.usuario_id.in_(ids["users"]))
+            if ids["coops"]:
+                audit_scope.append(models.Bitacora.cooperativa_id.in_(ids["coops"]))
+            if audit_scope:
+                db.query(models.Bitacora).filter(or_(*audit_scope)).delete(synchronize_session=False)
+            if ids["users"]:
+                db.query(models.Usuario).filter(models.Usuario.id.in_(ids["users"])).delete(synchronize_session=False)
+            if ids["coops"]:
+                db.query(models.Cooperativa).filter(models.Cooperativa.id.in_(ids["coops"])).delete(synchronize_session=False)
             db.commit()
 
 

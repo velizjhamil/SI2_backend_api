@@ -87,11 +87,12 @@ def _fixture_product_users():
 
 def _limpiar_product_users(fixture):
     with SessionLocal() as db:
-        db.query(models.ProductoCredito).filter(
-            models.ProductoCredito.cooperativa_id.in_(fixture["coop_ids"])
-        ).delete(synchronize_session=False)
         db.query(models.Bitacora).filter(
             models.Bitacora.usuario_id.in_(fixture["user_ids"])
+            | models.Bitacora.cooperativa_id.in_(fixture["coop_ids"])
+        ).delete(synchronize_session=False)
+        db.query(models.ProductoCredito).filter(
+            models.ProductoCredito.cooperativa_id.in_(fixture["coop_ids"])
         ).delete(synchronize_session=False)
         db.query(models.Usuario).filter(models.Usuario.id.in_(fixture["user_ids"])).delete(
             synchronize_session=False
@@ -136,6 +137,9 @@ def test_producto_credito_model_and_schemas_are_defined():
     assert schemas.ProductoCreditoUpdate
     assert schemas.ProductoCreditoEstadoUpdate
     assert schemas.ProductoCreditoOut
+    assert {"tipo_credito_asfi", "sector_productivo"} <= set(
+        models.ProductoCredito.__table__.columns.keys()
+    )
 
 
 def test_credit_product_routes_are_registered():
@@ -213,6 +217,8 @@ def test_product_create_normalizes_code_validates_and_audits(client):
             "plazo_max_meses": 24,
             "tasa_interes_anual": "12.50",
             "tipo_amortizacion": "FRANCES",
+            "tipo_credito_asfi": "CONSUMO",
+            "sector_productivo": False,
         }
         created = client.post("/api/v1/creditos/productos", json=body, headers=_auth(admin["token"]))
         assert created.status_code == 201, created.text
@@ -225,6 +231,15 @@ def test_product_create_normalizes_code_validates_and_audits(client):
         assert product["relacion_cuota_ingreso_max"] == "40.00"
         assert product["requiere_garantia"] is False
         assert product["estado"] == "ACTIVO"
+        assert product["tipo_credito_asfi"] == "CONSUMO"
+        assert product["sector_productivo"] is False
+
+        invalid_classification = dict(body, codigo="INVALID-ASFI", tipo_credito_asfi="EMPRESARIAL")
+        invalid_response = client.post(
+            "/api/v1/creditos/productos", json=invalid_classification,
+            headers=_auth(admin["token"]),
+        )
+        assert invalid_response.status_code == 422
 
         duplicate = client.post("/api/v1/creditos/productos", json=body, headers=_auth(admin["token"]))
         assert duplicate.status_code == 409
@@ -292,6 +307,20 @@ def test_product_partial_update_state_and_audit(client):
         assert updated.json()["codigo"] == "EDIT-DEMO"
         assert updated.json()["monto_max"] == "2000.00"
         assert updated.json()["descripcion"] == "Actualizado"
+        classified = client.put(
+            f"/api/v1/creditos/productos/{product_id}",
+            json={"tipo_credito_asfi": "VIVIENDA_SIN_GARANTIA", "sector_productivo": True},
+            headers=_auth(admin["token"]),
+        )
+        assert classified.status_code == 200, classified.text
+        assert classified.json()["tipo_credito_asfi"] == "VIVIENDA_SIN_GARANTIA"
+        assert classified.json()["sector_productivo"] is True
+        invalid_classification = client.put(
+            f"/api/v1/creditos/productos/{product_id}",
+            json={"tipo_credito_asfi": "EMPRESARIAL"},
+            headers=_auth(admin["token"]),
+        )
+        assert invalid_classification.status_code == 422
         cleared = client.put(
             f"/api/v1/creditos/productos/{product_id}", json={"descripcion": None},
             headers=_auth(admin["token"]),
@@ -331,6 +360,7 @@ def test_product_partial_update_state_and_audit(client):
                 models.Bitacora.usuario_id == admin["id"],
                 models.Bitacora.modulo == "CREDITOS",
             ).order_by(models.Bitacora.id).all()]
-            assert actions == ["CREAR_PRODUCTO", "ACTUALIZAR_PRODUCTO", "ACTUALIZAR_PRODUCTO", "DESACTIVAR_PRODUCTO"]
+            assert actions == ["CREAR_PRODUCTO", "ACTUALIZAR_PRODUCTO", "ACTUALIZAR_PRODUCTO",
+                               "ACTUALIZAR_PRODUCTO", "DESACTIVAR_PRODUCTO"]
     finally:
         _limpiar_product_users(fixture)

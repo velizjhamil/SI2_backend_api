@@ -79,9 +79,16 @@ def _limpiar_fixture_garantias(ids):
             db.query(models.ProductoCredito).filter_by(id=ids["producto"]).delete(synchronize_session=False)
         if ids.get("socio"):
             db.query(models.Socio).filter_by(id=ids["socio"]).delete(synchronize_session=False)
-        if ids.get("oficial") or ids.get("admin") or ids.get("admin_two"):
-            user_ids = [ids[k] for k in ("oficial", "admin", "admin_two") if ids.get(k)]
-            db.query(models.Bitacora).filter(models.Bitacora.usuario_id.in_(user_ids)).delete(synchronize_session=False)
+        user_ids = [ids[k] for k in ("oficial", "admin", "admin_two") if ids.get(k)]
+        audit_scope = []
+        if user_ids:
+            audit_scope.append(models.Bitacora.usuario_id.in_(user_ids))
+        if ids.get("coop"):
+            audit_scope.append(models.Bitacora.cooperativa_id == ids["coop"])
+        if audit_scope:
+            from sqlalchemy import or_
+            db.query(models.Bitacora).filter(or_(*audit_scope)).delete(synchronize_session=False)
+        if user_ids:
             db.query(models.Usuario).filter(models.Usuario.id.in_(user_ids)).delete(synchronize_session=False)
         if ids.get("coop"):
             db.query(models.Cooperativa).filter_by(id=ids["coop"]).delete(synchronize_session=False)

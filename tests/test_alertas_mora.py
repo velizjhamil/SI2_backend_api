@@ -1,6 +1,6 @@
 """Contract tests for CU-W28 arrears alerts."""
 from pathlib import Path
-from sqlalchemy import inspect
+from sqlalchemy import inspect, or_
 from app.db.session import engine
 
 from app.models import models
@@ -139,8 +139,14 @@ def test_empty_cooperative_monitoring_is_idempotent_audited_and_summarized():
             assert db.query(models.Bitacora).filter_by(usuario_id=ids["user"], accion="MONITOREO_MORA").count() == 2
     finally:
         with SessionLocal() as db:
+            audit_scope = []
             if ids["user"]:
-                db.query(models.Bitacora).filter_by(usuario_id=ids["user"]).delete(synchronize_session=False)
+                audit_scope.append(models.Bitacora.usuario_id == ids["user"])
+            if ids["coop"]:
+                audit_scope.append(models.Bitacora.cooperativa_id == ids["coop"])
+            if audit_scope:
+                db.query(models.Bitacora).filter(or_(*audit_scope)).delete(synchronize_session=False)
+            if ids["user"]:
                 db.query(models.Usuario).filter_by(id=ids["user"]).delete(synchronize_session=False)
             if ids["coop"]:
                 db.query(models.Cooperativa).filter_by(id=ids["coop"]).delete(synchronize_session=False)
@@ -307,6 +313,8 @@ def test_monitor_creates_due_soon_once_and_resolves_after_payment_with_cleanup(m
             assert db.query(models.AlertaCredito).filter_by(credito_id=ids["credit"], estado="RESUELTA").count() == 3
     finally:
         with SessionLocal() as db:
+            fixture_user_ids = [ids[key] for key in ("user", "foreign_user", "reader") if ids.get(key)]
+            fixture_coop_ids = [ids[key] for key in ("coop", "foreign_coop") if ids.get(key)]
             if ids["credit"]:
                 db.query(models.AlertaCredito).filter_by(credito_id=ids["credit"]).delete(synchronize_session=False)
                 db.query(models.GestionCobranza).filter_by(credito_id=ids["credit"]).delete(synchronize_session=False)
@@ -318,15 +326,22 @@ def test_monitor_creates_due_soon_once_and_resolves_after_payment_with_cleanup(m
             if ids["evaluation"]: db.query(models.EvaluacionCampo).filter_by(id=ids["evaluation"]).delete(synchronize_session=False)
             if ids["socio"]: db.query(models.Socio).filter_by(id=ids["socio"]).delete(synchronize_session=False)
             if ids["product"]: db.query(models.ProductoCredito).filter_by(id=ids["product"]).delete(synchronize_session=False)
+            if fixture_user_ids or fixture_coop_ids:
+                audit_scope = []
+                if fixture_user_ids:
+                    audit_scope.append(models.Bitacora.usuario_id.in_(fixture_user_ids))
+                if fixture_coop_ids:
+                    audit_scope.append(models.Bitacora.cooperativa_id.in_(fixture_coop_ids))
+                db.query(models.Bitacora).filter(or_(*audit_scope)).delete(
+                    synchronize_session=False
+                )
             if ids["user"]:
-                db.query(models.Bitacora).filter_by(usuario_id=ids["user"]).delete(synchronize_session=False)
                 db.query(models.Usuario).filter_by(id=ids["user"]).delete(synchronize_session=False)
             if ids["foreign_user"]:
-                db.query(models.Bitacora).filter_by(usuario_id=ids["foreign_user"]).delete(synchronize_session=False)
                 db.query(models.Usuario).filter_by(id=ids["foreign_user"]).delete(synchronize_session=False)
             if ids["reader"]:
-                db.query(models.Bitacora).filter_by(usuario_id=ids["reader"]).delete(synchronize_session=False)
                 db.query(models.Usuario).filter_by(id=ids["reader"]).delete(synchronize_session=False)
-            if ids["coop"]: db.query(models.Cooperativa).filter_by(id=ids["coop"]).delete(synchronize_session=False)
-            if ids["foreign_coop"]: db.query(models.Cooperativa).filter_by(id=ids["foreign_coop"]).delete(synchronize_session=False)
+            for coop_id in (ids["coop"], ids["foreign_coop"]):
+                if coop_id:
+                    db.query(models.Cooperativa).filter_by(id=coop_id).delete(synchronize_session=False)
             db.commit()

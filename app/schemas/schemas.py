@@ -242,6 +242,11 @@ class ProductoCreditoCreate(BaseModel):
     requiere_garantia: bool = False
     cobertura_minima_garantia: Decimal = Field(default=Decimal("100.00"), ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal = Field(default=Decimal("0.00"), ge=0)
+    tipo_credito_asfi: Literal[
+        "MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO",
+        "VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA",
+    ] | None = None
+    sector_productivo: bool = False
 
 
 class ProductoCreditoUpdate(BaseModel):
@@ -260,6 +265,11 @@ class ProductoCreditoUpdate(BaseModel):
     requiere_garantia: bool | None = None
     cobertura_minima_garantia: Decimal | None = Field(None, ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal | None = Field(None, ge=0)
+    tipo_credito_asfi: Literal[
+        "MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO",
+        "VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA",
+    ] | None = None
+    sector_productivo: bool | None = None
 
 
 class ProductoCreditoEstadoUpdate(BaseModel):
@@ -284,6 +294,8 @@ class ProductoCreditoOut(BaseModel):
     tasa_mora_anual: Decimal
     relacion_cuota_ingreso_max: Decimal
     requiere_garantia: bool
+    tipo_credito_asfi: str | None
+    sector_productivo: bool
     cobertura_minima_garantia: Decimal
     monto_aprobacion_directa: Decimal
     estado: str

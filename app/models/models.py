@@ -179,6 +179,26 @@ class Bitacora(Base):
     usuario: Mapped["Usuario"] = relationship(back_populates="bitacoras")
 
 
+class Reporte(Base):
+    __tablename__ = "reporte"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tipo: Mapped[str] = mapped_column(String(50), nullable=False)
+    formato: Mapped[str] = mapped_column(String(10), nullable=False)
+    parametros: Mapped[str | None] = mapped_column(Text)
+    fecha_generacion = mapped_column(TIMESTAMP(timezone=False), server_default=func.now())
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    cooperativa_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("cooperativa.id"))
+    periodo = mapped_column(Date)
+    estado: Mapped[str] = mapped_column(String(12), nullable=False, default="GENERADO", server_default="GENERADO")
+    contenido = mapped_column(JSONB)
+    resumen = mapped_column(JSONB)
+    hash_contenido: Mapped[str | None] = mapped_column(String(64))
+
+    usuario: Mapped["Usuario"] = relationship()
+    cooperativa: Mapped["Cooperativa | None"] = relationship()
+
+
 class Socio(Base):
     """
     Persona natural afiliada a la cooperativa (tabla KYC real en la BD).
@@ -277,6 +297,11 @@ class ProductoCredito(Base):
         CheckConstraint("tasa_mora_anual >= 0 AND tasa_mora_anual <= 100", name="chk_producto_credito_tasa_mora"),
         CheckConstraint("relacion_cuota_ingreso_max > 0 AND relacion_cuota_ingreso_max <= 100", name="chk_producto_credito_ratio"),
         CheckConstraint("dias_gracia_mora >= 0", name="chk_producto_credito_gracia"),
+        CheckConstraint(
+            "tipo_credito_asfi IS NULL OR tipo_credito_asfi IN "
+            "('MICROCREDITO','MICROCREDITO_AGROPECUARIO','CONSUMO','VIVIENDA_HIPOTECARIA','VIVIENDA_SIN_GARANTIA')",
+            name="chk_producto_credito_tipo_asfi",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -295,6 +320,8 @@ class ProductoCredito(Base):
     tasa_mora_anual = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
     relacion_cuota_ingreso_max = mapped_column(Numeric(5, 2), nullable=False, default=40, server_default="40.00")
     requiere_garantia: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    tipo_credito_asfi: Mapped[str | None] = mapped_column(String(30))
+    sector_productivo: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     cobertura_minima_garantia = mapped_column(Numeric(6, 2), nullable=False, default=100, server_default="100.00")
     monto_aprobacion_directa = mapped_column(Numeric(14, 2), nullable=False, default=0, server_default="0.00")
     estado: Mapped[str] = mapped_column(String(10), nullable=False, default="ACTIVO", server_default="ACTIVO")
