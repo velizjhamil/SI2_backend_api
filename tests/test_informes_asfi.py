@@ -216,6 +216,85 @@ def test_legacy_report_id_one_is_invisible_to_cooperative_tenant():
 
 
 @pytest.mark.skipif(not _db_available(), reason="PostgreSQL no disponible")
+def test_asfi_financials_match_accounting_and_export_persisted_voucher():
+    from fastapi.testclient import TestClient
+    from main import app
+
+    suffix = uuid4().hex[:10]
+    cutoff = date.today()
+    with SessionLocal() as db:
+        coop = models.Cooperativa(nombre=f"ASFI statements {suffix}", razon_social="Test Ltda.", estado="ACTIVO")
+        db.add(coop)
+        db.flush()
+        role_id = db.query(models.Rol.id).filter(models.Rol.nombre == "CONTADOR").scalar()
+        user = models.Usuario(correo=f"asfi-statement-{suffix}@test.invalid", contrasena=hash_password("Password123"),
+                              rol_id=role_id, cooperativa_id=coop.id, nombre="ASFI Counter", estado="ACTIVO")
+        db.add(user)
+        db.flush()
+        roots = {code: db.query(models.PlanCuenta).filter_by(codigo=code, cooperativa_id=None).one()
+                 for code in ("111.01", "513.05")}
+        accounts = []
+        for code, parent in roots.items():
+            account = models.PlanCuenta(codigo=f"{parent.codigo}.{suffix[:4]}", nombre=f"Fixture {code}",
+                nivel=parent.nivel + 1, tipo=parent.tipo, naturaleza=parent.naturaleza,
+                cooperativa_id=coop.id, estado="ACTIVA", acepta_movimientos=True, plan_cuenta_padre_id=parent.id)
+            db.add(account)
+            accounts.append(account)
+        db.flush()
+        voucher = models.ComprobanteContable(tipo="INGRESO", glosa="ASFI integration", cooperativa_id=coop.id,
+            numero=f"ASFI-{suffix}", gestion=cutoff.year, fecha_contable=cutoff, moneda_id=1,
+            estado="REGISTRADO", origen="MANUAL", usuario_id=user.id)
+        db.add(voucher)
+        db.flush()
+        db.add_all([models.DetalleAsiento(comprobante_contable_id=voucher.id, plan_cuenta_id=accounts[0].id,
+                    debe=Decimal("125.00"), haber=0, orden=1),
+                    models.DetalleAsiento(comprobante_contable_id=voucher.id, plan_cuenta_id=accounts[1].id,
+                    debe=0, haber=Decimal("125.00"), orden=2)])
+        usd_id = db.query(models.Moneda.id).filter_by(codigo_iso="USD").scalar()
+        db.add(models.TipoCambio(cooperativa_id=coop.id, moneda_id=usd_id, fecha=cutoff,
+                                 valor=Decimal("6.96000"), fuente="TEST", usuario_id=user.id))
+        token, _ = create_access_token(str(user.id), "CONTADOR", coop.id)
+        user_id, coop_id, voucher_id, account_ids = user.id, coop.id, voucher.id, [a.id for a in accounts]
+        db.commit()
+    report_ids = []
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        with TestClient(app) as client:
+            asfi = client.get(f"/api/v1/informes-asfi/estados-financieros?fecha_corte={cutoff}", headers=headers)
+            balance = client.get(f"/api/v1/contabilidad/balance-general?fecha_corte={cutoff}", headers=headers)
+            income = client.get(f"/api/v1/contabilidad/estado-resultados?desde={cutoff.year}-01-01&hasta={cutoff}", headers=headers)
+            assert (asfi.status_code, balance.status_code, income.status_code) == (200, 200, 200), \
+                (asfi.text, balance.text, income.text)
+            payload = asfi.json()
+            assert payload["balance_general"] == balance.json() and payload["estado_resultados"] == income.json()
+            assert payload["balance_general"]["cuadra"] is True and payload["balance_general"]["total_activo"] == "125.00"
+            assert payload["estado_resultados"]["resultado_neto_gestion"] == "125.00"
+            generated = client.post("/api/v1/informes-asfi/generar", headers=headers,
+                json={"tipo": "ESTADOS_FINANCIEROS", "fecha_corte": str(cutoff)})
+            assert generated.status_code == 201, generated.text
+            report_ids.append(generated.json()["id"])
+            exported = client.get(f"/api/v1/informes-asfi/reportes/{report_ids[0]}/export", headers=headers)
+            assert exported.status_code == 200
+            assert exported.content.startswith(b"\xef\xbb\xbf")
+            rows = list(csv.reader(io.StringIO(exported.content.decode("utf-8-sig"))))
+            csv_entries = {(row[0], row[1], row[3]) for row in rows[1:]}
+            assert ("balance_general", "110.00", payload["balance_general"]["total_activo"]) in csv_entries
+            assert ("estado_resultados", "510.00", "125.00") in csv_entries
+    finally:
+        with SessionLocal() as db:
+            if report_ids:
+                db.query(models.Reporte).filter(models.Reporte.id.in_(report_ids)).delete(synchronize_session=False)
+            db.query(models.DetalleAsiento).filter_by(comprobante_contable_id=voucher_id).delete(synchronize_session=False)
+            db.query(models.ComprobanteContable).filter_by(id=voucher_id).delete(synchronize_session=False)
+            db.query(models.PlanCuenta).filter(models.PlanCuenta.id.in_(account_ids)).delete(synchronize_session=False)
+            db.query(models.TipoCambio).filter_by(cooperativa_id=coop_id).delete(synchronize_session=False)
+            db.query(models.Bitacora).filter_by(usuario_id=user_id).delete(synchronize_session=False)
+            db.query(models.Usuario).filter_by(id=user_id).delete(synchronize_session=False)
+            db.query(models.Cooperativa).filter_by(id=coop_id).delete(synchronize_session=False)
+            db.commit()
+
+
+@pytest.mark.skipif(not _db_available(), reason="PostgreSQL no disponible")
 def test_generation_replacement_integrity_export_and_future_cutoff(monkeypatch):
     from fastapi.testclient import TestClient
     from main import app
