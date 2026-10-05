@@ -214,6 +214,26 @@ def test_dpf_list_and_detail_scope_and_expiry_filter(client):
         _limpiar_emision(ids)
 
 
+def test_dpf_list_preserves_missing_net_interest(client):
+    ids = _fixture_emision()
+    try:
+        certificate = _emitir_para_liquidacion(client, ids)
+        with SessionLocal() as db:
+            db.execute(
+                text("UPDATE deposito_plazo_fijo SET interes_neto=NULL WHERE id=:id"),
+                {"id": certificate["id"]},
+            )
+            db.commit()
+
+        listing = client.get("/api/v1/dpf", headers=_auth(ids[3]))
+
+        assert listing.status_code == 200, listing.text
+        item = next(row for row in listing.json() if row["id"] == certificate["id"])
+        assert item["interes_neto"] is None
+    finally:
+        _limpiar_emision(ids)
+
+
 def _emitir_para_liquidacion(client, ids, amount="1000.00"):
     with SessionLocal() as db:
         bob_id = db.execute(text("SELECT id FROM moneda WHERE codigo_iso='BOB'")).scalar_one()

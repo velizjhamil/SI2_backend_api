@@ -25,6 +25,10 @@ def _money(value: Decimal) -> Decimal:
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
+def _nullable_money(value: Decimal | None) -> str | None:
+    return f"{value:.2f}" if value is not None else None
+
+
 def _obtener_tasa(db: Session, usuario: Usuario, moneda_id: int, plazo_dias: int):
     if usuario.cooperativa_id is None or usuario.rol.nombre == "SUPERADMIN":
         raise HTTPException(status_code=403, detail="Operación no disponible para este usuario")
@@ -155,7 +159,7 @@ def _certificado_out(db: Session, dpf: DepositoPlazoFijo):
         "interes_bruto": f"{dpf.interes_bruto:.2f}",
         "exento_rciva": moneda.codigo_iso == "BOB" and dpf.plazo_dias >= 30,
         "retencion_rciva": f"{dpf.retencion_rciva:.2f}",
-        "interes_neto": f"{dpf.interes_neto:.2f}",
+        "interes_neto": _nullable_money(dpf.interes_neto),
         "origen_fondos": dpf.origen_fondos,
         "cuenta_origen": {"id": origen.id, "numero": origen.numero} if origen else None,
         "cuenta_abono": {"id": abono.id, "numero": abono.numero},
@@ -327,7 +331,7 @@ def listar_dpf(
         "moneda": {"id": moneda.id, "codigo_iso": moneda.codigo_iso, "nombre": moneda.nombre, "simbolo": moneda.simbolo},
         "tna": f"{dpf.tasa_interes_anual:.2f}", "plazo_dias": dpf.plazo_dias,
         "fecha_inicio": dpf.fecha_inicio, "fecha_vencimiento": dpf.fecha_vencimiento,
-        "interes_neto": f"{dpf.interes_neto:.2f}", "estado": dpf.estado,
+        "interes_neto": _nullable_money(dpf.interes_neto), "estado": dpf.estado,
         "dias_para_vencer": (dpf.fecha_vencimiento - date.today()).days,
     } for dpf, socio, moneda in rows]
 
