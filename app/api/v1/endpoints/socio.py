@@ -445,7 +445,8 @@ def descargar_comprobante_socio(receipt_id: int, socio: Socio = Depends(get_curr
         ("Number", receipt.numero), ("Type", receipt.tipo), ("Date", receipt.emitido_en.isoformat()),
         ("Amount", f"{receipt.monto} {receipt.moneda}"),
         ("Source account", mask_account(source.numero if source else None) or "Unavailable"),
-        ("Destination account", mask_account(destination.numero if destination else None) or "—"),
+        # Core PDF fonts are latin-1 only; keep every rendered value ASCII-safe.
+        ("Destination account", mask_account(destination.numero if destination else None) or "-"),
         ("Verification code", receipt.codigo_verificacion),
     ):
         pdf.cell(0, 8, f"{label}: {value}", new_x="LMARGIN", new_y="NEXT")

@@ -172,6 +172,30 @@ def test_receipt_pdf_uses_real_qr_on_authenticated_route_and_hides_foreign_recei
     assert foreign.status_code == 404
 
 
+def test_payment_receipt_pdf_renders_without_destination_account(transfer_case):
+    from app.db.session import SessionLocal
+
+    client, tokens, ids = transfer_case
+    credit_id, account_id = ids["credit"], ids["accounts"][0]
+    with SessionLocal() as db:
+        db.query(models.CuentaAhorro).filter_by(id=account_id).update({"saldo_disponible": Decimal("1000.00")})
+        db.commit()
+    payment = client.post(
+        f"/api/v1/socio/creditos/{credit_id}/pagos", json={"cuenta_ahorro_id": account_id},
+        headers={"Authorization": f"Bearer {tokens['mobile']}"},
+    )
+    assert payment.status_code == 201, payment.text
+    receipt = payment.json()["comprobante"]
+    assert receipt["tipo"] == "PAGO_CUOTA" and receipt["cuenta_destino"] is None
+
+    response = client.get(
+        f"/api/v1/socio/comprobantes/{receipt['id']}/pdf",
+        headers={"Authorization": f"Bearer {tokens['mobile']}"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.content.startswith(b"%PDF")
+
+
 def test_member_detail_hides_receipts_owned_by_another_member():
     from app.api.v1.endpoints.socio import obtener_comprobante_socio
     from fastapi import HTTPException
@@ -279,6 +303,10 @@ def transfer_case():
         from app.db.session import SessionLocal
         with SessionLocal() as db:
             db.execute(text("DELETE FROM comprobante_transaccion WHERE cooperativa_id=:coop"), {"coop": ids["coop"]})
+            if ids["credit"]:
+                # Successful payments and their transactions reference each other; break the cycle first.
+                db.execute(text("UPDATE transaccion SET pago_cuota_id=NULL WHERE credito_id=:id"), {"id": ids["credit"]})
+                db.execute(delete(models.PagoCuota).where(models.PagoCuota.credito_id == ids["credit"]))
             db.execute(text("UPDATE transaccion SET transaccion_contraparte_id=NULL WHERE cuenta_ahorro_id=ANY(:ids)"), {"ids": ids["accounts"]})
             db.execute(text("DELETE FROM transaccion WHERE cuenta_ahorro_id=ANY(:ids)"), {"ids": ids["accounts"]})
             if ids["credit"]:
