@@ -47,7 +47,7 @@ PDF with the existing `fpdf2`; QR with `segno` (pure Python, writes PNG without 
 ## Tasks
 - [ ] CM-01 — Migration, models, sequence, signing/verification service, issuance inside both operations (TDD). Route: delegated (Codex). **Implementation present; strict TDD evidence incomplete, so not accepted/checked.**
 - [ ] CM-02 — Member receipt endpoints, PDF with QR, public verification page, `comprobante_id` in extract and payment lists (TDD). Route: delegated (Codex). **Implementation present; strict TDD evidence incomplete, so not accepted/checked.**
-- [ ] CM-03 — Orchestrator review, full suite, commit, native review. Route: inline (Claude).
+- [x] CM-03 — Orchestrator review, full suite, commits, and native review. Evidence: 37a8fa2 + b291e3b; receipts and mobile tests 39 passed; full suite has the same 81 pre-existing failures as `main`; native review required one correction (payment-receipt PDF returned 500 because of a non-latin-1 em dash, reproduced RED and fixed GREEN), then approved and acknowledged. Advisory `R3-signature-precision-drift` is moot because `TransferenciaCreate.monto` enforces `decimal_places=2`.
 - [ ] CM-04 — Capture real payloads as mobile fixtures. Route: inline (Claude).
 - [ ] CM-05 — Mobile: receipt screen after transfer and payment, share/download PDF, open receipt from extract and credit payments (Copilot).
 - [ ] CM-06 — Optional: "Mis comprobantes" list in Services (Copilot).
