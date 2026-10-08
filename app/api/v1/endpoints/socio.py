@@ -1,5 +1,5 @@
 """Socio self-service endpoints."""
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -8,6 +8,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.api.v1.deps import get_current_socio, get_db
+from app.core.config import settings
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.services.amortizacion import generar_plan_pagos
@@ -18,6 +19,7 @@ from app.services.credit_request_rules import (
     validate_base_credit_request,
 )
 from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, ProductoCredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
+from app.models.models import ComprobanteTransaccion
 from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut
 
 router = APIRouter()
@@ -246,8 +248,23 @@ def extracto_cuenta(
             "transaccion_id": row["id"], "fecha": row["fecha_hora"].isoformat(),
             "tipo": row["tipo"], "descripcion": row["tipo"].replace("_", " ").title(),
             "canal": row["canal"], "monto": _money(amount), "sentido": sense,
-            "saldo_resultante": _money(balance),
+            "saldo_resultante": _money(balance), "comprobante_id": None,
         })
+    transaction_ids = [movement["transaccion_id"] for movement in movements]
+    if transaction_ids:
+        receipts = db.execute(select(ComprobanteTransaccion).where(
+            ComprobanteTransaccion.socio_id == socio.id,
+            (ComprobanteTransaccion.transaccion_salida_id.in_(transaction_ids)
+             | ComprobanteTransaccion.transaccion_entrada_id.in_(transaction_ids)),
+        )).scalars().all()
+        receipt_by_transaction = {}
+        for receipt in receipts:
+            if receipt.transaccion_salida_id is not None:
+                receipt_by_transaction[receipt.transaccion_salida_id] = receipt.id
+            if receipt.transaccion_entrada_id is not None:
+                receipt_by_transaction[receipt.transaccion_entrada_id] = receipt.id
+        for movement in movements:
+            movement["comprobante_id"] = receipt_by_transaction.get(movement["transaccion_id"])
     total = len(movements)
     movements = list(reversed(movements))[offset:offset + limit]
     return {
@@ -307,7 +324,7 @@ def deuda_credito_socio(credito_id: int, socio: Socio = Depends(get_current_soci
     return _deuda_cuota_out(credit)
 
 
-@router.post("/creditos/{credito_id}/pagos", response_model=PagoOut, status_code=status.HTTP_201_CREATED)
+@router.post("/creditos/{credito_id}/pagos", response_model=PagoOut, response_model_exclude_unset=True, status_code=status.HTTP_201_CREATED)
 def pagar_cuota_socio(credito_id: int, body: dict, request: Request,
                       socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
     account_id = body.get("cuenta_ahorro_id")
@@ -317,8 +334,27 @@ def pagar_cuota_socio(credito_id: int, body: dict, request: Request,
     # cannot supply it as a query parameter or change the staff endpoint's policy.
     request.state.mobile_socio_id = socio.id
     from app.api.v1.endpoints.creditos import cobrar_cuota
+    from app.services.comprobantes_movil import issue_receipt, receipt_payload
+
+    usuario = db.get(Usuario, socio.usuario_id)
+    if usuario is None:
+        raise HTTPException(status_code=403, detail="Usuario del socio no disponible")
+
+    def issue_mobile_receipt(db_session, payment, payload, credit, installment, account, transaction_id):
+        currency = credit.moneda or credit.solicitud.moneda
+        receipt = issue_receipt(
+            db_session, receipt_type="PAGO_CUOTA", cooperative_id=socio.cooperativa_id,
+            member_id=socio.id, user_id=usuario.id, amount=payment.monto_total,
+            currency=currency.codigo_iso, source_account_id=account.id,
+            credit_id=credit.id, installment_number=installment.numero_cuota,
+            outgoing_transaction_id=transaction_id, payment_id=payment.id,
+            request=request,
+        )
+        payload["comprobante"] = receipt_payload(receipt, source_number=account.numero)
+        payload["comprobante_id"] = receipt.id
+
     return cobrar_cuota(credito_id, PagoCuotaIn(modalidad="CUENTA", cuenta_ahorro_id=account_id),
-                        request, db.get(Usuario, socio.usuario_id), db)
+                        request, usuario, db, before_commit_callback=issue_mobile_receipt)
 
 
 @router.get("/creditos/{credito_id}/pagos", response_model=list[PagoOut])
@@ -332,7 +368,89 @@ def listar_pagos_socio(credito_id: int, socio: Socio = Depends(get_current_socio
     payments = db.execute(select(PagoCuota).join(TablaAmortizacion, PagoCuota.tabla_amortizacion_id == TablaAmortizacion.id)
         .options(joinedload(PagoCuota.cuota), joinedload(PagoCuota.credito), joinedload(PagoCuota.usuario))
         .where(PagoCuota.credito_id == credit.id).order_by(PagoCuota.fecha, PagoCuota.id)).unique().scalars().all()
-    return [_pago_out(db, payment) for payment in payments]
+    results = []
+    for payment in payments:
+        item = _pago_out(db, payment)
+        receipt_id = db.execute(select(ComprobanteTransaccion.id).where(
+            ComprobanteTransaccion.socio_id == socio.id,
+            ComprobanteTransaccion.pago_cuota_id == payment.id,
+        )).scalar_one_or_none()
+        item["comprobante_id"] = receipt_id
+        results.append(item)
+    return results
+
+
+@router.get("/comprobantes")
+def listar_comprobantes_socio(
+    tipo: str | None = Query(None), desde: date | None = Query(None), hasta: date | None = Query(None),
+    socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db),
+):
+    from app.services.comprobantes_movil import receipt_payload
+
+    query = select(ComprobanteTransaccion).where(ComprobanteTransaccion.socio_id == socio.id)
+    if tipo:
+        query = query.where(ComprobanteTransaccion.tipo == tipo)
+    if desde:
+        query = query.where(ComprobanteTransaccion.emitido_en >= datetime.combine(desde, datetime.min.time(), tzinfo=timezone.utc))
+    if hasta:
+        query = query.where(ComprobanteTransaccion.emitido_en < datetime.combine(hasta + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc))
+    rows = db.execute(query.order_by(ComprobanteTransaccion.emitido_en.desc(), ComprobanteTransaccion.id.desc())).scalars().all()
+    return [_receipt_output(db, receipt, receipt_payload) for receipt in rows]
+
+
+def _receipt_output(db, receipt, payload_builder):
+    source = db.get(CuentaAhorro, receipt.cuenta_origen_id)
+    destination = db.get(CuentaAhorro, receipt.cuenta_destino_id) if receipt.cuenta_destino_id else None
+    return payload_builder(receipt, source_number=source.numero if source else "", destination_number=destination.numero if destination else None)
+
+
+@router.get("/comprobantes/{receipt_id}")
+def obtener_comprobante_socio(receipt_id: int, socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    from app.services.comprobantes_movil import receipt_payload
+
+    receipt = db.execute(select(ComprobanteTransaccion).where(
+        ComprobanteTransaccion.id == receipt_id, ComprobanteTransaccion.socio_id == socio.id,
+    )).scalar_one_or_none()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Comprobante no encontrado")
+    return _receipt_output(db, receipt, receipt_payload)
+
+
+@router.get("/comprobantes/{receipt_id}/pdf")
+def descargar_comprobante_socio(receipt_id: int, socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    from io import BytesIO
+    from fastapi.responses import Response
+    from fpdf import FPDF
+    import segno
+
+    receipt = db.execute(select(ComprobanteTransaccion).where(
+        ComprobanteTransaccion.id == receipt_id, ComprobanteTransaccion.socio_id == socio.id,
+    )).scalar_one_or_none()
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Comprobante no encontrado")
+    source = db.get(CuentaAhorro, receipt.cuenta_origen_id)
+    destination = db.get(CuentaAhorro, receipt.cuenta_destino_id) if receipt.cuenta_destino_id else None
+    from app.services.comprobantes_movil import mask_account
+    url = f"{settings.PUBLIC_API_URL.rstrip('/')}/verificacion/comprobantes/{receipt.codigo_verificacion}"
+    qr = segno.make(url)
+    qr_buffer = BytesIO()
+    qr.save(qr_buffer, kind="png", scale=4)
+    qr_buffer.seek(0)
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=15)
+    pdf.cell(0, 12, "Mobile transaction receipt", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=10)
+    for label, value in (
+        ("Number", receipt.numero), ("Type", receipt.tipo), ("Date", receipt.emitido_en.isoformat()),
+        ("Amount", f"{receipt.monto} {receipt.moneda}"),
+        ("Source account", mask_account(source.numero if source else None) or "Unavailable"),
+        ("Destination account", mask_account(destination.numero if destination else None) or "—"),
+        ("Verification code", receipt.codigo_verificacion),
+    ):
+        pdf.cell(0, 8, f"{label}: {value}", new_x="LMARGIN", new_y="NEXT")
+    pdf.image(qr_buffer, x=10, y=pdf.get_y() + 4, w=30, h=30)
+    return Response(bytes(pdf.output()), media_type="application/pdf", headers={"Content-Disposition": f'inline; filename="{receipt.numero}.pdf"'})
 
 
 @router.get("/dpf")

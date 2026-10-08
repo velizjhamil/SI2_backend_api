@@ -61,6 +61,9 @@ def socio_case():
             yield {"token": token, "staff_token": staff_token, "socio": member.id, "account": account.id, "ids": ids}
     finally:
         with SessionLocal() as db:
+            member_ids = [value for value in (ids["socio"], ids["foreign_socio"]) if value is not None]
+            if member_ids:
+                db.execute(delete(models.ComprobanteTransaccion).where(models.ComprobanteTransaccion.socio_id.in_(member_ids)))
             if ids["credits"]:
                 db.execute(text("UPDATE pago_cuota SET transaccion_id=NULL WHERE credito_id = ANY(:ids)"), {"ids": ids["credits"]})
                 db.execute(text("DELETE FROM transaccion WHERE credito_id = ANY(:ids)"), {"ids": ids["credits"]})
@@ -360,9 +363,14 @@ def test_mobile_payment_uses_movil_channel_and_own_user(socio_case):
         response = client.post(f"/api/v1/socio/creditos/{socio_case['ids']['credits'][0]}/pagos", json={"cuenta_ahorro_id": socio_case["account"]}, headers=auth(socio_case))
     assert response.status_code == 201, response.text
     assert response.json()["total"] == "510.00"
+    assert response.json()["comprobante"]["tipo"] == "PAGO_CUOTA"
+    assert response.json()["comprobante"]["canal"] == "MOVIL"
+    assert response.json()["comprobante"]["cuenta_origen"].startswith("****")
+    assert response.json()["comprobante_id"] == response.json()["comprobante"]["id"]
     with TestClient(app) as client:
         history = client.get(f"/api/v1/socio/creditos/{socio_case['ids']['credits'][0]}/pagos", headers=auth(socio_case))
     assert history.status_code == 200, history.text
+    assert history.json()[0]["comprobante_id"] == response.json()["comprobante_id"]
     assert [row["id"] for row in history.json()] == [response.json()["id"]]
     with SessionLocal() as db:
         pago = db.query(models.PagoCuota).filter_by(id=response.json()["id"]).one()

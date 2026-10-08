@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.v1.deps import get_current_socio, get_current_user, get_db, require_operaciones
 from app.core.bitacora import registrar_accion
 from app.models.models import CertificadoAportacion, CuentaAhorro, Moneda, Socio, Usuario
+from app.services.comprobantes_movil import issue_receipt, receipt_payload
 from app.schemas.schemas import (
     CertificadoAportacionCreate,
     CertificadoAportacionOut,
@@ -488,6 +489,7 @@ def _registrar_transferencia(
 @router.post(
     "/transferencias",
     response_model=TransferenciaOut,
+    response_model_exclude_unset=True,
     status_code=status.HTTP_201_CREATED,
     summary="Transferir saldo entre cuentas propias",
 )
@@ -532,6 +534,18 @@ def transferir_entre_cuentas_propias(
         usuario=usuario,
         request=request,
     )
+    receipt_data = None
+    if usuario.rol is not None and usuario.rol.nombre == "SOCIO":
+        receipt = issue_receipt(
+            db, receipt_type="TRANSFERENCIA", cooperative_id=socio.cooperativa_id,
+            member_id=socio.id, user_id=usuario.id, amount=body.monto,
+            currency=cuenta_origen.moneda.codigo_iso, source_account_id=cuenta_origen.id,
+            destination_account_id=cuenta_destino.id, outgoing_transaction_id=salida_id,
+            incoming_transaction_id=entrada_id, description=body.glosa, request=request,
+        )
+        receipt_data = receipt_payload(
+            receipt, source_number=cuenta_origen.numero, destination_number=cuenta_destino.numero
+        )
     db.commit()
 
     cuenta_origen_out = db.execute(
@@ -541,7 +555,7 @@ def transferir_entre_cuentas_propias(
         select(CuentaAhorro).options(joinedload(CuentaAhorro.moneda)).where(CuentaAhorro.id == cuenta_destino.id)
     ).scalar_one()
 
-    return TransferenciaOut(
+    result = TransferenciaOut(
         transaccion_salida_id=salida_id,
         transaccion_entrada_id=entrada_id,
         cuenta_origen=CuentaAhorroOut.model_validate(cuenta_origen_out),
@@ -550,3 +564,6 @@ def transferir_entre_cuentas_propias(
         glosa=body.glosa,
         fecha_hora=fecha_hora,
     )
+    if receipt_data is not None:
+        result.comprobante = receipt_data
+    return result

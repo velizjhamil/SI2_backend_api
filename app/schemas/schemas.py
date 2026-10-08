@@ -767,6 +767,8 @@ class PagoOut(BaseModel):
     caja_nombre: str | None
     usuario: UsuarioDesembolsoOut | None
     declaracion_uif_id: int | None
+    comprobante: dict | None = None
+    comprobante_id: int | None = None
 
 
 class MoraCreditoOut(BaseModel):
@@ -1215,6 +1217,7 @@ class TransferenciaOut(BaseModel):
     monto: Decimal
     glosa: str | None = None
     fecha_hora: datetime
+    comprobante: dict | None = None
 
 
 class DPFCreate(BaseModel):

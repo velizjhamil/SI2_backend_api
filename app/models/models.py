@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Integer,
     Index,
+    PrimaryKeyConstraint,
     SmallInteger,
     String,
     Table,
@@ -193,6 +194,50 @@ class Backup(Base):
     iniciado_en = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
     finalizado_en = mapped_column(TIMESTAMP(timezone=True))
     usuario: Mapped["Usuario | None"] = relationship()
+
+
+class ComprobanteSecuencia(Base):
+    __tablename__ = "comprobante_secuencia"
+    __table_args__ = (PrimaryKeyConstraint("cooperativa_id", "tipo", "anio"),)
+
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    anio: Mapped[int] = mapped_column(Integer, nullable=False)
+    ultimo: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class ComprobanteTransaccion(Base):
+    __tablename__ = "comprobante_transaccion"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "numero", name="uq_comprobante_transaccion_numero"),
+        UniqueConstraint("codigo_verificacion", name="uq_comprobante_codigo_verificacion"),
+        CheckConstraint("tipo IN ('TRANSFERENCIA', 'PAGO_CUOTA')", name="ck_comprobante_tipo"),
+        CheckConstraint("canal = 'MOVIL'", name="ck_comprobante_canal"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    numero: Mapped[str] = mapped_column(String(32), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    canal: Mapped[str] = mapped_column(String(10), nullable=False, default="MOVIL")
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    monto = mapped_column(Numeric(14, 2), nullable=False)
+    moneda: Mapped[str] = mapped_column(String(10), nullable=False)
+    cuenta_origen_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cuenta_destino_id: Mapped[int | None] = mapped_column(BigInteger)
+    credito_id: Mapped[int | None] = mapped_column(Integer)
+    numero_cuota: Mapped[int | None] = mapped_column(Integer)
+    transaccion_salida_id: Mapped[int | None] = mapped_column(BigInteger)
+    transaccion_entrada_id: Mapped[int | None] = mapped_column(BigInteger)
+    pago_cuota_id: Mapped[int | None] = mapped_column(Integer)
+    glosa: Mapped[str | None] = mapped_column(Text)
+    emitido_en = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    codigo_verificacion: Mapped[str] = mapped_column(String(24), nullable=False)
+    firma: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    cooperativa: Mapped["Cooperativa"] = relationship()
+    socio: Mapped["Socio"] = relationship()
 
 
 class Reporte(Base):

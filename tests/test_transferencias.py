@@ -124,6 +124,7 @@ def abrir_cuenta(client, admin_token, socio_id, *, moneda_id=1, monto="100.00", 
 
 def cleanup(socio_id, usuario_id, cuenta_ids):
     with SessionLocal() as db:
+        db.execute(text("DELETE FROM comprobante_transaccion WHERE socio_id = :id"), {"id": socio_id})
         if cuenta_ids:
             db.execute(
                 text(
@@ -359,6 +360,9 @@ def test_transferencia_exitosa_actualiza_ambos_saldos(client):
         assert body["cuenta_destino"]["saldo_disponible"] == "50.00"
         assert body["monto"] == "30.00"
         assert body["transaccion_salida_id"] != body["transaccion_entrada_id"]
+        assert body["comprobante"]["tipo"] == "TRANSFERENCIA"
+        assert body["comprobante"]["canal"] == "MOVIL"
+        assert body["comprobante"]["cuenta_origen"].startswith("****")
     finally:
         cleanup(socio_id, usuario_id, [origen_id, destino_id])
 

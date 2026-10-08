@@ -1,4 +1,5 @@
 import os
+import logging
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -23,6 +24,9 @@ class Settings(BaseSettings):
     BACKUP_SIGNED_URL_SECONDS: int = 300
     PG_MAJOR: int = 17
 
+    COMPROBANTE_SIGNING_KEY: str = "development-only-receipt-key-change-before-production"
+    PUBLIC_API_URL: str = "http://localhost:8000/api/v1"
+
     # ── Envío de correo (Brevo, API HTTPS) ──
     # SMTP directo no funciona desde Render: el hosting bloquea el tráfico
     # saliente hacia puertos SMTP (465/587) a nivel de red ("Network is
@@ -42,3 +46,7 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 settings = Settings()
+if settings.COMPROBANTE_SIGNING_KEY.startswith("development-only-"):
+    logging.getLogger(__name__).warning(
+        "COMPROBANTE_SIGNING_KEY is using the development default; configure a production secret before deployment"
+    )

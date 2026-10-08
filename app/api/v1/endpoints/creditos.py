@@ -1,6 +1,7 @@
 """Cooperative credit-product catalog (CU-W20)."""
 
 import re
+from collections.abc import Callable
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime
 
@@ -99,6 +100,11 @@ ESTADOS_SOLICITUD = {
 ESTADOS_EDITABLES_SOLICITUD = {"PENDIENTE", "OBSERVADA"}
 VOTOS_COMITE_REQUERIDOS = 3
 ROLES_VOTANTES_COMITE = {"ADMINISTRADOR", "OFICIAL_CREDITO", "CONTADOR"}
+
+
+def _no_mobile_receipt_callback():
+    """Only trusted in-process mobile callers may pass a receipt callback."""
+    return None
 
 
 def _estado_despues_evaluacion(dictamen: str, monto: Decimal, limite_directo: Decimal) -> str:
@@ -2104,6 +2110,7 @@ def _pago_out(db: Session, pago: PagoCuota) -> dict:
 @router.post(
     "/creditos/{credito_id}/pagos",
     response_model=PagoOut,
+    response_model_exclude_unset=True,
     status_code=status.HTTP_201_CREATED,
 )
 def cobrar_cuota(
@@ -2112,6 +2119,7 @@ def cobrar_cuota(
     request: Request,
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
+    before_commit_callback: Callable | None = Depends(_no_mobile_receipt_callback),
 ):
     mobile_socio_id = getattr(request.state, "mobile_socio_id", None)
     if usuario.cooperativa_id is None:
@@ -2284,6 +2292,12 @@ def cobrar_cuota(
     )
     db.flush()
     payload = _pago_out(db, pago)
+    if callable(before_commit_callback):
+        try:
+            before_commit_callback(db, pago, payload, credito, cuota, cuenta, transaction_id)
+        except Exception:
+            db.rollback()
+            raise
     db.commit()
     return payload
 
