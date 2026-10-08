@@ -247,3 +247,31 @@ Configurado en `main.py`.
 ## 📄 Licencia
 
 Proyecto académico — SI2 / UAGRM.
+
+## Database backups
+
+Backups are full PostgreSQL custom-format dumps, stored in a private Supabase Storage bucket. SUPERADMIN users can start and inspect manual backups through `/api/v1/backups`; GitHub Actions triggers the daily automatic backup. The backend host's filesystem is temporary and is never the backup destination.
+
+### Render and Supabase setup
+
+1. Switch the Render web service to **Docker** deployment so the image installs `pg_dump`.
+2. Create a **private** Supabase Storage bucket (default name: `backups`).
+3. Configure Render environment variables:
+   - `BACKUP_DATABASE_URL`: direct or session-mode PostgreSQL connection URL; when omitted, `DATABASE_URL` is used. Prefer a direct connection for large dumps.
+   - `SUPABASE_URL` and `SUPABASE_SERVICE_KEY`: project URL and server-only service-role key. Never expose the key in a client or logs.
+   - Optional: `BACKUP_BUCKET` (`backups`), `BACKUP_RETENTION_AUTOMATIC` (`7`), `BACKUP_STALE_MINUTES` (`60`), `BACKUP_SIGNED_URL_SECONDS` (`300`), and `PG_MAJOR` (`17`, set as a Docker build argument when changing the installed client major).
+   - `BACKUP_CRON_TOKEN`: a long random secret shared only with the workflow below.
+4. Apply `migrations/030_backups.sql` through the project's normal migration process before deploying the backup endpoints.
+5. Add GitHub Actions repository secrets `BACKUP_API_URL` (the backend origin, without the API path) and `BACKUP_CRON_TOKEN` (the same value configured in Render). Run **Scheduled database backup** manually once and confirm the run succeeds.
+
+The workflow runs daily at 06:00 UTC (02:00 Bolivia time). It retries transient failures to allow a sleeping Render instance to cold-start. A scheduled trigger returns `202` when accepted; inspect the SUPERADMIN backup list for the final state.
+
+### Manual restore
+
+Download the completed dump from the SUPERADMIN signed-download endpoint. Restore it out of the application using PostgreSQL client tools, after verifying the target database and making a separate copy of any data that must be retained:
+
+```sh
+pg_restore --clean --if-exists --no-owner --no-acl --dbname="$RESTORE_DATABASE_URL" si2_backup.dump
+```
+
+Restoration is deliberately an operator-run procedure, not an application endpoint. Treat the downloaded dump and database URL as sensitive.

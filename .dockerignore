@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.env
+.env.*
+bd.sql
+tests
+odd
+migrations
+README.md
+inspect_db.py
+inspect_socio.py

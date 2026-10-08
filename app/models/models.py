@@ -179,6 +179,22 @@ class Bitacora(Base):
     usuario: Mapped["Usuario"] = relationship(back_populates="bitacoras")
 
 
+class Backup(Base):
+    __tablename__ = "backup"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tipo: Mapped[str] = mapped_column(String(12), nullable=False)
+    estado: Mapped[str] = mapped_column(String(12), nullable=False)
+    archivo: Mapped[str | None] = mapped_column(Text)
+    tamano_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64))
+    error: Mapped[str | None] = mapped_column(Text)
+    usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    iniciado_en = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    finalizado_en = mapped_column(TIMESTAMP(timezone=True))
+    usuario: Mapped["Usuario | None"] = relationship()
+
+
 class Reporte(Base):
     __tablename__ = "reporte"
 

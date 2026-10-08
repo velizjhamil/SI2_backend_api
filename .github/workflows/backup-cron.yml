@@ -1,0 +1,25 @@
+name: Scheduled database backup
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Trigger backend backup
+        env:
+          BACKUP_API_URL: ${{ secrets.BACKUP_API_URL }}
+          BACKUP_CRON_TOKEN: ${{ secrets.BACKUP_CRON_TOKEN }}
+        run: |
+          set -eu
+          test -n "$BACKUP_API_URL"
+          test -n "$BACKUP_CRON_TOKEN"
+          curl --fail-with-body --silent --show-error \
+            --retry 15 --retry-all-errors --retry-delay 30 --retry-max-time 900 \
+            --request POST \
+            --header "X-Backup-Token: $BACKUP_CRON_TOKEN" \
+            "$BACKUP_API_URL/api/v1/backups/automatico"

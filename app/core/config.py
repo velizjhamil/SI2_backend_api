@@ -13,6 +13,16 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql://yimysito:tarqui231B@localhost:5433/cooperativa_db"
 
+    BACKUP_DATABASE_URL: str = ""
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_KEY: str = ""
+    BACKUP_BUCKET: str = "backups"
+    BACKUP_CRON_TOKEN: str = ""
+    BACKUP_RETENTION_AUTOMATIC: int = 7
+    BACKUP_STALE_MINUTES: int = 60
+    BACKUP_SIGNED_URL_SECONDS: int = 300
+    PG_MAJOR: int = 17
+
     # ── Envío de correo (Brevo, API HTTPS) ──
     # SMTP directo no funciona desde Render: el hosting bloquea el tráfico
     # saliente hacia puertos SMTP (465/587) a nivel de red ("Network is
