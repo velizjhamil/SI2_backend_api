@@ -4958,3 +4958,303 @@ UPDATE credito
  WHERE estado = 'EN_MORA';
 
 COMMIT;
+
+
+
+
+-- CU-W23 synthetic business baseline for manual application by an authorized database operator after restore.
+-- Data-only seed migration; this project does not auto-run migration files. Transactionally idempotent.
+-- It never creates an offer or invokes an API. Apply once; avoid running duplicate copies unnecessarily.
+-- Requires the existing, active cooperative named exactly 'Cooperativa de Prueba SI2' and an existing active
+-- credit officer/admin plus an active Socio linked to an active SOCIO user in that cooperative.
+-- Six on-time installments pay 750.00 of 1000.00 principal, leaving a VIGENTE credit balance of 250.00.
+BEGIN;
+
+DO $$
+DECLARE
+    v_coop_id bigint;
+    v_actor_id bigint;
+    v_actor_login text;
+    v_actor_role_id smallint;
+    v_actor_role text;
+    v_member_id bigint;
+    v_member_user_id bigint;
+    v_currency_id smallint;
+    v_product_id integer;
+    v_evaluation_id integer;
+    v_request_id integer;
+    v_credit_id integer;
+    v_installment_id integer;
+    v_row_count integer;
+    v_number integer;
+    v_due_date date;
+    v_paid boolean;
+    v_receipt text;
+BEGIN
+    SELECT count(*) INTO v_row_count FROM cooperativa WHERE nombre = 'Cooperativa de Prueba SI2';
+    IF v_row_count <> 1 THEN
+        RAISE EXCEPTION 'Expected exactly one existing cooperative named Cooperativa de Prueba SI2; no fixture rows were added';
+    END IF;
+    SELECT id INTO v_coop_id FROM cooperativa WHERE nombre = 'Cooperativa de Prueba SI2' AND estado = 'ACTIVO';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Existing cooperative Cooperativa de Prueba SI2 is not active';
+    END IF;
+
+    SELECT u.id, u.correo, u.rol_id, r.nombre INTO v_actor_id, v_actor_login, v_actor_role_id, v_actor_role
+    FROM usuario u JOIN rol r ON r.id = u.rol_id
+    WHERE u.cooperativa_id = v_coop_id AND u.estado = 'ACTIVO'
+      AND r.nombre IN ('OFICIAL_CREDITO', 'ADMINISTRADOR')
+    ORDER BY CASE WHEN r.nombre = 'OFICIAL_CREDITO' THEN 0 ELSE 1 END, u.id
+    LIMIT 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'No active OFICIAL_CREDITO or ADMINISTRADOR exists in Cooperativa de Prueba SI2';
+    END IF;
+
+    SELECT s.id, s.usuario_id INTO v_member_id, v_member_user_id
+    FROM socio s
+    JOIN usuario u ON u.id = s.usuario_id
+    JOIN rol r ON r.id = u.rol_id
+    WHERE s.cooperativa_id = v_coop_id AND s.estado = 'ACTIVO'
+      AND u.cooperativa_id = v_coop_id AND u.estado = 'ACTIVO' AND r.nombre = 'SOCIO'
+    ORDER BY s.id
+    LIMIT 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'No active Socio linked to an active SOCIO user exists in Cooperativa de Prueba SI2';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM oferta_recredito
+               WHERE socio_id = v_member_id AND estado = 'VIGENTE'
+                 AND fecha_vencimiento >= CURRENT_DATE) THEN
+        RAISE EXCEPTION 'Selected member already has a current offer; refusing to seed an ineligible demo';
+    END IF;
+    IF EXISTS (SELECT 1 FROM solicitud_credito
+               WHERE socio_id = v_member_id
+                 AND estado IN ('PENDIENTE', 'OBSERVADA', 'EN_EVALUACION', 'EN_COMITE')) THEN
+        RAISE EXCEPTION 'Selected member has a credit request in progress; refusing to seed an ineligible demo';
+    END IF;
+    IF EXISTS (SELECT 1 FROM morosidad m JOIN credito c ON c.id = m.credito_id
+               WHERE c.socio_id = v_member_id AND m.estado = 'EN_MORA') THEN
+        RAISE EXCEPTION 'Selected member has active delinquency; refusing to seed an ineligible demo';
+    END IF;
+
+    SELECT id INTO STRICT v_currency_id FROM moneda WHERE codigo_iso = 'BOB';
+
+    SELECT count(*) INTO v_row_count FROM producto_credito
+    WHERE cooperativa_id = v_coop_id AND codigo = 'CUW23DEMO';
+    IF v_row_count > 1 THEN
+        RAISE EXCEPTION 'CU-W23 product natural key is ambiguous';
+    ELSIF v_row_count = 1 THEN
+        SELECT id INTO v_product_id FROM producto_credito
+        WHERE cooperativa_id = v_coop_id AND codigo = 'CUW23DEMO';
+        IF NOT EXISTS (
+            SELECT 1 FROM producto_credito
+            WHERE id = v_product_id AND nombre = 'CU-W23 synthetic demo product'
+              AND moneda_id = v_currency_id AND monto_min = 100.00 AND monto_max = 5000.00
+              AND plazo_min_meses = 6 AND plazo_max_meses = 18 AND tasa_interes_anual = 12.00
+              AND tipo_amortizacion = 'FRANCES' AND dias_gracia_mora = 5
+              AND tasa_mora_anual = 0.00 AND relacion_cuota_ingreso_max = 80.00
+              AND requiere_garantia = false AND estado = 'ACTIVO'
+        ) THEN
+            RAISE EXCEPTION 'CU-W23 product marker conflicts with expected baseline values';
+        END IF;
+    ELSE
+        INSERT INTO producto_credito (
+            cooperativa_id, codigo, nombre, moneda_id, monto_min, monto_max,
+            plazo_min_meses, plazo_max_meses, tasa_interes_anual, tipo_amortizacion,
+            dias_gracia_mora, tasa_mora_anual, relacion_cuota_ingreso_max,
+            requiere_garantia, estado
+        ) VALUES (
+            v_coop_id, 'CUW23DEMO', 'CU-W23 synthetic demo product', v_currency_id,
+            100.00, 5000.00, 6, 18, 12.00, 'FRANCES', 5, 0.00, 80.00, false, 'ACTIVO'
+        ) RETURNING id INTO v_product_id;
+    END IF;
+
+    SELECT count(*) INTO v_row_count FROM evaluacion_campo e
+    JOIN socio s ON s.id = e.socio_id
+    WHERE s.cooperativa_id = v_coop_id AND e.observaciones = 'CUW23-DEMO-FIXTURE';
+    IF v_row_count > 1 THEN
+        RAISE EXCEPTION 'CU-W23 field-evaluation marker conflicts with another evaluation in Cooperativa de Prueba SI2';
+    ELSIF v_row_count = 1 THEN
+        SELECT e.id INTO v_evaluation_id FROM evaluacion_campo e
+        JOIN socio s ON s.id = e.socio_id
+        WHERE s.cooperativa_id = v_coop_id AND e.usuario_id = v_actor_id
+          AND e.socio_id = v_member_id AND e.observaciones = 'CUW23-DEMO-FIXTURE';
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'CU-W23 field-evaluation marker belongs to a conflicting member or actor';
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM evaluacion_campo
+            WHERE id = v_evaluation_id AND fecha = DATE '2026-10-04'
+              AND ingreso_mensual = 6000.00 AND egreso_mensual = 1000.00
+              AND cuota_deudas_mensual = 0.00 AND capacidad_pago = 5000.00
+              AND actividad_economica = 'Demo' AND fuente_ingresos = 'INDEPENDIENTE'
+              AND antiguedad_laboral_meses = 36 AND calificacion_asfi = 'A'
+        ) THEN
+            RAISE EXCEPTION 'CU-W23 evaluation marker conflicts with expected baseline values';
+        END IF;
+    ELSE
+        INSERT INTO evaluacion_campo (
+            ingreso_mensual, egreso_mensual, capacidad_pago, fecha, usuario_id, socio_id,
+            cuota_deudas_mensual, actividad_economica, fuente_ingresos,
+            antiguedad_laboral_meses, calificacion_asfi, observaciones
+        ) VALUES (
+            6000.00, 1000.00, 5000.00, DATE '2026-10-04', v_actor_id, v_member_id,
+            0.00, 'Demo', 'INDEPENDIENTE', 36, 'A', 'CUW23-DEMO-FIXTURE'
+        ) RETURNING id INTO v_evaluation_id;
+    END IF;
+
+    SELECT count(*) INTO v_row_count FROM solicitud_credito
+    WHERE cooperativa_id = v_coop_id AND numero_solicitud = 'CUW23-DEMO-SOURCE';
+    IF v_row_count > 1 THEN
+        RAISE EXCEPTION 'CU-W23 source-request natural key is ambiguous';
+    ELSIF v_row_count = 1 THEN
+        SELECT id INTO v_request_id FROM solicitud_credito
+        WHERE cooperativa_id = v_coop_id AND numero_solicitud = 'CUW23-DEMO-SOURCE';
+        IF NOT EXISTS (
+            SELECT 1 FROM solicitud_credito
+            WHERE id = v_request_id AND monto = 1000.00 AND plazo_meses = 9
+              AND tasa_interes = 12.00 AND calificacion_asfi = 'A' AND tiene_deudas = false
+              AND estado = 'DESEMBOLSADO' AND socio_id = v_member_id AND usuario_id = v_actor_id
+              AND evaluacion_campo_id = v_evaluation_id AND producto_credito_id = v_product_id
+              AND destino = 'OTRO' AND moneda_id = v_currency_id
+        ) THEN
+            RAISE EXCEPTION 'CU-W23 source-request marker conflicts with expected baseline values';
+        END IF;
+    ELSE
+        INSERT INTO solicitud_credito (
+            monto, plazo_meses, tasa_interes, calificacion_asfi, tiene_deudas, estado,
+            socio_id, usuario_id, evaluacion_campo_id, producto_credito_id,
+            numero_solicitud, destino, moneda_id, cooperativa_id
+        ) VALUES (
+            1000.00, 9, 12.00, 'A', false, 'DESEMBOLSADO', v_member_id, v_actor_id,
+            v_evaluation_id, v_product_id, 'CUW23-DEMO-SOURCE', 'OTRO', v_currency_id, v_coop_id
+        ) RETURNING id INTO v_request_id;
+    END IF;
+
+    SELECT count(*) INTO v_row_count FROM credito
+    WHERE cooperativa_id = v_coop_id AND numero_credito = 'CUW23-DEMO-CREDIT';
+    IF v_row_count > 1 THEN
+        RAISE EXCEPTION 'CU-W23 credit natural key is ambiguous';
+    ELSIF v_row_count = 1 THEN
+        SELECT id INTO v_credit_id FROM credito
+        WHERE cooperativa_id = v_coop_id AND numero_credito = 'CUW23-DEMO-CREDIT';
+        IF NOT EXISTS (
+            SELECT 1 FROM credito
+            WHERE id = v_credit_id AND monto_aprobado = 1000.00 AND saldo_pendiente = 250.00
+              AND estado = 'VIGENTE' AND solicitud_credito_id = v_request_id
+              AND socio_id = v_member_id AND producto_credito_id = v_product_id
+              AND moneda_id = v_currency_id AND tasa_interes = 12.00 AND plazo_meses = 9
+              AND tipo_amortizacion = 'FRANCES' AND usuario_id = v_actor_id
+        ) THEN
+            RAISE EXCEPTION 'CU-W23 credit marker conflicts with expected baseline values';
+        END IF;
+    ELSE
+        INSERT INTO credito (
+            monto_aprobado, saldo_pendiente, estado, solicitud_credito_id,
+            numero_credito, cooperativa_id, socio_id, producto_credito_id,
+            moneda_id, tasa_interes, plazo_meses, tipo_amortizacion, usuario_id
+        ) VALUES (
+            1000.00, 250.00, 'VIGENTE', v_request_id, 'CUW23-DEMO-CREDIT',
+            v_coop_id, v_member_id, v_product_id, v_currency_id, 12.00, 9, 'FRANCES', v_actor_id
+        ) RETURNING id INTO v_credit_id;
+    END IF;
+
+    FOR v_number IN 1..9 LOOP
+        v_due_date := (ARRAY[DATE '2026-01-31', DATE '2026-02-28', DATE '2026-03-31',
+            DATE '2026-04-30', DATE '2026-05-31', DATE '2026-06-30', DATE '2026-07-31',
+            DATE '2026-08-31', DATE '2026-09-30'])[v_number];
+        v_paid := v_number <= 6;
+        SELECT count(*) INTO v_row_count FROM tabla_amortizacion
+        WHERE credito_id = v_credit_id AND numero_cuota = v_number;
+        IF v_row_count > 1 THEN
+            RAISE EXCEPTION 'Duplicate CU-W23 installment number %', v_number;
+        ELSIF v_row_count = 1 THEN
+            SELECT id INTO v_installment_id FROM tabla_amortizacion
+            WHERE credito_id = v_credit_id AND numero_cuota = v_number;
+            IF NOT EXISTS (
+                SELECT 1 FROM tabla_amortizacion
+                WHERE id = v_installment_id AND fecha_vencimiento = v_due_date
+                  AND monto_capital = 125.00 AND monto_interes = 10.00 AND monto_cuota_total = 135.00
+                  AND estado_pago = CASE WHEN v_paid THEN 'PAGADA' ELSE 'PENDIENTE' END
+                  AND monto_pagado = CASE WHEN v_paid THEN 135.00 ELSE 0.00 END
+                  AND saldo_inicial = 1000.00 - 125.00 * (v_number - 1)
+                  AND saldo_final = 1000.00 - 125.00 * v_number
+                  AND fecha_pago IS NOT DISTINCT FROM
+                      CASE WHEN v_paid THEN v_due_date::timestamp AT TIME ZONE 'UTC'
+                           ELSE NULL::timestamptz END
+            ) THEN
+                RAISE EXCEPTION 'CU-W23 installment % conflicts with expected values', v_number;
+            END IF;
+        ELSE
+            INSERT INTO tabla_amortizacion (
+                numero_cuota, fecha_vencimiento, monto_capital, monto_interes, monto_cuota_total,
+                estado_pago, credito_id, saldo_inicial, saldo_final, monto_pagado, fecha_pago
+            ) VALUES (
+                v_number, v_due_date, 125.00, 10.00, 135.00,
+                CASE WHEN v_paid THEN 'PAGADA' ELSE 'PENDIENTE' END, v_credit_id,
+                1000.00 - 125.00 * (v_number - 1), 1000.00 - 125.00 * v_number,
+                CASE WHEN v_paid THEN 135.00 ELSE 0.00 END,
+                CASE WHEN v_paid THEN v_due_date::timestamp AT TIME ZONE 'UTC' ELSE NULL END
+            ) RETURNING id INTO v_installment_id;
+        END IF;
+
+        IF v_paid THEN
+            v_receipt := 'CUW23-DEMO-PMT-' || lpad(v_number::text, 2, '0');
+            SELECT count(*) INTO v_row_count FROM pago_cuota
+            WHERE cooperativa_id = v_coop_id AND numero_recibo = v_receipt;
+            IF v_row_count > 1 THEN
+                RAISE EXCEPTION 'CU-W23 payment receipt % is ambiguous', v_receipt;
+            ELSIF v_row_count = 1 THEN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pago_cuota p
+                    JOIN tabla_amortizacion t ON t.id = p.tabla_amortizacion_id
+                    WHERE p.cooperativa_id = v_coop_id AND p.numero_recibo = v_receipt
+                      AND p.credito_id = v_credit_id AND t.credito_id = v_credit_id
+                      AND t.numero_cuota = v_number AND p.monto_capital = 125.00
+                      AND p.monto_interes_pagado = 10.00 AND p.monto_total = 135.00
+                      AND p.dias_atraso = 0 AND p.usuario_id = v_actor_id
+                ) THEN
+                    RAISE EXCEPTION 'CU-W23 payment receipt % conflicts with expected values', v_receipt;
+                END IF;
+            ELSE
+                SELECT id INTO v_installment_id FROM tabla_amortizacion
+                WHERE credito_id = v_credit_id AND numero_cuota = v_number;
+                INSERT INTO pago_cuota (
+                    monto_capital, monto_interes_pagado, tabla_amortizacion_id, credito_id,
+                    cooperativa_id, numero_recibo, modalidad, monto_total, dias_atraso, usuario_id
+                ) VALUES (
+                    125.00, 10.00, v_installment_id, v_credit_id, v_coop_id,
+                    v_receipt, 'EFECTIVO', 135.00, 0, v_actor_id
+                );
+            END IF;
+        END IF;
+    END LOOP;
+
+    IF EXISTS (SELECT 1 FROM tabla_amortizacion
+               WHERE credito_id = v_credit_id AND numero_cuota NOT BETWEEN 1 AND 9) THEN
+        RAISE EXCEPTION 'Unexpected installment linked to CU-W23 credit';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM pago_cuota
+        WHERE credito_id = v_credit_id
+          AND (numero_recibo IS NULL OR numero_recibo NOT LIKE 'CUW23-DEMO-PMT-%')
+    ) THEN
+        RAISE EXCEPTION 'Unexpected non-fixture repayment is linked to the CU-W23 credit';
+    END IF;
+    IF (SELECT count(*) FROM pago_cuota
+        WHERE credito_id = v_credit_id AND numero_recibo LIKE 'CUW23-DEMO-PMT-%') <> 6
+       OR (SELECT coalesce(sum(monto_capital), 0) FROM pago_cuota
+           WHERE credito_id = v_credit_id AND numero_recibo LIKE 'CUW23-DEMO-PMT-%') < 700.00
+       OR EXISTS (SELECT 1 FROM pago_cuota
+                  WHERE credito_id = v_credit_id AND numero_recibo LIKE 'CUW23-DEMO-PMT-%'
+                    AND dias_atraso <> 0) THEN
+        RAISE EXCEPTION 'CU-W23 fixture repayments do not satisfy on-time 70 percent eligibility';
+    END IF;
+
+    RAISE NOTICE 'CU-W23 business baseline ready in %, selected actor role % id % login %, existing member id %, source request %, VIGENTE credit % with six on-time installments; no offer created.',
+        'Cooperativa de Prueba SI2', v_actor_role, v_actor_id, v_actor_login, v_member_id, v_request_id, v_credit_id;
+END
+$$;
+
+COMMIT;
