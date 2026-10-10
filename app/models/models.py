@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -68,6 +69,9 @@ class Cooperativa(Base):
     )
 
     usuarios: Mapped[list["Usuario"]] = relationship(back_populates="cooperativa")
+    suscripcion: Mapped["Suscripcion | None"] = relationship(
+        back_populates="cooperativa", uselist=False
+    )
 
     @property
     def esta_activa(self) -> bool:
@@ -1147,3 +1151,100 @@ class ParametroContable(Base):
     cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
     clave: Mapped[str] = mapped_column(String(40), nullable=False)
     plan_cuenta_id: Mapped[int] = mapped_column(Integer, ForeignKey("plan_cuenta.id"), nullable=False)
+
+
+class PlanSuscripcion(Base):
+    """Catálogo de planes de suscripción institucional (SaaS).
+
+    Es la fuente de verdad de las capacidades que el frontend muestra en la
+    tarjeta/badge de suscripción. Las cooperativas quedan ligadas a un plan
+    mediante la tabla `suscripcion`.
+    """
+
+    __tablename__ = "plan_suscripcion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    codigo: Mapped[str] = mapped_column(String(50), nullable=False)
+    nombre: Mapped[str] = mapped_column(String(120), nullable=False)
+    descripcion: Mapped[str | None] = mapped_column(Text)
+    features: Mapped[list | None] = mapped_column(JSONB)
+    incluye: Mapped[list | None] = mapped_column(JSONB)
+    precio_mensual: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2), nullable=False, default=Decimal("0.00"), server_default="0.00"
+    )
+    moneda: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="BOB", server_default="BOB"
+    )
+    limite_usuarios: Mapped[int | None] = mapped_column(Integer)
+    estado: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="ACTIVO", server_default="ACTIVO"
+    )
+    fecha_creacion = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("codigo", name="uq_plan_suscripcion_codigo"),
+        CheckConstraint(
+            "estado IN ('ACTIVO','INACTIVO')",
+            name="chk_plan_suscripcion_estado",
+        ),
+    )
+
+    suscripciones: Mapped[list["Suscripcion"]] = relationship(back_populates="plan")
+
+
+class Suscripcion(Base):
+    """Suscripción de una cooperativa (tenant) a un plan institucional.
+
+    Relación uno-a-uno con `cooperativa`: cada tenant tiene a lo sumo una
+    suscripción vigente o histórica. El estado controla el acceso y el ciclo
+    de vida (ACTIVA, SUSPENDIDA, VENCIDA, CANCELADA).
+    """
+
+    __tablename__ = "suscripcion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("cooperativa.id", ondelete="CASCADE"), nullable=False
+    )
+    plan_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("plan_suscripcion.id"), nullable=False
+    )
+    estado: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="ACTIVA", server_default="ACTIVA"
+    )
+    fecha_inicio: Mapped[date] = mapped_column(
+        Date, nullable=False, server_default=func.current_date()
+    )
+    fecha_fin: Mapped[date | None] = mapped_column(Date, nullable=True)
+    fecha_creacion = mapped_column(
+        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+    )
+    fecha_actualizacion = mapped_column(
+        TIMESTAMP(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", name="uq_suscripcion_cooperativa"),
+        CheckConstraint(
+            "estado IN ('ACTIVA','SUSPENDIDA','VENCIDA','CANCELADA')",
+            name="chk_suscripcion_estado",
+        ),
+    )
+
+    cooperativa: Mapped["Cooperativa"] = relationship(back_populates="suscripcion")
+    plan: Mapped["PlanSuscripcion"] = relationship(back_populates="suscripciones")
+
+    @property
+    def cooperativa_nombre(self) -> str | None:
+        return self.cooperativa.nombre if self.cooperativa else None
+
+    @property
+    def dias_restantes(self) -> int | None:
+        if self.fecha_fin is None:
+            return None
+        return (self.fecha_fin - date.today()).days

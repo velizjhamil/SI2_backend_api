@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -158,6 +158,60 @@ class CooperativaOut(CooperativaBase):
     estado: str
     fecha_creacion: datetime
     fecha_baja: datetime | None = None
+
+
+# ── Suscripciones institucionales (SaaS) ───────────────────────────────────
+
+SUSCRIPCION_ESTADOS = "^(ACTIVA|SUSPENDIDA|VENCIDA|CANCELADA)$"
+
+
+class PlanSuscripcionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    codigo: str
+    nombre: str
+    descripcion: str | None = None
+    features: list[dict] | None = None
+    incluye: list[str] | None = None
+    precio_mensual: Decimal
+    moneda: str
+    limite_usuarios: int | None = None
+    estado: str
+
+
+class SuscripcionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    cooperativa_id: int
+    cooperativa_nombre: str | None = None
+    plan: PlanSuscripcionOut
+    estado: str
+    fecha_inicio: date
+    fecha_fin: date | None = None
+    dias_restantes: int | None = None
+    fecha_creacion: datetime
+    fecha_actualizacion: datetime
+
+
+class SuscripcionCreate(BaseModel):
+    cooperativa_id: int = Field(..., gt=0)
+    plan_id: int = Field(..., gt=0)
+    estado: str = Field("ACTIVA", pattern=SUSCRIPCION_ESTADOS)
+    fecha_inicio: date | None = None
+    fecha_fin: date | None = None
+
+
+class SuscripcionUpdate(BaseModel):
+    plan_id: int | None = Field(None, gt=0)
+    estado: str | None = Field(None, pattern=SUSCRIPCION_ESTADOS)
+    fecha_inicio: date | None = None
+    fecha_fin: date | None = None
+
+
+class SuscripcionRenovar(BaseModel):
+    meses: int = Field(12, gt=0, le=120)
 
 
 # ── Módulo KYC / Socios ────────────────────────────────────────────────────
@@ -1472,3 +1526,21 @@ class ComprobanteGenerarAutomaticos(BaseModel):
         if self.desde and self.hasta and self.desde > self.hasta:
             raise ValueError("La fecha desde no puede ser posterior a hasta")
         return self
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ChatRequest(BaseModel):
+    mensaje: str = Field(min_length=1, max_length=2000)
+    historial: list[ChatMessage] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    respuesta: str
+    intent: str
+    fuente: Literal["PLANTILLA", "LLM"]
+    datos: dict[str, Any] = Field(default_factory=dict)
+    sugerencias: list[str] = Field(default_factory=list)
