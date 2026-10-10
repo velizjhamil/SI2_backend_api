@@ -11,6 +11,7 @@ from app.schemas.schemas import (
     CooperativaOut,
     CooperativaUpdate,
 )
+from app.services.suscripciones import ensure_suscripcion
 
 router = APIRouter()
 
@@ -72,6 +73,8 @@ def crear_cooperativa(
     cooperativa = Cooperativa(**payload.model_dump())
     db.add(cooperativa)
     try:
+        db.flush()
+        ensure_suscripcion(db, cooperativa.id)
         db.commit()
     except IntegrityError:
         db.rollback()

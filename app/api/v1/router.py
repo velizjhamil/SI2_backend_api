@@ -1,11 +1,13 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, ahorros, auth, backups, caja, cooperativas, creditos, dpf, socios_kyc, uif, socio, plan_cuentas, comprobantes, libros, estados_financieros, reportes, informes_asfi, verificacion_comprobantes
+from app.api.v1.endpoints import admin, ahorros, auth, backups, caja, chatbot, cooperativas, creditos, dpf, socios_kyc, uif, socio, plan_cuentas, comprobantes, libros, estados_financieros, reportes, informes_asfi, verificacion_comprobantes, suscripciones
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(cooperativas.router, prefix="/cooperativas", tags=["cooperativas"])
+api_router.include_router(suscripciones.router, prefix="/suscripciones", tags=["suscripciones"])
 api_router.include_router(admin.router, prefix="/admin", tags=["admin"])
+api_router.include_router(chatbot.router, prefix="/chatbot", tags=["chatbot"])
 api_router.include_router(socios_kyc.router, prefix="/socios", tags=["socios-kyc"])
 api_router.include_router(ahorros.router, prefix="/ahorros", tags=["ahorros"])
 api_router.include_router(caja.router, prefix="/caja", tags=["caja"])

@@ -96,6 +96,19 @@ def init_db() -> None:
             "ALTER TABLE bitacora ALTER COLUMN accion TYPE VARCHAR(100)"
         ))
 
+    # 3) Catálogo de planes y suscripción por defecto para cada cooperativa
+    from app.services.suscripciones import seed_suscripciones
+
+    db = SessionLocal()
+    try:
+        seed_suscripciones(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 
 def get_db():
     db = SessionLocal()
