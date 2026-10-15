@@ -1,0 +1,139 @@
+<mxfile host="65bd71144e">
+    <diagram id="CU-W11-Comunicacion" name="CU-W11 Depósito en Ventanilla">
+        <mxGraphModel dx="302" dy="334" grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1350" pageHeight="650" background="#FFFFFF" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="frame" value="sd CU-W11 Depósito en Ventanilla" style="shape=umlFrame;whiteSpace=wrap;html=1;width=220;height=30;fillColor=#1ba1e2;strokeColor=#006EAF;fontStyle=1;fontColor=#141414;" parent="1" vertex="1">
+                    <mxGeometry x="57" y="39" width="1310" height="550" as="geometry"/>
+                </mxCell>
+                <mxCell id="actor_cajero" value="Cajero" style="shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;html=1;outlineConnect=0;fillColor=#1ba1e2;strokeColor=#006EAF;fontStyle=1;fontSize=12;fontColor=#141414;labelBackgroundColor=light-dark(default, #ffffff);" parent="1" vertex="1">
+                    <mxGeometry x="90" y="255" width="50" height="90" as="geometry"/>
+                </mxCell>
+                <mxCell id="obj_vista" value="&lt;u&gt;:DepositoScreen&lt;/u&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; font-weight: normal;&quot;&gt;(Vista)&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#1ba1e2;strokeColor=#006EAF;fontSize=12;fontStyle=1;verticalAlign=top;spacingTop=20;fontColor=#141414;labelBackgroundColor=light-dark(default, #ffffff);" parent="1" vertex="1">
+                    <mxGeometry x="296" y="245" width="100" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="obj_controlador" value="&lt;u&gt;:CajaController&lt;/u&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; font-weight: normal;&quot;&gt;(FastAPI)&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#1ba1e2;strokeColor=#006EAF;fontSize=12;fontStyle=1;verticalAlign=top;spacingTop=20;fontColor=#141414;labelBackgroundColor=light-dark(default, #ffffff);" parent="1" vertex="1">
+                    <mxGeometry x="600" y="245" width="100" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="obj_servicio" value="&lt;u&gt;:SecurityService&lt;/u&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; font-weight: normal;&quot;&gt;(Lógica / UIF)&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#1ba1e2;strokeColor=#006EAF;fontSize=12;fontStyle=1;verticalAlign=top;spacingTop=20;fontColor=#141414;labelBackgroundColor=light-dark(default, #ffffff);" parent="1" vertex="1">
+                    <mxGeometry x="896" y="245" width="100" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="obj_bd" value="&lt;u&gt;:PostgreSQL&lt;/u&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px; font-weight: normal;&quot;&gt;(Base de Datos)&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;fillColor=#1ba1e2;strokeColor=#006EAF;fontSize=12;fontStyle=1;verticalAlign=top;spacingTop=20;fontColor=#141414;labelBackgroundColor=light-dark(default, #ffffff);" parent="1" vertex="1">
+                    <mxGeometry x="1180" y="245" width="100" height="100" as="geometry"/>
+                </mxCell>
+                <mxCell id="msg_1" value="1: ingresarDeposito()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="actor_cajero" target="obj_vista" edge="1">
+                    <mxGeometry x="-0.05" y="10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="200" y="275"/>
+                            <mxPoint x="200" y="275"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_2" value="2: POST /depositos" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_vista" target="obj_controlador" edge="1">
+                    <mxGeometry x="-0.05" y="10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="450" y="275"/>
+                            <mxPoint x="450" y="275"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_3" value="3: validarSesion()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;curved=1;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_controlador" target="obj_controlador" edge="1">
+                    <mxGeometry x="0.1" y="-15" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="620" y="175"/>
+                            <mxPoint x="680" y="175"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_4" value="4: procesarDeposito()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_controlador" target="obj_servicio" edge="1">
+                    <mxGeometry x="-0.05" y="10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="750" y="275"/>
+                            <mxPoint x="750" y="275"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_5" value="5: validarUIF()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;curved=1;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_servicio" target="obj_servicio" edge="1">
+                    <mxGeometry x="0.1" y="-15" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="916" y="175"/>
+                            <mxPoint x="976" y="175"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_6" value="6: bloquearCuenta()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_servicio" target="obj_bd" edge="1">
+                    <mxGeometry x="-0.05" y="10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1090" y="210"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_7" value="7: cuentaValida" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;dashed=1;fontSize=11;fontStyle=0;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_bd" target="obj_servicio" edge="1">
+                    <mxGeometry x="0.05" y="-10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points"/>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_8" value="8: registrarMovimiento()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_servicio" target="obj_bd" edge="1">
+                    <mxGeometry x="-0.05" y="10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1090" y="357"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_9" value="9: commitTransaccion()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;fontSize=11;fontStyle=0;curved=1;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_bd" target="obj_bd" edge="1">
+                    <mxGeometry x="0.1" y="-15" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1200" y="175"/>
+                            <mxPoint x="1260" y="175"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_10" value="10: transaccionOK" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;dashed=1;fontSize=11;fontStyle=0;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_bd" target="obj_servicio" edge="1">
+                    <mxGeometry x="0.05" y="-10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="1094" y="419"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_11" value="11: comprobanteData" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;dashed=1;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_servicio" target="obj_controlador" edge="1">
+                    <mxGeometry x="0.05" y="-10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="750" y="325"/>
+                            <mxPoint x="750" y="325"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_12" value="12: 201 Created" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;dashed=1;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_controlador" target="obj_vista" edge="1">
+                    <mxGeometry x="0.05" y="-10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="450" y="325"/>
+                            <mxPoint x="450" y="325"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+                <mxCell id="msg_13" value="13: mostrarRecibo()" style="html=1;verticalAlign=bottom;endArrow=open;strokeColor=#006EAF;dashed=1;fontSize=11;fontStyle=0;edgeStyle=orthogonalEdgeStyle;fillColor=#1ba1e2;labelBackgroundColor=light-dark(default, #ffffff);fontColor=#141414;" parent="1" source="obj_vista" target="actor_cajero" edge="1">
+                    <mxGeometry x="0.05" y="-10" relative="1" as="geometry">
+                        <mxPoint as="offset"/>
+                        <Array as="points">
+                            <mxPoint x="200" y="325"/>
+                            <mxPoint x="200" y="325"/>
+                        </Array>
+                    </mxGeometry>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

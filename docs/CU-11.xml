@@ -1,0 +1,22 @@
+@startuml
+autonumber
+actor Cajero
+participant "DepositoScreen" as Vista
+participant "CajaController" as Controller
+participant "SecurityService" as Service
+database "PostgreSQL" as DB
+
+Cajero -> Vista: ingresarDeposito()
+Vista -> Controller: POST /depositos
+Controller -> Controller: validarSesion()
+Controller -> Service: procesarDeposito()
+Service -> Service: validarUIF()
+Service -> DB: bloquearCuenta()
+DB --> Service: cuentaValida
+Service -> DB: registrarMovimiento()
+DB -> DB: commitTransaccion()
+DB --> Service: transaccionOK
+Service --> Controller: comprobanteData
+Controller --> Vista: 201 Created
+Vista --> Cajero: mostrarRecibo()
+@enduml

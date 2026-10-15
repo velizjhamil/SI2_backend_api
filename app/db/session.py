@@ -18,7 +18,33 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db() -> None:
     """Crea tablas faltantes y alinea columnas de tablas existentes."""
-    # 1) Crear tablas que no existan (cooperativa, etc.)
+    # 0) Asegurar constraints UNIQUE compuestos indispensables en tablas preexistentes
+    #    para que create_all pueda vincular llaves foráneas compuestas (ej. voto_comite)
+    with engine.begin() as conn:
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables WHERE table_name = 'solicitud_credito'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE table_name = 'solicitud_credito' AND constraint_name = 'uq_solicitud_credito_id_cooperativa'
+                ) THEN
+                    ALTER TABLE solicitud_credito ADD CONSTRAINT uq_solicitud_credito_id_cooperativa UNIQUE (id, cooperativa_id);
+                END IF;
+
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.tables WHERE table_name = 'usuario'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE table_name = 'usuario' AND constraint_name = 'uq_usuario_id_cooperativa'
+                ) THEN
+                    ALTER TABLE usuario ADD CONSTRAINT uq_usuario_id_cooperativa UNIQUE (id, cooperativa_id);
+                END IF;
+            END $$;
+        """))
+
+    # 1) Crear tablas que no existan (cooperativa, voto_comite, etc.)
     Base.metadata.create_all(bind=engine)
 
     # 2) Alinear columnas faltantes en tablas ya existentes (DDL idempotente)
@@ -94,6 +120,57 @@ def init_db() -> None:
         ))
         conn.execute(text(
             "ALTER TABLE bitacora ALTER COLUMN accion TYPE VARCHAR(100)"
+        ))
+
+        # --- producto_credito: clasificación ASFI, garantías y límites ---
+        conn.execute(text(
+            "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS tipo_credito_asfi VARCHAR(30)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS sector_productivo BOOLEAN NOT NULL DEFAULT false"
+        ))
+        conn.execute(text(
+            "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS cobertura_minima_garantia NUMERIC(6,2) NOT NULL DEFAULT 100.00"
+        ))
+        conn.execute(text(
+            "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS monto_aprobacion_directa NUMERIC(14,2) NOT NULL DEFAULT 0.00"
+        ))
+
+        # --- solicitud_credito: comité y canal de origen móvil ---
+        conn.execute(text(
+            "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS ronda_comite INT NOT NULL DEFAULT 0"
+        ))
+        conn.execute(text(
+            "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS resultado_comite VARCHAR(12)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS fecha_resolucion_comite TIMESTAMPTZ"
+        ))
+        conn.execute(text(
+            "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS canal_origen VARCHAR(12) NOT NULL DEFAULT 'VENTANILLA'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS datos_declarados JSONB"
+        ))
+
+        # --- reporte: multi-tenant e informes ASFI ---
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS cooperativa_id BIGINT REFERENCES cooperativa(id)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS periodo DATE"
+        ))
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS estado VARCHAR(12) NOT NULL DEFAULT 'GENERADO'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS contenido JSONB"
+        ))
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS resumen JSONB"
+        ))
+        conn.execute(text(
+            "ALTER TABLE reporte ADD COLUMN IF NOT EXISTS hash_contenido VARCHAR(64)"
         ))
 
     # 3) Catálogo de planes y suscripción por defecto para cada cooperativa

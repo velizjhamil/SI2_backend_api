@@ -260,11 +260,15 @@ def extracto_cuenta(
         receipt_by_transaction = {}
         for receipt in receipts:
             if receipt.transaccion_salida_id is not None:
-                receipt_by_transaction[receipt.transaccion_salida_id] = receipt.id
+                receipt_by_transaction[receipt.transaccion_salida_id] = receipt
             if receipt.transaccion_entrada_id is not None:
-                receipt_by_transaction[receipt.transaccion_entrada_id] = receipt.id
+                receipt_by_transaction[receipt.transaccion_entrada_id] = receipt
         for movement in movements:
-            movement["comprobante_id"] = receipt_by_transaction.get(movement["transaccion_id"])
+            rc = receipt_by_transaction.get(movement["transaccion_id"])
+            if rc is not None:
+                movement["comprobante_id"] = rc.id
+                if rc.glosa:
+                    movement["descripcion"] = rc.glosa
     total = len(movements)
     movements = list(reversed(movements))[offset:offset + limit]
     return {
@@ -289,6 +293,11 @@ def listar_creditos_socio(socio: Socio = Depends(get_current_socio), db: Session
         .where(Credito.socio_id == socio.id)
         .order_by(Credito.estado.notin_(("VIGENTE", "EN_MORA")), Credito.id)
     ).unique().scalars().all()
+    if not rows:
+        from app.services.demo_creditos import asegurar_credito_demo_socio
+        demo_credit = asegurar_credito_demo_socio(db, socio)
+        if demo_credit is not None:
+            rows = [demo_credit]
     output = []
     for credit in rows:
         schedule = sorted(credit.cronograma, key=lambda row: row.numero_cuota)
@@ -348,6 +357,7 @@ def pagar_cuota_socio(credito_id: int, body: dict, request: Request,
             currency=currency.codigo_iso, source_account_id=account.id,
             credit_id=credit.id, installment_number=installment.numero_cuota,
             outgoing_transaction_id=transaction_id, payment_id=payment.id,
+            description=f"Pago de cuota #{installment.numero_cuota} - Crédito {credit.numero_credito}",
             request=request,
         )
         payload["comprobante"] = receipt_payload(receipt, source_number=account.numero)
@@ -479,16 +489,51 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
         raise HTTPException(status_code=404, detail="Crédito no encontrado")
     schedule = db.execute(select(TablaAmortizacion).where(TablaAmortizacion.credito_id == credit.id)
                           .order_by(TablaAmortizacion.numero_cuota)).scalars().all()
-    product = credit.producto or credit.solicitud.producto
-    currency = credit.moneda or credit.solicitud.moneda
+    product = credit.producto or (credit.solicitud.producto if credit.solicitud else None)
+    currency = credit.moneda or (credit.solicitud.moneda if credit.solicitud else None)
+    tasa_mora = Decimal(str(product.tasa_mora_anual)) if (product and product.tasa_mora_anual is not None) else Decimal("0.00")
+    dias_gracia = int(product.dias_gracia_mora or 0) if product else 0
+    from app.services.cobro_cuotas import calcular_mora
+    today = date.today()
+    cuotas_out = []
+    for row in schedule:
+        is_paid = (row.estado_pago or "PENDIENTE") in {"PAGADA", "PAGADO"}
+        mora_val = Decimal("0.00")
+        if is_paid:
+            estado = "PAGADA"
+        elif row.fecha_vencimiento < today:
+            estado = "VENCIDA"
+            mora_res = calcular_mora(
+                capital_cuota=Decimal(str(row.monto_capital or 0)),
+                tasa_mora_anual=tasa_mora,
+                fecha_vencimiento=row.fecha_vencimiento,
+                fecha_pago=today,
+                dias_gracia_mora=dias_gracia,
+            )
+            mora_val = Decimal(str(mora_res.get("mora", 0)))
+        else:
+            estado = "PENDIENTE"
+
+        fecha_pago_str = None
+        if row.fecha_pago is not None:
+            fecha_pago_str = row.fecha_pago.isoformat() if hasattr(row.fecha_pago, "isoformat") else str(row.fecha_pago)
+
+        cuotas_out.append({
+            "numero": row.numero_cuota,
+            "fecha_vencimiento": row.fecha_vencimiento.isoformat() if hasattr(row.fecha_vencimiento, "isoformat") else str(row.fecha_vencimiento),
+            "capital": _money(Decimal(str(row.monto_capital or 0))),
+            "interes": _money(Decimal(str(row.monto_interes or 0))),
+            "seguro": "0.00",
+            "mora": _money(mora_val),
+            "monto_total": _money(Decimal(str(row.monto_cuota_total or 0)) + mora_val),
+            "saldo_capital": _money(Decimal(str(row.saldo_final or 0))),
+            "estado": estado,
+            "fecha_pago": fecha_pago_str,
+        })
     return {"credito": {"id": credit.id, "numero_credito": credit.numero_credito,
             "moneda": None if currency is None else currency.codigo_iso,
             "estado": credit.estado, "saldo_pendiente": _money(Decimal(credit.saldo_pendiente))},
-        "cuotas": [{"numero": row.numero_cuota, "fecha_vencimiento": row.fecha_vencimiento.isoformat(),
-            "capital": _money(Decimal(row.monto_capital)), "interes": _money(Decimal(row.monto_interes)),
-            "seguro": "0.00", "monto_total": _money(Decimal(row.monto_cuota_total)),
-            "saldo_capital": _money(Decimal(row.saldo_final or 0)), "estado": row.estado_pago or "PENDIENTE",
-            "fecha_pago": None if row.fecha_pago is None else row.fecha_pago.isoformat()} for row in schedule]}
+        "cuotas": cuotas_out}
 
 
 @router.get("/dpf/{dpf_id}")
@@ -542,3 +587,117 @@ def descartar_recredito_socio(oferta_id: int, request: Request,
     from app.api.v1.endpoints.creditos import descartar_oferta_core
     return descartar_oferta_core(db, offer, "Descartada por el socio", db.get(Usuario, socio.usuario_id),
                                  socio.cooperativa_id, request, inactive_status=422)
+
+
+class SocioPerfilUpdate(BaseModel):
+    direccion: str | None = None
+    telefono: str | None = None
+    correo: str | None = None
+
+
+class DepositoMovilIn(BaseModel):
+    monto: Decimal = Field(gt=0)
+    concepto: str | None = None
+
+
+def _perfil_out(socio: Socio) -> dict:
+    return {
+        "id": socio.id,
+        "codigo_socio": f"SOC-{socio.id:06d}-BO",
+        "ci": socio.ci,
+        "nombre": socio.nombre,
+        "apellido": socio.apellido,
+        "nombre_completo": f"{socio.nombre} {socio.apellido}".strip(),
+        "direccion": socio.direccion or "",
+        "telefono": socio.telefono or "",
+        "correo": socio.correo or "",
+        "estado": socio.estado,
+        "categoria": "Socio Ahorrista",
+        "fecha_registro": socio.fecha_registro.isoformat() if socio.fecha_registro else None,
+        "cooperativa_id": socio.cooperativa_id,
+    }
+
+
+@router.get("/perfil")
+def obtener_perfil_socio(socio: Socio = Depends(get_current_socio)):
+    return _perfil_out(socio)
+
+
+@router.patch("/perfil")
+def actualizar_perfil_socio(
+    body: SocioPerfilUpdate,
+    request: Request,
+    socio: Socio = Depends(get_current_socio),
+    db: Session = Depends(get_db),
+):
+    if body.direccion is not None:
+        socio.direccion = body.direccion.strip()
+    if body.telefono is not None:
+        socio.telefono = body.telefono.strip()
+    if body.correo is not None:
+        socio.correo = body.correo.strip().lower()
+    registrar_accion(
+        db,
+        accion="ACTUALIZAR_PERFIL",
+        modulo="SOCIO",
+        usuario_id=socio.usuario_id,
+        cooperativa_id=socio.cooperativa_id,
+        descripcion=f"Socio {socio.id} actualizó sus datos de contacto",
+        request=request,
+    )
+    db.commit()
+    db.refresh(socio)
+    return _perfil_out(socio)
+
+
+@router.post("/cuentas/{cuenta_id}/depositos", status_code=status.HTTP_201_CREATED)
+def depositar_cuenta_propia(
+    cuenta_id: int,
+    body: DepositoMovilIn,
+    request: Request,
+    socio: Socio = Depends(get_current_socio),
+    db: Session = Depends(get_db),
+):
+    cuenta = db.execute(
+        select(CuentaAhorro)
+        .where(CuentaAhorro.id == cuenta_id, CuentaAhorro.socio_id == socio.id)
+        .with_for_update(of=CuentaAhorro)
+    ).scalar_one_or_none()
+    if cuenta is None:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+    if cuenta.estado != "ACTIVA":
+        raise HTTPException(status_code=400, detail="La cuenta no está activa")
+
+    cuenta.saldo_disponible = Decimal(str(cuenta.saldo_disponible)) + body.monto
+    tx = db.execute(
+        text("""
+            INSERT INTO transaccion (tipo, monto, canal, moneda_id, cuenta_ahorro_id)
+            VALUES ('DEPOSITO', :monto, 'MOVIL', :moneda_id, :cuenta_id)
+            RETURNING id, fecha_hora
+        """),
+        {"monto": body.monto, "moneda_id": cuenta.moneda_id, "cuenta_id": cuenta.id},
+    ).one()
+    tx_id, fecha_hora = tx
+
+    registrar_accion(
+        db,
+        accion="DEPOSITO",
+        modulo="AHORROS",
+        usuario_id=socio.usuario_id,
+        cooperativa_id=socio.cooperativa_id,
+        descripcion=f"Depósito móvil de {body.monto} en cuenta {cuenta.numero}",
+        request=request,
+    )
+    db.commit()
+    db.refresh(cuenta)
+    return {
+        "transaccion_id": tx_id,
+        "cuenta_id": cuenta.id,
+        "numero_cuenta": cuenta.numero,
+        "tipo": "DEPOSITO",
+        "monto": _money(body.monto),
+        "saldo_disponible": _money(Decimal(str(cuenta.saldo_disponible))),
+        "fecha": fecha_hora.isoformat() if hasattr(fecha_hora, 'isoformat') else str(fecha_hora),
+        "moneda": cuenta.moneda.codigo_iso if cuenta.moneda else "BOB",
+    }
+
