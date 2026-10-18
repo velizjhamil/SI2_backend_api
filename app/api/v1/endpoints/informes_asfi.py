@@ -21,6 +21,7 @@ from app.api.v1.endpoints.reportes import _unclassified_credit_warnings
 from app.core.bitacora import registrar_accion
 from app.models.models import Credito, Moneda, Reporte, SolicitudCredito, Usuario
 from app.services.cobro_cuotas import resumir_morosidad
+from app.services.pdf_reports import build_report_pdf
 from app.services.informes_asfi import (
     base_prevision_hipotecaria,
     categoria_por_mora,
@@ -335,7 +336,8 @@ def obtener_reporte(reporte_id: int, user: Usuario = Depends(get_current_user), 
 
 
 @router.get("/reportes/{reporte_id}/export")
-def exportar_reporte(reporte_id: int, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def exportar_reporte(reporte_id: int, user: Usuario = Depends(get_current_user),
+                     db: Session = Depends(get_db), formato: str = Query("csv", pattern="^(csv|pdf)$")):
     report = _get_tenant_report(db, _tenant(user), reporte_id)
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -377,6 +379,20 @@ def exportar_reporte(reporte_id: int, user: Usuario = Depends(get_current_user),
                     writer.writerow([section, component.get("codigo"), component.get("nombre"), component.get("monto")])
                 if line.get("subtotal") is not None:
                     writer.writerow([section, "", line.get("subtotal"), line.get("monto")])
+    if formato == "pdf":
+        table = list(csv.reader(io.StringIO(output.getvalue(), newline="")))
+        content = build_report_pdf(title=f"Informe ASFI — {report.tipo}",
+            period=report.periodo.isoformat() if report.periodo else "Sin período",
+            sections=[{"headers": table[0] if table else [], "rows": table[1:] if table else [],
+                "column_types": [
+                    "amount" if header in {"saldo_capital", "base_prevision", "prevision_especifica", "prevision_ciclica", "monto_desembolsado", "saldo", "prevision", "monto"}
+                    else "count" if header == "dias_mora" else
+                    "percentage" if header == "porcentaje" else "text"
+                    for header in (table[0] if table else [])]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency="Según el informe", generated_by=user.nombre, empty=len(table) <= 1)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="informe-asfi-{report.id}.pdf"'})
     return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="informe-asfi-{report.id}.csv"'})
 

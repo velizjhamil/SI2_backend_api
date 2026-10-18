@@ -15,6 +15,7 @@ from app.api.v1.deps import get_current_user, get_db
 from app.api.v1.endpoints.accounting_sql import nature_balance_delta_sql
 from app.core.bitacora import registrar_accion
 from app.models.models import TipoCambio, Usuario
+from app.services.pdf_reports import build_report_pdf
 from app.schemas.schemas import TipoCambioCreate, TipoCambioUpdate
 
 router = APIRouter()
@@ -334,6 +335,7 @@ def _csv(body, filename, headers, rows):
 @router.get("/balance-general/export")
 def export_balance(fecha_corte: date = Query(...), nivel: int = Query(3, ge=2, le=3),
                    moneda: str = Query("CONSOLIDADO", pattern="^(CONSOLIDADO|BOB|USD)$"),
+                   formato: str = Query("csv", pattern="^(csv|pdf)$"),
                    user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     body = _balance_data(db, _tenant(user), fecha_corte, moneda, nivel)
     rows = []
@@ -342,16 +344,38 @@ def export_balance(fecha_corte: date = Query(...), nivel: int = Query(3, ge=2, l
             rows.append([section, group["codigo"], group["nombre"], group["monto"]])
             if nivel >= 3:
                 rows.extend([[section, account["codigo"], account["nombre"], account["monto"]] for account in group["cuentas"]])
-    return _csv(body, f"balance-general-{fecha_corte.isoformat()}.csv", ["Sección", "Código", "Cuenta", "Saldo"], rows)
+    headers = ["Sección", "Código", "Cuenta", "Saldo"]
+    if formato == "pdf":
+        currency_label = {"BOB": "BOB (Bolivianos)", "USD": "USD (Dólares estadounidenses)",
+                          "CONSOLIDADO": "Todas"}[moneda]
+        content = build_report_pdf(title="Balance general", period=f"Al {fecha_corte.isoformat()}",
+            sections=[{"headers": headers, "rows": rows,
+                       "column_types": ["text", "text", "text", "amount"]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=currency_label, generated_by=user.nombre, empty=not rows)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="balance-general-{fecha_corte.isoformat()}.pdf"'})
+    return _csv(body, f"balance-general-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
 @router.get("/estado-resultados/export")
 def export_income_statement(desde: date = Query(...), hasta: date = Query(...),
                             moneda: str = Query("CONSOLIDADO", pattern="^(CONSOLIDADO|BOB|USD)$"),
-                            user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+                            formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     body = _income_data(db, _tenant(user), desde, hasta, moneda)
     rows = []
     for line in body["lineas"]:
         rows.extend([[group["codigo"], group["nombre"], group["monto"]] for group in line["componentes"]])
         rows.append(["", line["subtotal"], line["monto"]])
-    return _csv(body, f"estado-resultados-{desde.isoformat()}-{hasta.isoformat()}.csv", ["Código", "Concepto", "Monto"], rows)
+    headers = ["Código", "Concepto", "Monto"]
+    if formato == "pdf":
+        currency_label = {"BOB": "BOB (Bolivianos)", "USD": "USD (Dólares estadounidenses)",
+                          "CONSOLIDADO": "Todas"}[moneda]
+        content = build_report_pdf(title="Estado de resultados", period=f"{desde} — {hasta}",
+            sections=[{"headers": headers, "rows": rows,
+                       "column_types": ["text", "text", "amount"]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=currency_label, generated_by=user.nombre, empty=not rows)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="estado-resultados-{desde.isoformat()}-{hasta.isoformat()}.pdf"'})
+    return _csv(body, f"estado-resultados-{desde.isoformat()}-{hasta.isoformat()}.csv", headers, rows)

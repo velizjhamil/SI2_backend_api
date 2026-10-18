@@ -15,6 +15,7 @@ Backend transaccional para la gestión de cooperativas (multi-tenant), construid
 - **Docker Compose** — orquestación de la base de datos
 - **pytest** — pruebas (ver `requirements-dev.txt`)
 
+
 ## 📁 Estructura del proyecto
 
 ```

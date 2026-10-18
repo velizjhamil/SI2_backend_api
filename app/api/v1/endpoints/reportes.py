@@ -14,6 +14,7 @@ from app.api.v1.deps import get_current_user, get_db
 from app.api.v1.endpoints.creditos import _configuracion_mora
 from app.api.v1.endpoints.estados_financieros import _balance_data, _income_data
 from app.models.models import Credito, SolicitudCredito, Usuario
+from app.services.pdf_reports import build_report_pdf
 from app.services.cobro_cuotas import resumir_morosidad
 
 router = APIRouter()
@@ -40,12 +41,15 @@ def _tenant(user: Usuario) -> int:
     return user.cooperativa_id
 
 
-def _filters(db: Session, cutoff: date, currency_id: int, tenant: int):
+def _filters(db: Session, cutoff: date, currency_id: int, tenant: int, pdf_meta=None):
     if cutoff > date.today():
         raise HTTPException(422, "La fecha de corte no puede ser futura")
-    currency = db.execute(text("SELECT id FROM moneda WHERE id=:id"), {"id": currency_id}).scalar_one_or_none()
+    currency = db.execute(text("SELECT id,codigo_iso,nombre FROM moneda WHERE id=:id"), {"id": currency_id}).mappings().one_or_none()
     if currency is None:
         raise HTTPException(422, "La moneda indicada no existe")
+    if pdf_meta is not None:
+        currency_name = "Bolivianos" if currency["codigo_iso"] == "BOB" else currency["nombre"]
+        pdf_meta["currency"] = f"{currency['codigo_iso']} ({currency_name})"
     return {"tenant": tenant, "currency": currency_id}
 
 
@@ -79,8 +83,8 @@ def _unclassified_credit_warnings(db: Session, tenant: int, cutoff: date):
              "mensaje": "Hay créditos vigentes sin moneda identificable; se excluyen de los totales por moneda."}]
 
 
-def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int):
-    params = _filters(db, cutoff, currency_id, tenant)
+def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_meta=None):
+    params = _filters(db, cutoff, currency_id, tenant, pdf_meta)
     warnings = _unclassified_credit_warnings(db, tenant, cutoff)
     credits = db.execute(select(Credito).join(SolicitudCredito, SolicitudCredito.id == Credito.solicitud_credito_id).options(
         joinedload(Credito.producto), joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
@@ -176,17 +180,34 @@ def cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: in
 
 @router.get("/cartera/export")
 def export_cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                   user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id)
+                   formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    pdf_meta = {}
+    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
     rows = [["Total", key, value] for key, value in body["totales"].items()]
     rows += [["Advertencia", item["codigo"], item["creditos"], item["saldo"], item["mensaje"]]
              for item in body["advertencias"]]
-    return _csv(f"cartera-{fecha_corte.isoformat()}.csv",
-                ["Sección", "Concepto", "Valor", "Saldo", "Mensaje"], rows)
+    headers = ["Sección", "Concepto", "Valor", "Saldo", "Mensaje"]
+    if formato == "pdf":
+        totals = [[key, value] for key, value in body["totales"].items()]
+        total_types = [["text", "count" if key == "creditos" else
+                        "percentage" if key == "indice_mora" else "amount"]
+                       for key in body["totales"]]
+        warnings = [[item["codigo"], item["creditos"], item["saldo"], item["mensaje"]]
+                    for item in body["advertencias"]]
+        content = build_report_pdf(title="Cartera", period=f"Al {fecha_corte.isoformat()}",
+            sections=[{"title": "Totales de cartera", "headers": ["Concepto", "Valor"], "rows": totals,
+                       "column_types": ["text", "amount"], "row_types": total_types},
+                      {"title": "Advertencias", "headers": ["Código", "N.º de créditos", "Saldo", "Mensaje"],
+                       "rows": warnings, "column_types": ["text", "count", "amount", "text"]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=pdf_meta["currency"], generated_by=user.nombre, orientation="L", empty=not rows)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="cartera-{fecha_corte.isoformat()}.pdf"'})
+    return _csv(f"cartera-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
-def _deposits(db: Session, tenant: int, cutoff: date, currency_id: int):
-    params = _filters(db, cutoff, currency_id, tenant)
+def _deposits(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_meta=None):
+    params = _filters(db, cutoff, currency_id, tenant, pdf_meta)
     savings = db.execute(text("""
         SELECT a.tipo_producto AS type, COUNT(*) AS count,
                COALESCE(SUM(a.saldo_disponible+a.saldo_bloqueado),0) AS amount
@@ -246,11 +267,30 @@ def captaciones(fecha_corte: date = Query(default_factory=date.today), moneda_id
 
 @router.get("/captaciones/export")
 def export_captaciones(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                       user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    body = _deposits(db, _tenant(user), fecha_corte, moneda_id)
+                       formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    pdf_meta = {}
+    body = _deposits(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
     rows = [["Ahorros", r["tipo"], r["saldo"]] for r in body["ahorros_por_tipo"]]
     rows += [["DPF", r["rango"], r["capital"]] for r in body["dpf_por_plazo"]]
-    return _csv(f"captaciones-{fecha_corte.isoformat()}.csv", ["Sección", "Concepto", "Monto"], rows)
+    headers = ["Sección", "Concepto", "Monto"]
+    if formato == "pdf":
+        savings = [[row[1], row[2]] for row in rows if row[0] == "Ahorros"]
+        dpfs = [[row[1], row[2]] for row in rows if row[0] == "DPF"]
+        totals = [[key, value] for key, value in body["totales"].items()]
+        total_types = [["text", "count" if "cuentas" in key or "certificados" in key else "amount"]
+                       for key in body["totales"]]
+        content = build_report_pdf(title="Captaciones", period=f"Al {fecha_corte.isoformat()}",
+            sections=[{"title": "Ahorros por tipo", "headers": ["Tipo de cuenta", "Saldo"], "rows": savings,
+                       "column_types": ["text", "amount"]},
+                      {"title": "Depósitos a plazo fijo", "headers": ["Plazo", "Capital"], "rows": dpfs,
+                       "column_types": ["text", "amount"]},
+                      {"title": "Totales", "headers": ["Concepto", "Valor"], "rows": totals,
+                       "column_types": ["text", "amount"], "row_types": total_types}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=pdf_meta["currency"], generated_by=user.nombre, empty=not rows)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="captaciones-{fecha_corte.isoformat()}.pdf"'})
+    return _csv(f"captaciones-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
 def _group_amount(balance, prefixes):
@@ -390,12 +430,21 @@ def indicadores(fecha_corte: date = Query(default_factory=date.today), user: Usu
 
 
 @router.get("/indicadores/export")
-def export_indicadores(fecha_corte: date = Query(default_factory=date.today), user: Usuario = Depends(get_current_user),
-                       db: Session = Depends(get_db)):
+def export_indicadores(fecha_corte: date = Query(default_factory=date.today), formato: str = Query("csv", pattern="^(csv|pdf)$"),
+                       user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     body = _indicators(db, _tenant(user), fecha_corte)
     rows = [[i["clave"], i["nombre"], i["valor"], i.get("motivo", ""), i["definicion"]]
             for i in body["indicadores"]]
-    return _csv(f"indicadores-{fecha_corte.isoformat()}.csv", ["Clave", "Indicador", "Valor", "Motivo", "Definición"], rows)
+    headers = ["Clave", "Indicador", "Valor", "Motivo", "Definición"]
+    if formato == "pdf":
+        content = build_report_pdf(title="Indicadores de gestión", period=f"Al {fecha_corte.isoformat()}",
+            sections=[{"headers": headers, "rows": rows,
+                       "column_types": ["text", "text", "percentage", "text", "text"]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency="BOB (Bolivianos)", generated_by=user.nombre, orientation="L", empty=not rows)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="indicadores-{fecha_corte.isoformat()}.pdf"'})
+    return _csv(f"indicadores-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
 @router.get("/resumen-ejecutivo")

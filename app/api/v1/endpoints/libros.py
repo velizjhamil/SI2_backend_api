@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.v1.deps import get_current_user, get_db
 from app.api.v1.endpoints.accounting_sql import nature_balance_delta_sql
 from app.models.models import Usuario
+from app.services.pdf_reports import build_report_pdf
 
 router = APIRouter()
 ROLES = {"CONTADOR", "ADMINISTRADOR"}
@@ -35,9 +36,11 @@ def _context(user, db, desde, hasta, moneda_id):
         raise HTTPException(422, "La fecha desde no puede ser posterior a hasta")
     if hasta - desde > timedelta(days=366):
         raise HTTPException(422, "El rango de fechas no puede exceder 366 días")
-    if db.execute(text("SELECT 1 FROM moneda WHERE id=:id"), {"id": moneda_id}).scalar_one_or_none() is None:
+    currency = db.execute(text("SELECT codigo_iso,nombre FROM moneda WHERE id=:id"), {"id": moneda_id}).mappings().one_or_none()
+    if currency is None:
         raise HTTPException(422, "La moneda indicada no existe")
-    return user.cooperativa_id, desde, hasta
+    name = "Bolivianos" if currency["codigo_iso"] == "BOB" else currency["nombre"]
+    return user.cooperativa_id, desde, hasta, f"{currency['codigo_iso']} ({name})"
 
 
 def _voucher_lines(db, voucher_ids):
@@ -94,7 +97,7 @@ def _diario(db, tenant, desde, hasta, moneda_id, limit=None, offset=0):
 def libro_diario(desde: date | None = None, hasta: date | None = None, moneda_id: int = Query(1, ge=1),
                  limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
                  user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+    tenant, desde, hasta, _ = _context(user, db, desde, hasta, moneda_id)
     return _diario(db, tenant, desde, hasta, moneda_id, limit, offset)
 
 
@@ -173,7 +176,7 @@ def _book_major(db, tenant, cuenta_id, desde, hasta, moneda_id, include):
 def libro_mayor(cuenta_id: int = Query(..., ge=1), desde: date | None = None, hasta: date | None = None,
                 moneda_id: int = Query(1, ge=1), incluir_subcuentas: bool = True,
                 user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+    tenant, desde, hasta, _ = _context(user, db, desde, hasta, moneda_id)
     return _book_major(db, tenant, cuenta_id, desde, hasta, moneda_id, incluir_subcuentas)
 
 
@@ -181,7 +184,7 @@ def libro_mayor(cuenta_id: int = Query(..., ge=1), desde: date | None = None, ha
 def balance_comprobacion(desde: date | None = None, hasta: date | None = None, moneda_id: int = Query(1, ge=1),
                          nivel: int = Query(4, ge=1, le=5), user: Usuario = Depends(get_current_user),
                          db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+    tenant, desde, hasta, _ = _context(user, db, desde, hasta, moneda_id)
     balance_delta = nature_balance_delta_sql("a.naturaleza", "r.acumulado_debe", "r.acumulado_haber")
     rows = db.execute(text(f"""
         WITH RECURSIVE accounts AS (
@@ -275,8 +278,9 @@ def _enforce_csv_record_limit(records):
 
 @router.get("/libro-diario/export")
 def export_diario(desde: date | None = None, hasta: date | None = None, moneda_id: int = Query(1, ge=1),
+                  formato: str = Query("csv", pattern="^(csv|pdf)$"),
                   user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+    tenant, desde, hasta, currency_label = _context(user, db, desde, hasta, moneda_id)
     _export_limit(db, tenant, desde, hasta, moneda_id)
     data = _diario(db, tenant, desde, hasta, moneda_id, None)
     records = []
@@ -286,15 +290,30 @@ def export_diario(desde: date | None = None, hasta: date | None = None, moneda_i
                             line["orden"], line["cuenta"]["codigo"], line["cuenta"]["nombre"], line["glosa"],
                             line["debe"], line["haber"]])
     _enforce_csv_record_limit(records)
-    return _csv_response(f"libro-diario-{desde}-{hasta}.csv",
-                         ["fecha","numero","tipo","estado","orden","cuenta_codigo","cuenta_nombre","glosa","debe","haber"], records)
+    headers = ["fecha","numero","tipo","estado","orden","cuenta_codigo","cuenta_nombre","glosa","debe","haber"]
+    if formato == "pdf":
+        content = build_report_pdf(
+            title="Libro diario", period=f"{desde} — {hasta}",
+            sections=[{"headers": headers, "rows": records,
+                "column_types": ["text", "text", "text", "text", "count", "text", "text", "text", "amount", "amount"],
+                "totals": [["", "Total del período", "", "", "", "", "", "",
+                    sum((Decimal(str(row[8])) for row in records), ZERO),
+                    sum((Decimal(str(row[9])) for row in records), ZERO)]]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=currency_label, generated_by=user.nombre,
+            orientation="L", empty=not records,
+        )
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="libro-diario-{desde}-{hasta}.pdf"'})
+    return _csv_response(f"libro-diario-{desde}-{hasta}.csv", headers, records)
 
 
 @router.get("/libro-mayor/export")
 def export_mayor(cuenta_id: int = Query(..., ge=1), desde: date | None = None, hasta: date | None = None,
                  moneda_id: int = Query(1, ge=1), incluir_subcuentas: bool = True,
+                 formato: str = Query("csv", pattern="^(csv|pdf)$"),
                  user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+    tenant, desde, hasta, currency_label = _context(user, db, desde, hasta, moneda_id)
     account = _account(db, tenant, cuenta_id)
     descendants = db.execute(text("""
         WITH RECURSIVE d(id) AS (SELECT id FROM plan_cuenta WHERE id=:id UNION ALL
@@ -312,17 +331,41 @@ def export_mayor(cuenta_id: int = Query(..., ge=1), desde: date | None = None, h
     records = [[m["fecha"],m["comprobante"]["numero"],m["comprobante"]["tipo"],m["comprobante"]["estado"],
                 m["cuenta_codigo"],m["glosa"],m["debe"],m["haber"],m["saldo"]] for m in data["movimientos"]]
     _enforce_csv_record_limit(records)
-    return _csv_response(f"libro-mayor-{account['codigo']}-{desde}-{hasta}.csv",
-                         ["fecha","numero","tipo","estado","cuenta_codigo","glosa","debe","haber","saldo"], records)
+    headers = ["fecha","numero","tipo","estado","cuenta_codigo","glosa","debe","haber","saldo"]
+    if formato == "pdf":
+        displayed_debe = sum((Decimal(str(row[6] or 0)) for row in records), ZERO)
+        displayed_haber = sum((Decimal(str(row[7] or 0)) for row in records), ZERO)
+        closing_balance = records[-1][8] if records else data["saldo_inicial"]
+        content = build_report_pdf(title="Libro mayor", period=f"{desde} — {hasta}",
+            sections=[{"headers": headers, "rows": records,
+                "column_types": ["text", "text", "text", "text", "text", "text", "amount", "amount", "amount"],
+                "totals": [["", "Total del período", "", "", "", "", displayed_debe,
+                            displayed_haber, closing_balance]]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=currency_label, generated_by=user.nombre, orientation="L", empty=not records)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="libro-mayor-{account["codigo"]}-{desde}-{hasta}.pdf"'})
+    return _csv_response(f"libro-mayor-{account['codigo']}-{desde}-{hasta}.csv", headers, records)
 
 
 @router.get("/balance-comprobacion/export")
 def export_balance(desde: date | None = None, hasta: date | None = None, moneda_id: int = Query(1, ge=1),
-                   nivel: int = Query(4, ge=1, le=5), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    tenant, desde, hasta = _context(user, db, desde, hasta, moneda_id)
+                   nivel: int = Query(4, ge=1, le=5), formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    tenant, desde, hasta, currency_label = _context(user, db, desde, hasta, moneda_id)
     data = balance_comprobacion(desde, hasta, moneda_id, nivel, user, db)
     records = [[x["codigo"],x["nombre"],x["naturaleza"],x["sumas"]["debe"],x["sumas"]["haber"],
                 x["saldos"]["deudor"],x["saldos"]["acreedor"]] for x in data["items"]]
     _enforce_csv_record_limit(records)
-    return _csv_response(f"balance-comprobacion-{desde}-{hasta}.csv",
-                         ["codigo","nombre","naturaleza","sumas_debe","sumas_haber","saldo_deudor","saldo_acreedor"], records)
+    headers = ["codigo","nombre","naturaleza","sumas_debe","sumas_haber","saldo_deudor","saldo_acreedor"]
+    if formato == "pdf":
+        displayed_totals = [sum((Decimal(str(row[index] or 0)) for row in records), ZERO)
+                            for index in range(3, 7)]
+        content = build_report_pdf(title="Balance de comprobación", period=f"{desde} — {hasta}",
+            sections=[{"headers": headers, "rows": records,
+                "column_types": ["text", "text", "text", "amount", "amount", "amount", "amount"],
+                "totals": [["", "Total general", "", *displayed_totals]]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=currency_label, generated_by=user.nombre, orientation="L", empty=not records)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="balance-comprobacion-{desde}-{hasta}.pdf"'})
+    return _csv_response(f"balance-comprobacion-{desde}-{hasta}.csv", headers, records)
