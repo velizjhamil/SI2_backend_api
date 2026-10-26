@@ -16,12 +16,14 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Header,
     Request,
+    Response,
     UploadFile,
     status,
 )
 from typing import Any
-from pydantic import ValidationError
+from pydantic import UUID4, ValidationError
 from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -1377,7 +1379,9 @@ def obtener_ficha_campo(
 def subir_foto_evaluacion(
     solicitud_id: int,
     request: Request,
+    response: Response,
     archivo: UploadFile = File(...),
+    client_id: UUID4 | None = Header(default=None, alias="X-Client-Id"),
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
     storage: SupabaseStorage = Depends(get_evaluacion_photo_storage),
@@ -1395,9 +1399,13 @@ def subir_foto_evaluacion(
         raise HTTPException(status_code=413, detail="La fotografía no debe superar los 5 MB")
     extension = _validar_foto(archivo.content_type, content)
     object_keys = _parse_fotografias_respaldo(solicitud.evaluacion.fotografias_respaldo)
+    client_object_id = str(client_id) if client_id is not None else str(uuid4())
+    object_key = f"{cooperativa_id}/{solicitud.id}/{client_object_id}.{extension}"
+    if client_id is not None and object_key in object_keys:
+        response.status_code = status.HTTP_200_OK
+        return _fotos_evaluacion(solicitud.evaluacion, storage, f"{cooperativa_id}/{solicitud.id}/")
     if len(object_keys) >= MAX_FOTOS_EVALUACION:
         raise HTTPException(status_code=409, detail="La evaluación ya tiene el máximo de 5 fotografías")
-    object_key = f"{cooperativa_id}/{solicitud.id}/{uuid4()}.{extension}"
 
     try:
         with tempfile.NamedTemporaryFile(suffix=f".{extension}") as photo_file:
