@@ -415,6 +415,228 @@ def test_scoring_evaluation_routes_are_registered():
     assert "post" in paths["/api/v1/creditos/solicitudes/{solicitud_id}/resolucion"]
 
 
+def _precalification_payload(socio_id, producto_id, **overrides):
+    return {
+        "socio_id": socio_id,
+        "producto_id": producto_id,
+        "monto": "1200.00",
+        "plazo_meses": 12,
+        "ingreso_mensual": "6000.00",
+        "egreso_mensual": "1000.00",
+        "cuota_deudas_mensual": "0.00",
+        "antiguedad_laboral_meses": 36,
+        "calificacion_asfi": "A",
+        "fuente_ingresos": "INDEPENDIENTE",
+        **overrides,
+    }
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_scores_without_persisting_credit_rows_and_matches_w23(
+    scoring_client, scoring_fixture
+):
+    request = scoring_fixture["make_request"]()
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    payload = _precalification_payload(request["socio_id"], scoring_fixture["product_id"])
+    with SessionLocal() as db:
+        before = (
+            db.query(models.SolicitudCredito).count(),
+            db.query(models.EvaluacionCampo).count(),
+            db.query(models.EvaluacionCrediticia).count(),
+        )
+
+    response = scoring_client.post("/api/v1/creditos/precalificacion", json=payload, headers=headers)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["precalificacion"] is True
+    assert {"score", "dictamen", "factores", "knockouts", "explicacion", "cuota_estimada",
+            "relacion_cuota_ingreso", "probabilidad_mora", "nivel_riesgo", "version_modelo",
+            "socio", "producto"} <= result.keys()
+    assert len(result["factores"]) == 7
+    assert result["socio"] == {
+        "id": request["socio_id"],
+        "nombre_completo": "Scoring Applicant",
+        "ci": f"SC-{scoring_fixture['suffix'].upper()}-1",
+    }
+    assert result["producto"] == {
+        "id": scoring_fixture["product_id"],
+        "nombre": "Scoring Fixture Product",
+    }
+    with SessionLocal() as db:
+        after = (
+            db.query(models.SolicitudCredito).count(),
+            db.query(models.EvaluacionCampo).count(),
+            db.query(models.EvaluacionCrediticia).count(),
+        )
+        assert after == before
+        assert db.query(models.Bitacora).filter(
+            models.Bitacora.usuario_id == scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["id"],
+            models.Bitacora.accion == "PRECALIFICAR",
+            models.Bitacora.modulo == "CREDITOS",
+        ).count() == 1
+
+    # W23 remains the persisted counterpart of the exact same score inputs.
+    evaluated = scoring_client.post(
+        f"/api/v1/creditos/solicitudes/{request['request_id']}/evaluacion", headers=headers
+    )
+    assert evaluated.status_code == 201, evaluated.text
+    w23_result = evaluated.json()
+    for field in (
+        "score", "dictamen", "factores", "knockouts", "explicacion", "cuota_estimada",
+        "relacion_cuota_ingreso", "probabilidad_mora", "nivel_riesgo", "version_modelo",
+    ):
+        assert result[field] == w23_result[field]
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_reuses_product_validation_and_tenant_role_checks(
+    scoring_client, scoring_fixture
+):
+    local_request = scoring_fixture["make_request"]()
+    foreign_request = scoring_fixture["make_request"](coop_number=2)
+    officer = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    base = _precalification_payload(local_request["socio_id"], scoring_fixture["product_id"])
+    route = "/api/v1/creditos/precalificacion"
+
+    foreign = scoring_client.post(
+        route,
+        json={**base, "socio_id": foreign_request["socio_id"]},
+        headers={"Authorization": f"Bearer {officer}"},
+    )
+    assert foreign.status_code == 404
+    out_of_range = scoring_client.post(
+        route,
+        json={**base, "monto": "60000.00"},
+        headers={"Authorization": f"Bearer {officer}"},
+    )
+    assert out_of_range.status_code == 400
+    assert out_of_range.json()["detail"] == "El monto está fuera del rango permitido para el producto"
+    negative_income = scoring_client.post(
+        route,
+        json={**base, "ingreso_mensual": "-1.00"},
+        headers={"Authorization": f"Bearer {officer}"},
+    )
+    assert negative_income.status_code == 400
+    assert negative_income.json()["detail"] == "Los ingresos, egresos y deudas no pueden ser negativos"
+    cashier = scoring_fixture["users"][(1, "CAJERO")]["token"]
+    denied = scoring_client.post(route, json=base, headers={"Authorization": f"Bearer {cashier}"})
+    assert denied.status_code == 403
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_applies_guarantee_knockout_without_guarantees(scoring_client, scoring_fixture):
+    request = scoring_fixture["make_request"]()
+    with SessionLocal() as db:
+        product = db.get(models.ProductoCredito, scoring_fixture["product_id"])
+        product.requiere_garantia = True
+        product.cobertura_minima_garantia = Decimal("100.00")
+        db.commit()
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    response = scoring_client.post(
+        "/api/v1/creditos/precalificacion",
+        json=_precalification_payload(request["socio_id"], scoring_fixture["product_id"]),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200, response.text
+    assert any(item["codigo"] == "GARANTIA_INSUFICIENTE" for item in response.json()["knockouts"])
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_checks_product_active_before_amount_and_term(scoring_client, scoring_fixture):
+    request = scoring_fixture["make_request"]()
+    with SessionLocal() as db:
+        product = db.get(models.ProductoCredito, scoring_fixture["product_id"])
+        product.estado = "INACTIVO"
+        db.commit()
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    response = scoring_client.post(
+        "/api/v1/creditos/precalificacion",
+        json=_precalification_payload(request["socio_id"], scoring_fixture["product_id"], monto="0", plazo_meses=0),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "El producto crediticio no está activo"
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_rejects_currency_different_from_product(scoring_client, scoring_fixture):
+    request = scoring_fixture["make_request"]()
+    with SessionLocal() as db:
+        different_currency_id = db.query(models.Moneda.id).filter(
+            models.Moneda.id != scoring_fixture["bob_id"]
+        ).first()[0]
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    response = scoring_client.post(
+        "/api/v1/creditos/precalificacion",
+        json=_precalification_payload(
+            request["socio_id"], scoring_fixture["product_id"], moneda_id=different_currency_id
+        ),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "La moneda debe coincidir con la del producto crediticio"
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_prequalification_returns_conflict_for_inactive_member(scoring_client, scoring_fixture):
+    request = scoring_fixture["make_request"]()
+    with SessionLocal() as db:
+        socio = db.get(models.Socio, request["socio_id"])
+        socio.estado = "INACTIVO"
+        db.commit()
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    response = scoring_client.post(
+        "/api/v1/creditos/precalificacion",
+        json=_precalification_payload(request["socio_id"], scoring_fixture["product_id"]),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "El socio no está activo"
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_w23_evaluation_response_contract_is_unchanged(scoring_client, scoring_fixture, monkeypatch):
+    from datetime import date
+    from app.api.v1.endpoints import creditos
+    import app.services.scoring as scoring
+
+    class FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 10, 26)
+
+    monkeypatch.setattr(creditos, "date", FrozenDate)
+    monkeypatch.setattr(scoring, "date", FrozenDate)
+    request = scoring_fixture["make_request"]()
+    token = scoring_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    response = scoring_client.post(
+        f"/api/v1/creditos/solicitudes/{request['request_id']}/evaluacion",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 201, response.text
+    evaluation = response.json()
+    assert set(evaluation) == {
+        "id", "solicitud_id", "version_modelo", "score", "dictamen", "factores", "knockouts",
+        "explicacion", "cuota_estimada", "relacion_cuota_ingreso", "fecha", "usuario", "resolucion",
+        "probabilidad_mora", "nivel_riesgo", "version_modelo_mora",
+    }
+    assert evaluation["solicitud_id"] == request["request_id"]
+    assert evaluation["version_modelo"] == "reglas-v2"
+    assert evaluation["score"] == 850
+    assert evaluation["dictamen"] == "APROBADO"
+    assert evaluation["cuota_estimada"] == "110.02"
+    assert evaluation["relacion_cuota_ingreso"] == "1.83"
+    assert [factor["codigo"] for factor in evaluation["factores"]] == [
+        "CAPACIDAD_PAGO", "CALIFICACION_ASFI", "ANTIGUEDAD_LABORAL", "ENDEUDAMIENTO",
+        "ANTIGUEDAD_SOCIO", "AHORRO", "HISTORIAL_INTERNO",
+    ]
+    assert evaluation["knockouts"] == []
+    assert evaluation["probabilidad_mora"] == "0.0538"
+    assert evaluation["nivel_riesgo"] == "BAJO"
+    assert evaluation["version_modelo_mora"] == "mora-logit-v1"
+
+
 @pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
 def test_evaluation_updates_request_persists_history_and_adds_latest_summary(
     scoring_client, scoring_fixture

@@ -94,6 +94,7 @@ from app.schemas.schemas import (
     VotoComiteIn, VotoOut, ComiteItemOut, ActaOut,
     AlertaOut, GestionOut, GestionCreateIn, DescartarAlertaIn,
     GarantiaCreateIn, GarantiaUpdateIn, GarantiaVerificacionIn, GarantiaOut, CoberturaOut,
+    PrecalificacionIn, PrecalificacionOut,
 )
 from app.services.alertas_mora import construir_candidatos_alerta, reconciliar_alertas, candidato_riesgo_alto
 
@@ -501,6 +502,185 @@ def simular_solicitud_credito(
         "supera_relacion_maxima": supera,
         "dentro_de_rangos": dentro_de_monto and dentro_de_plazo,
         "errores": errores,
+    }
+
+
+def _historial_y_ahorros(
+    db: Session,
+    *,
+    socio_id: int,
+    moneda_id: int,
+    excluir_solicitud_id: int | None = None,
+):
+    exclusion = "AND previa.id <> :solicitud_id" if excluir_solicitud_id is not None else ""
+    params = {"socio_id": socio_id}
+    if excluir_solicitud_id is not None:
+        params["solicitud_id"] = excluir_solicitud_id
+    historial = db.execute(
+        text(
+            f"""
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM credito c
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      {exclusion}
+                ) AS tiene_credito_previo,
+                EXISTS (
+                    SELECT 1
+                    FROM morosidad m
+                    JOIN credito c ON c.id = m.credito_id
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      {exclusion}
+                      AND m.estado = 'EN_MORA'
+                ) AS tiene_mora_vigente,
+                (
+                    SELECT count(*)
+                    FROM pago_cuota p
+                    JOIN credito c ON c.id = p.credito_id
+                    JOIN producto_credito pc ON pc.id = c.producto_credito_id
+                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
+                    WHERE previa.socio_id = :socio_id
+                      {exclusion}
+                      AND p.dias_atraso > pc.dias_gracia_mora
+                ) AS atrasos_previos
+            """
+        ),
+        params,
+    ).mappings().one()
+    ahorros = db.execute(
+        select(CuentaAhorro).where(
+            CuentaAhorro.socio_id == socio_id,
+            CuentaAhorro.moneda_id == moneda_id,
+            CuentaAhorro.estado == "ACTIVA",
+        )
+    ).scalars().all()
+    return historial, ahorros
+
+
+@router.post("/precalificacion", response_model=PrecalificacionOut)
+def precalificar_solicitud_credito(
+    body: PrecalificacionIn,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    socio = db.execute(
+        select(Socio).where(
+            Socio.id == body.socio_id,
+            Socio.cooperativa_id == cooperativa_id,
+        )
+    ).scalar_one_or_none()
+    if socio is None:
+        raise HTTPException(status_code=404, detail="Socio no encontrado")
+    if socio.estado != "ACTIVO":
+        raise HTTPException(status_code=409, detail="El socio no está activo")
+    producto = _obtener_producto(db, cooperativa_id, body.producto_id)
+    if producto.estado != "ACTIVO":
+        raise HTTPException(status_code=400, detail="El producto crediticio no está activo")
+    if body.moneda_id is not None and body.moneda_id != producto.moneda_id:
+        raise HTTPException(
+            status_code=400,
+            detail="La moneda debe coincidir con la del producto crediticio",
+        )
+    if body.plazo_meses <= 0:
+        raise HTTPException(status_code=400, detail="El plazo debe ser mayor a cero")
+    if body.monto <= 0:
+        raise HTTPException(status_code=400, detail="El monto debe ser mayor a cero")
+    if any(value < 0 for value in (
+        body.ingreso_mensual, body.egreso_mensual, body.cuota_deudas_mensual
+    )):
+        raise HTTPException(
+            status_code=400,
+            detail="Los ingresos, egresos y deudas no pueden ser negativos",
+        )
+    validate_base_credit_request(
+        producto,
+        monto=body.monto,
+        plazo_meses=body.plazo_meses,
+        destino="CAPITAL_TRABAJO",
+        destino_detalle=None,
+    )
+    if body.calificacion_asfi is not None and body.calificacion_asfi not in CALIFICACIONES_ASFI:
+        raise HTTPException(status_code=400, detail="La calificación ASFI no es válida")
+    if body.fuente_ingresos is not None and body.fuente_ingresos not in FUENTES_INGRESOS:
+        raise HTTPException(status_code=400, detail="La fuente de ingresos no es válida")
+    if body.antiguedad_laboral_meses < 0:
+        raise HTTPException(status_code=400, detail="La antigüedad laboral no puede ser negativa")
+    moneda_id = body.moneda_id if body.moneda_id is not None else producto.moneda_id
+    if db.get(Moneda, moneda_id) is None:
+        raise HTTPException(status_code=400, detail="La moneda indicada no existe")
+
+    evaluacion = EvaluacionCampo(
+        ingreso_mensual=body.ingreso_mensual,
+        egreso_mensual=body.egreso_mensual,
+        cuota_deudas_mensual=body.cuota_deudas_mensual,
+        capacidad_pago=body.ingreso_mensual - body.egreso_mensual - body.cuota_deudas_mensual,
+        actividad_economica="Precalificación",
+        fuente_ingresos=body.fuente_ingresos,
+        antiguedad_laboral_meses=body.antiguedad_laboral_meses,
+        calificacion_asfi=body.calificacion_asfi,
+        usuario_id=usuario.id,
+        socio_id=socio.id,
+    )
+    solicitud = SolicitudCredito(
+        monto=body.monto,
+        plazo_meses=body.plazo_meses,
+        tasa_interes=producto.tasa_interes_anual,
+        socio_id=socio.id,
+        usuario_id=usuario.id,
+        producto_credito_id=producto.id,
+        moneda_id=moneda_id,
+        cooperativa_id=cooperativa_id,
+    )
+    solicitud.producto = producto
+    solicitud.socio = socio
+    solicitud.evaluacion = evaluacion
+    solicitud.garantias = []
+    historial, ahorros = _historial_y_ahorros(
+        db, socio_id=socio.id, moneda_id=moneda_id
+    )
+    resultado = score_application(
+        solicitud,
+        savings_accounts=ahorros,
+        has_credit_history=historial["tiene_credito_previo"],
+        has_current_arrears=historial["tiene_mora_vigente"],
+    )
+    mora_resultado = predecir_mora(_features_mora(solicitud, resultado, ahorros, historial))
+    relacion_cuota_ingreso = resultado["relacion_cuota_ingreso"]
+    if relacion_cuota_ingreso is not None:
+        relacion_cuota_ingreso = _a_centavos(relacion_cuota_ingreso)
+    registrar_accion(
+        db,
+        accion="PRECALIFICAR",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Precalificación de crédito para socio: {socio.id}",
+        request=request,
+    )
+    db.commit()
+    return {
+        "precalificacion": True,
+        "score": resultado["score"],
+        "dictamen": resultado["dictamen"],
+        "factores": resultado["factores"],
+        "knockouts": resultado["knockouts"],
+        "explicacion": resultado["explicacion"],
+        "cuota_estimada": resultado["cuota_estimada"],
+        "relacion_cuota_ingreso": relacion_cuota_ingreso,
+        "probabilidad_mora": mora_resultado["probabilidad_mora"],
+        "nivel_riesgo": mora_resultado["nivel_riesgo"],
+        "version_modelo": resultado["version_modelo"],
+        "socio": {
+            "id": socio.id,
+            "nombre_completo": f"{socio.nombre} {socio.apellido}",
+            "ci": socio.ci,
+        },
+        "producto": {"id": producto.id, "nombre": producto.nombre},
     }
 
 
@@ -956,47 +1136,12 @@ def evaluar_solicitud_credito(
     if solicitud.evaluacion_campo_id is None or solicitud.evaluacion is None:
         raise HTTPException(status_code=422, detail="Falta la evaluación de campo del oficial")
 
-    historial = db.execute(
-        text(
-            """
-            SELECT
-                EXISTS (
-                    SELECT 1
-                    FROM credito c
-                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
-                    WHERE previa.socio_id = :socio_id
-                      AND previa.id <> :solicitud_id
-                ) AS tiene_credito_previo,
-                EXISTS (
-                    SELECT 1
-                    FROM morosidad m
-                    JOIN credito c ON c.id = m.credito_id
-                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
-                    WHERE previa.socio_id = :socio_id
-                      AND previa.id <> :solicitud_id
-                      AND m.estado = 'EN_MORA'
-                ) AS tiene_mora_vigente,
-                (
-                    SELECT count(*)
-                    FROM pago_cuota p
-                    JOIN credito c ON c.id = p.credito_id
-                    JOIN producto_credito pc ON pc.id = c.producto_credito_id
-                    JOIN solicitud_credito previa ON previa.id = c.solicitud_credito_id
-                    WHERE previa.socio_id = :socio_id
-                      AND previa.id <> :solicitud_id
-                      AND p.dias_atraso > pc.dias_gracia_mora
-                ) AS atrasos_previos
-            """
-        ),
-        {"socio_id": solicitud.socio_id, "solicitud_id": solicitud.id},
-    ).mappings().one()
-    ahorros = db.execute(
-        select(CuentaAhorro).where(
-            CuentaAhorro.socio_id == solicitud.socio_id,
-            CuentaAhorro.moneda_id == solicitud.moneda_id,
-            CuentaAhorro.estado == "ACTIVA",
-        )
-    ).scalars().all()
+    historial, ahorros = _historial_y_ahorros(
+        db,
+        socio_id=solicitud.socio_id,
+        moneda_id=solicitud.moneda_id,
+        excluir_solicitud_id=solicitud.id,
+    )
     resultado = score_application(
         solicitud,
         savings_accounts=ahorros,

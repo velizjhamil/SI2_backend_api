@@ -737,6 +737,36 @@ class SolicitudSimulacionOut(BaseModel):
     errores: list[str]
 
 
+class PrecalificacionIn(BaseModel):
+    socio_id: int
+    producto_id: int
+    monto: Decimal
+    plazo_meses: int
+    ingreso_mensual: Decimal
+    egreso_mensual: Decimal
+    cuota_deudas_mensual: Decimal
+    antiguedad_laboral_meses: int
+    calificacion_asfi: str | None = None
+    fuente_ingresos: str | None = None
+    moneda_id: int | None = None
+
+
+class PrecalificacionOut(BaseModel):
+    precalificacion: bool
+    score: int
+    dictamen: Literal["APROBADO", "RECHAZADO", "REVISION_MANUAL"]
+    factores: list[FactorOut]
+    knockouts: list[KnockoutOut]
+    explicacion: str
+    cuota_estimada: Decimal | None
+    relacion_cuota_ingreso: Decimal | None
+    probabilidad_mora: Decimal | None
+    nivel_riesgo: str | None
+    version_modelo: str
+    socio: dict[str, int | str]
+    producto: dict[str, int | str]
+
+
 class CuotaOut(BaseModel):
     numero: int
     fecha_vencimiento: date
