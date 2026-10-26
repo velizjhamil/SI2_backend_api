@@ -38,9 +38,9 @@ and with the server as the source of truth. Branch `feat/mobile-sync-offline` in
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
 | B1 | S2–S3 | Codex (wB:p2) | done | see git log feat/mobile-sync-offline |
-| M1 | S4 | Antigravity (wB:p3), in parallel (contract fixed in S3) | in progress | — |
+| M1 | S4 | Antigravity (wB:p3), in parallel (contract fixed in S3) | done (1 correction batch) | mobile ede7d5f |
 | V1 | S3 | Orchestrator: focused + full suite vs baseline, E2E + fixtures | done | same commit |
-| V2 | S1–S4 | Orchestrator: flutter test/analyze, verifier, assess/review | pending | — |
+| V2 | S1–S4 | Orchestrator: flutter test/analyze, verifier, assess/review | done | backend 6b4e01f |
 
 ## Log
 - L1 (2026-10-26, user): "si, vamos con ese" — in reply to "¿Seguimos con el CU-M11 (sincronización offline/online)?"
@@ -51,3 +51,20 @@ and with the server as the source of truth. Branch `feat/mobile-sync-offline` in
   X-Client-Id 201, replay 200 with the same list, 1 storage upload, bitácora +1; invalid id 422; evaluation PUT on
   APROBADA solicitud 66 -> 409 "La solicitud ya no se puede modificar". Fixtures -> mobile test/fixtures/m11.
   Risk: none (optional header; no-header behavior pinned by existing tests; replay serialized by the row lock).
+- 2026-10-26 M1 first pass: 135 tests, analyze clean. Independent verifier: 3 blockers — (1) storage keyed by role, not
+  user (officer B would see/send officer A's queue); (2) unlocked read-modify-write in OfflineStore loses (30/30) or
+  resurrects (20/30) queue items; (3) production CampoHomeScreen first load bypasses the offline service. Confirmed
+  missing sync() single-flight (duplicate delete -> spurious 404 conflict). Advisories: non-atomic JSON writes wipe the
+  queue on corruption, malformed items removed silently, photo bytes deleted on conflict, generic catch mislabels
+  parse errors as network, completed prequalifications not shown. One correction batch (items 1-9) sent to agy;
+  user id from the JWT 'sub' claim.
+- 2026-10-26 Recheck (same verifier, blockers only): PASS 1-4 (user isolation via JWT sub; 0/30 lost, 0/30
+  resurrected; offline first load shows cache; overlapping sync sends one delete, no conflict); no new blocker; no
+  mutex re-entrancy deadlock; logout/expiry clear currentUserId. flutter test 144 passed, analyze clean.
+- 2026-10-26 Mobile ede7d5f: assess high -> user granted native review (risk, resilience, reliability) -> approved +
+  acknowledged. Whole-branch mobile review vs main (user granted) stopped with lens_context_budget_exceeded (no
+  authority created); covered by per-commit reviews (M9, M11 reviewed; M10 mobile was under_budget, not reviewed).
+- Follow-ups from the M11 review (non-blocking): offline cache/queue/photos stored as plaintext JSON and not purged on
+  logout (PII at rest); manual sync button stuck if sync() throws (no try/finally); an online evaluation save can be
+  overwritten by an older queued one (stale replay); prequalification replay after timeout may duplicate (bitácora
+  only); 5xx items retried forever; worklist cache filter; raw exception text shown in UI.
