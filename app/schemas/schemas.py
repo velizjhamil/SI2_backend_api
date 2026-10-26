@@ -383,6 +383,11 @@ class EvaluacionCreditoCreate(BaseModel):
     coordenadas: str | None = None
     observaciones: str | None = None
 
+    @field_validator("coordenadas")
+    @classmethod
+    def validar_coordenadas(cls, value: str | None) -> str | None:
+        return _normalizar_coordenadas(value)
+
 
 class EvaluacionCreditoUpdate(BaseModel):
     ingreso_mensual: Decimal | None = None
@@ -394,6 +399,45 @@ class EvaluacionCreditoUpdate(BaseModel):
     calificacion_asfi: str | None = None
     coordenadas: str | None = None
     observaciones: str | None = None
+
+    @field_validator("coordenadas")
+    @classmethod
+    def validar_coordenadas(cls, value: str | None) -> str | None:
+        return _normalizar_coordenadas(value)
+
+
+def _normalizar_coordenadas(value: str | None) -> str | None:
+    if value is None:
+        return None
+    coordinates = value.split(",")
+    if len(coordinates) != 2:
+        raise ValueError("Las coordenadas deben tener el formato lat,lng")
+    try:
+        latitude, longitude = (Decimal(part.strip()) for part in coordinates)
+    except InvalidOperation as exc:
+        raise ValueError("Las coordenadas deben ser números decimales") from exc
+    if not latitude.is_finite() or not longitude.is_finite():
+        raise ValueError("Las coordenadas deben ser números decimales finitos")
+    if not Decimal("-90") <= latitude <= Decimal("90"):
+        raise ValueError("La latitud debe estar entre -90 y 90 grados")
+    if not Decimal("-180") <= longitude <= Decimal("180"):
+        raise ValueError("La longitud debe estar entre -180 y 180 grados")
+
+    def format_coordinate(coordinate: Decimal) -> str:
+        try:
+            normalized = coordinate.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        except InvalidOperation as exc:
+            raise ValueError("Las coordenadas tienen demasiada precisión") from exc
+        if normalized == 0:
+            return "0"
+        return format(normalized, "f").rstrip("0").rstrip(".") or "0"
+
+    return f"{format_coordinate(latitude)},{format_coordinate(longitude)}"
+
+
+class FotografiaEvaluacionOut(BaseModel):
+    id: str
+    url: str | None
 
 
 class EvaluacionOut(BaseModel):
@@ -411,6 +455,7 @@ class EvaluacionOut(BaseModel):
     coordenadas: str | None
     observaciones: str | None
     fecha: date
+    fotografias: list[FotografiaEvaluacionOut] = Field(default_factory=list)
 
 
 class SolicitudCreditoCreate(BaseModel):

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""
     BACKUP_BUCKET: str = "backups"
+    EVALUATION_PHOTO_BUCKET: str = "evaluaciones"
     BACKUP_CRON_TOKEN: str = ""
     BACKUP_RETENTION_AUTOMATIC: int = 7
     BACKUP_STALE_MINUTES: int = 60

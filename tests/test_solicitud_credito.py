@@ -3,10 +3,13 @@
 import pytest
 from datetime import date
 from decimal import Decimal
+import json
+import logging
 from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from app.api.v1.router import api_router
@@ -228,6 +231,499 @@ def test_credit_request_models_and_schemas_are_defined():
     } <= set(models.EvaluacionCampo.__table__.columns.keys())
     assert schemas.SolicitudOut
     assert schemas.EvaluacionOut
+
+
+def test_evaluation_coordinates_are_validated_and_normalized_on_create_and_update():
+    assert schemas.EvaluacionCreditoUpdate.model_validate({"coordenadas": None}).coordenadas is None
+    create_data = {
+        "ingreso_mensual": "6000.00",
+        "egreso_mensual": "2000.00",
+        "cuota_deudas_mensual": "500.00",
+        "actividad_economica": "Comercio minorista",
+        "fuente_ingresos": "INDEPENDIENTE",
+        "antiguedad_laboral_meses": 36,
+        "calificacion_asfi": "A",
+        "coordenadas": "-89.1234567,180.0000000",
+    }
+    created = schemas.EvaluacionCreditoCreate.model_validate(create_data)
+    updated = schemas.EvaluacionCreditoUpdate.model_validate(
+        {"coordenadas": "-0.0000004,-63.1800000"}
+    )
+    assert created.coordenadas == "-89.123457,180"
+    assert updated.coordenadas == "0,-63.18"
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    ["", "1", "1,2,3", "north,west", "90.000001,0", "0,-180.000001", "NaN,0", "Infinity,0"],
+)
+def test_evaluation_coordinates_reject_invalid_values(coordinates):
+    with pytest.raises(ValidationError):
+        schemas.EvaluacionCreditoUpdate.model_validate({"coordenadas": coordinates})
+
+
+def test_photo_routes_and_evaluation_output_contract_are_registered():
+    app = FastAPI()
+    app.include_router(api_router, prefix="/api/v1")
+    paths = app.openapi()["paths"]
+    base = "/api/v1/creditos/solicitudes/{solicitud_id}/evaluacion/fotos"
+    assert {"post", "get"} <= set(paths[base])
+    delete_path = next(path for path in paths if path.startswith(f"{base}/{{foto_id"))
+    assert "delete" in paths[delete_path]
+    assert "fotografias" in schemas.EvaluacionOut.model_fields
+
+
+def test_photo_content_validation_accepts_only_matching_jpeg_and_png_signatures():
+    from fastapi import HTTPException
+    from app.api.v1.endpoints.creditos import _validar_foto
+
+    assert _validar_foto("image/jpeg", b"\xff\xd8\xffdata") == "jpg"
+    assert _validar_foto("image/png", b"\x89PNG\r\n\x1a\ndata") == "png"
+    with pytest.raises(HTTPException) as mismatch:
+        _validar_foto("image/png", b"\xff\xd8\xffdata")
+    assert mismatch.value.status_code == 415
+
+
+def test_evaluation_photo_storage_uses_the_new_bucket_default():
+    from app.core.config import settings
+
+    assert settings.EVALUATION_PHOTO_BUCKET == "evaluaciones"
+
+
+def _create_evaluation_with_photo_path(client, loan_fixture, token):
+    created = client.post(
+        "/api/v1/creditos/solicitudes",
+        json=_request_payload(loan_fixture["local_socio_id"], loan_fixture["product_ids"][0]),
+        headers=_auth(token),
+    )
+    assert created.status_code == 201, created.text
+    request_id = created.json()["id"]
+    object_key = f"{loan_fixture['coop_ids'][0]}/{request_id}/photo.jpg"
+    with SessionLocal() as db:
+        request = db.get(models.SolicitudCredito, request_id)
+        request.evaluacion.fotografias_respaldo = json.dumps([object_key])
+        db.commit()
+    return request_id, object_key
+
+
+def _set_legacy_evaluation_photos(request_id):
+    with SessionLocal() as db:
+        request = db.get(models.SolicitudCredito, request_id)
+        request.evaluacion.fotografias_respaldo = "negocio_demo.jpg,domicilio_demo.jpg"
+        db.commit()
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_legacy_evaluation_photos_are_visible_without_rewriting_storage(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def signed_url(self, key, _expires_in):
+            return f"https://storage.test/{key}"
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    _set_legacy_evaluation_photos(request_id)
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: FakeStorage()
+    try:
+        field_sheet = client.get(
+            f"/api/v1/creditos/solicitudes/{request_id}/ficha-campo", headers=_auth(token)
+        )
+        photo_list = client.get(
+            f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos", headers=_auth(token)
+        )
+        expected = [
+            {"id": "negocio_demo.jpg", "url": None},
+            {"id": "domicilio_demo.jpg", "url": None},
+        ]
+        assert field_sheet.status_code == 200, field_sheet.text
+        assert field_sheet.json()["evaluacion"]["fotografias"] == expected
+        assert photo_list.status_code == 200, photo_list.text
+        assert photo_list.json() == expected
+        with SessionLocal() as db:
+            request = db.get(models.SolicitudCredito, request_id)
+            assert request.evaluacion.fotografias_respaldo == "negocio_demo.jpg,domicilio_demo.jpg"
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_upload_preserves_legacy_evaluation_photos_and_persists_json(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def upload(self, _key, _source, content_type="application/octet-stream"):
+            assert content_type == "image/jpeg"
+
+        def signed_url(self, key, _expires_in):
+            return f"https://storage.test/{key}"
+
+        def delete(self, _key):
+            raise AssertionError("Uploaded object should not be deleted")
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    _set_legacy_evaluation_photos(request_id)
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: FakeStorage()
+    try:
+        response = client.post(
+            f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos",
+            headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+        )
+        assert response.status_code == 201, response.text
+        photos = response.json()
+        assert [photo["id"] for photo in photos[:2]] == ["negocio_demo.jpg", "domicilio_demo.jpg"]
+        assert [photo["url"] for photo in photos[:2]] == [None, None]
+        assert len(photos) == 3
+        with SessionLocal() as db:
+            request = db.get(models.SolicitudCredito, request_id)
+            assert json.loads(request.evaluacion.fotografias_respaldo) == [
+                "negocio_demo.jpg", "domicilio_demo.jpg", photos[2]["id"]
+            ]
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_delete_legacy_evaluation_photo_does_not_delete_storage_object(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def delete(self, _key):
+            raise AssertionError("Legacy names have no storage object")
+
+        def signed_url(self, _key, _expires_in):
+            raise AssertionError("Legacy names must not be signed")
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    _set_legacy_evaluation_photos(request_id)
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: FakeStorage()
+    try:
+        response = client.delete(
+            f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos/negocio_demo.jpg",
+            headers=_auth(token),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == [{"id": "domicilio_demo.jpg", "url": None}]
+        with SessionLocal() as db:
+            request = db.get(models.SolicitudCredito, request_id)
+            assert json.loads(request.evaluacion.fotografias_respaldo) == ["domicilio_demo.jpg"]
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_upload_signing_failure_keeps_uploaded_photo_and_returns_null_url(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def __init__(self):
+            self.uploads = []
+            self.deletes = []
+
+        def upload(self, key, _source, content_type="application/octet-stream"):
+            self.uploads.append(key)
+
+        def signed_url(self, _key, _expires_in):
+            raise RuntimeError("Signing is unavailable")
+
+        def delete(self, key):
+            self.deletes.append(key)
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    with SessionLocal() as db:
+        request = db.get(models.SolicitudCredito, request_id)
+        request.evaluacion.fotografias_respaldo = "[]"
+        db.commit()
+    fake_storage = FakeStorage()
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: fake_storage
+    try:
+        response = client.post(
+            f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos",
+            headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+        )
+        assert response.status_code == 201, response.text
+        uploaded_photo = response.json()[-1]
+        assert uploaded_photo["url"] is None
+        assert fake_storage.uploads == [uploaded_photo["id"]]
+        assert fake_storage.deletes == []
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_upload_commit_failure_rolls_back_and_removes_uploaded_object(client, loan_fixture, monkeypatch):
+    from sqlalchemy.orm import Session
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def __init__(self):
+            self.uploads = []
+            self.deletes = []
+
+        def upload(self, key, _source, content_type="application/octet-stream"):
+            self.uploads.append(key)
+
+        def signed_url(self, key, _expires_in):
+            return f"https://storage.test/{key}"
+
+        def delete(self, key):
+            self.deletes.append(key)
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    with SessionLocal() as db:
+        request = db.get(models.SolicitudCredito, request_id)
+        request.evaluacion.fotografias_respaldo = "[]"
+        db.commit()
+    fake_storage = FakeStorage()
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: fake_storage
+
+    def fail_commit(_session):
+        raise RuntimeError("Commit failed")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="Commit failed"):
+            client.post(
+                f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos",
+                headers=_auth(token),
+                files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+            )
+        assert len(fake_storage.uploads) == 1
+        assert fake_storage.deletes == fake_storage.uploads
+        with SessionLocal() as db:
+            request = db.get(models.SolicitudCredito, request_id)
+            assert json.loads(request.evaluacion.fotografias_respaldo) == []
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_delete_commit_failure_keeps_listed_storage_object(client, loan_fixture, monkeypatch):
+    from sqlalchemy.orm import Session
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def __init__(self):
+            self.deletes = []
+
+        def delete(self, key):
+            self.deletes.append(key)
+
+        def signed_url(self, key, _expires_in):
+            return f"https://storage.test/{key}"
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    fake_storage = FakeStorage()
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: fake_storage
+
+    def fail_commit(_session):
+        raise RuntimeError("Commit failed")
+
+    monkeypatch.setattr(Session, "commit", fail_commit)
+    try:
+        with pytest.raises(RuntimeError, match="Commit failed"):
+            client.delete(
+                f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos/{object_key}",
+                headers=_auth(token),
+            )
+        assert fake_storage.deletes == []
+        with SessionLocal() as db:
+            request = db.get(models.SolicitudCredito, request_id)
+            assert json.loads(request.evaluacion.fotografias_respaldo) == [object_key]
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_credit_request_list_does_not_call_storage_for_photos(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FailingStorage:
+        def signed_url(self, _key, _expires_in):
+            raise RuntimeError("Storage is unavailable")
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: FailingStorage()
+    try:
+        request_id, _object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+        response = client.get("/api/v1/creditos/solicitudes", headers=_auth(token))
+        assert response.status_code == 200, response.text
+        detail = client.get(
+            f"/api/v1/creditos/solicitudes/{request_id}", headers=_auth(token)
+        )
+        assert detail.status_code == 200, detail.text
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_field_photo_signing_failure_returns_null_url_and_logs_warning(client, loan_fixture, caplog):
+    from app.api.v1.endpoints import creditos
+
+    class FailingStorage:
+        def signed_url(self, _key, _expires_in):
+            raise RuntimeError("Storage is unavailable")
+
+    token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    request_id, object_key = _create_evaluation_with_photo_path(client, loan_fixture, token)
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: FailingStorage()
+    try:
+        with caplog.at_level(logging.WARNING, logger="app.api.v1.endpoints.creditos"):
+            field_sheet = client.get(
+                f"/api/v1/creditos/solicitudes/{request_id}/ficha-campo", headers=_auth(token)
+            )
+            photo_list = client.get(
+                f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos", headers=_auth(token)
+            )
+        assert field_sheet.status_code == 200, field_sheet.text
+        assert field_sheet.json()["evaluacion"]["fotografias"] == [{"id": object_key, "url": None}]
+        assert photo_list.status_code == 200, photo_list.text
+        assert photo_list.json() == [{"id": object_key, "url": None}]
+        assert any(record.levelno == logging.WARNING for record in caplog.records)
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")
+def test_field_photos_upload_list_delete_and_audit_without_network(client, loan_fixture):
+    from app.api.v1.endpoints import creditos
+
+    class FakeStorage:
+        def __init__(self):
+            self.uploads = []
+            self.deletes = []
+
+        def upload(self, key, source, content_type="application/octet-stream"):
+            self.uploads.append((key, open(source, "rb").read(), content_type))
+
+        def signed_url(self, key, expires_in):
+            return f"https://storage.test/{key}?expires={expires_in}"
+
+        def delete(self, key):
+            self.deletes.append(key)
+
+    fake_storage = FakeStorage()
+    client.app.dependency_overrides[creditos.get_evaluacion_photo_storage] = lambda: fake_storage
+    try:
+        token = loan_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+        created = client.post(
+            "/api/v1/creditos/solicitudes",
+            json=_request_payload(loan_fixture["local_socio_id"], loan_fixture["product_ids"][0]),
+            headers=_auth(token),
+        )
+        assert created.status_code == 201, created.text
+        request_id = created.json()["id"]
+        base = f"/api/v1/creditos/solicitudes/{request_id}/evaluacion/fotos"
+
+        with SessionLocal() as db:
+            empty_evaluation_request = models.SolicitudCredito(
+                monto=Decimal("1200.00"), plazo_meses=12, tasa_interes=Decimal("18.00"),
+                estado="PENDIENTE", socio_id=loan_fixture["second_local_socio_id"],
+                usuario_id=loan_fixture["users"][(1, "OFICIAL_CREDITO")]["id"],
+                producto_credito_id=loan_fixture["product_ids"][0],
+                numero_solicitud=f"M9-{loan_fixture['suffix']}-E",
+                cooperativa_id=loan_fixture["coop_ids"][0],
+            )
+            foreign_request = models.SolicitudCredito(
+                monto=Decimal("1200.00"), plazo_meses=12, tasa_interes=Decimal("18.00"),
+                estado="PENDIENTE", socio_id=loan_fixture["foreign_socio_id"],
+                usuario_id=loan_fixture["users"][(2, "OFICIAL_CREDITO")]["id"],
+                producto_credito_id=loan_fixture["product_ids"][0],
+                numero_solicitud=f"M9-{loan_fixture['suffix']}-F",
+                cooperativa_id=loan_fixture["coop_ids"][1],
+            )
+            db.add_all([empty_evaluation_request, foreign_request])
+            db.commit()
+            empty_request_id, foreign_request_id = empty_evaluation_request.id, foreign_request.id
+
+        no_evaluation = client.post(
+            f"/api/v1/creditos/solicitudes/{empty_request_id}/evaluacion/fotos",
+            headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+        )
+        assert no_evaluation.status_code == 422
+        foreign = client.get(
+            f"/api/v1/creditos/solicitudes/{foreign_request_id}/evaluacion/fotos",
+            headers=_auth(token),
+        )
+        assert foreign.status_code == 404
+
+        invalid_type = client.post(
+            base, headers=_auth(token),
+            files={"archivo": ("photo.png", b"\xff\xd8\xffimage", "image/png")},
+        )
+        assert invalid_type.status_code == 415
+        too_large = client.post(
+            base, headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xff" + b"x" * (5 * 1024 * 1024), "image/jpeg")},
+        )
+        assert too_large.status_code == 413
+
+        photos = []
+        for _ in range(5):
+            uploaded = client.post(
+                base, headers=_auth(token),
+                files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            photos = uploaded.json()
+        assert len(photos) == 5
+        photo = photos[0]
+        assert photo["id"].startswith(f"{loan_fixture['coop_ids'][0]}/{request_id}/")
+        assert photo["url"].startswith("https://storage.test/")
+        assert fake_storage.uploads[0][1] == b"\xff\xd8\xffimage"
+        assert fake_storage.uploads[0][2] == "image/jpeg"
+        limit_reached = client.post(
+            base, headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+        )
+        assert limit_reached.status_code == 409
+
+        listed = client.get(base, headers=_auth(token))
+        assert listed.status_code == 200
+        assert listed.json() == photos
+        field_sheet = client.get(
+            f"/api/v1/creditos/solicitudes/{request_id}/ficha-campo", headers=_auth(token)
+        )
+        assert field_sheet.status_code == 200
+        assert field_sheet.json()["evaluacion"]["fotografias"] == photos
+        deleted = client.delete(f"{base}/{photo['id']}", headers=_auth(token))
+        assert deleted.status_code == 200
+        assert fake_storage.deletes == [photo["id"]]
+        assert client.delete(f"{base}/{photo['id']}", headers=_auth(token)).status_code == 404
+        assert len(client.get(base, headers=_auth(token)).json()) == 4
+
+        with SessionLocal() as db:
+            db.query(models.SolicitudCredito).filter(
+                models.SolicitudCredito.id == request_id
+            ).update({models.SolicitudCredito.estado: "APROBADO"})
+            db.commit()
+        closed_upload = client.post(
+            base, headers=_auth(token),
+            files={"archivo": ("photo.jpg", b"\xff\xd8\xffimage", "image/jpeg")},
+        )
+        assert closed_upload.status_code == 409
+        closed_delete = client.delete(f"{base}/{photos[1]['id']}", headers=_auth(token))
+        assert closed_delete.status_code == 409
+
+        with SessionLocal() as db:
+            audit_events = db.query(models.Bitacora.accion).filter(
+                models.Bitacora.usuario_id == loan_fixture["users"][(1, "OFICIAL_CREDITO")]["id"],
+                models.Bitacora.modulo == "CREDITOS",
+                models.Bitacora.descripcion.contains(str(request_id)),
+                models.Bitacora.accion.in_(("SUBIR_FOTO_EVALUACION", "ELIMINAR_FOTO_EVALUACION")),
+            ).all()
+        assert [event[0] for event in audit_events].count("SUBIR_FOTO_EVALUACION") == 5
+        assert [event[0] for event in audit_events].count("ELIMINAR_FOTO_EVALUACION") == 1
+    finally:
+        client.app.dependency_overrides.pop(creditos.get_evaluacion_photo_storage, None)
 
 
 @pytest.mark.skipif(not _DB_DISPONIBLE, reason="La base de datos local no está disponible")

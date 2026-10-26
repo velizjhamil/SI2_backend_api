@@ -1,11 +1,25 @@
 """Cooperative credit-product catalog (CU-W20)."""
 
+import json
+import logging
 import re
+import tempfile
 from collections.abc import Callable
-from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_UP
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from typing import Any
 from pydantic import ValidationError
 from sqlalchemy import Date, cast, func, or_, select, text
@@ -15,16 +29,19 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.v1.deps import get_current_user, get_db, require_admin
 from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secuencia
 from app.core.bitacora import registrar_accion
+from app.core.config import settings
 from app.services.amortizacion import calcular_cuota_inicial, generar_plan_pagos
 from app.services.cobro_cuotas import calcular_mora, resumir_morosidad
 from app.services.scoring import score_application
 from app.services.credit_request_rules import (
+    ESTADOS_SOLICITUD_EN_CURSO,
     cancel_credit_request,
     has_in_progress_request,
     requires_field_evaluation,
     requires_field_evaluation_clause,
     validate_base_credit_request,
 )
+from app.services.backups import SupabaseStorage
 from app.models.models import (
     Credito,
     CuentaAhorro,
@@ -81,6 +98,10 @@ from app.schemas.schemas import (
 from app.services.alertas_mora import construir_candidatos_alerta, reconciliar_alertas, candidato_riesgo_alto
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+MAX_FOTO_EVALUACION_BYTES = 5 * 1024 * 1024
+MAX_FOTOS_EVALUACION = 5
+FOTOS_EVALUACION_URL_SECONDS = 300
 ROLES_LECTURA_PRODUCTOS = {"ADMINISTRADOR", "CONTADOR", "CAJERO", "OFICIAL_CREDITO"}
 CENTAVO = Decimal("0.01")
 FUENTES_INGRESOS = {"DEPENDIENTE", "INDEPENDIENTE", "MIXTO"}
@@ -100,6 +121,76 @@ ESTADOS_SOLICITUD = {
 ESTADOS_EDITABLES_SOLICITUD = {"PENDIENTE", "OBSERVADA"}
 VOTOS_COMITE_REQUERIDOS = 3
 ROLES_VOTANTES_COMITE = {"ADMINISTRADOR", "OFICIAL_CREDITO", "CONTADOR"}
+
+
+def get_evaluacion_photo_storage() -> SupabaseStorage:
+    return SupabaseStorage(
+        settings.SUPABASE_URL,
+        settings.SUPABASE_SERVICE_KEY,
+        settings.EVALUATION_PHOTO_BUCKET,
+    )
+
+
+def _parse_fotografias_respaldo(value: str | None) -> list[str]:
+    if not value or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        if not all(isinstance(key, str) for key in parsed):
+            raise HTTPException(status_code=500, detail="La lista de fotografías no es válida")
+        return parsed
+    return [name.strip() for name in value.split(",") if name.strip()]
+
+
+def _fotos_evaluacion(
+    evaluacion: EvaluacionCampo,
+    storage: SupabaseStorage,
+    object_prefix: str,
+) -> list[dict[str, str | None]]:
+    try:
+        object_keys = _parse_fotografias_respaldo(evaluacion.fotografias_respaldo)
+    except HTTPException:
+        raise
+    except (TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=500, detail="La lista de fotografías no es válida") from exc
+    photos = []
+    for key in object_keys:
+        if not key.startswith(object_prefix):
+            logger.warning("Evaluation photo %s has no managed storage object", key)
+            photos.append({"id": key, "url": None})
+            continue
+        try:
+            url = storage.signed_url(key, FOTOS_EVALUACION_URL_SECONDS)
+        except Exception:
+            logger.warning("Unable to sign evaluation photo URL for object %s", key)
+            url = None
+        photos.append({"id": key, "url": url})
+    return photos
+
+
+def _validar_foto(content_type: str | None, content: bytes) -> str:
+    signatures = {
+        "image/jpeg": (b"\xff\xd8\xff", "jpg"),
+        "image/png": (b"\x89PNG\r\n\x1a\n", "png"),
+    }
+    accepted = signatures.get(content_type or "")
+    if accepted is None or not content.startswith(accepted[0]):
+        raise HTTPException(status_code=415, detail="Solo se permiten fotografías JPEG o PNG válidas")
+    return accepted[1]
+
+
+def _lock_and_refresh_photo_request(db: Session, solicitud: SolicitudCredito) -> None:
+    db.execute(
+        select(SolicitudCredito.id)
+        .where(SolicitudCredito.id == solicitud.id)
+        .with_for_update()
+    )
+    db.refresh(solicitud, attribute_names=["estado", "evaluacion"])
+    if solicitud.evaluacion is not None:
+        db.refresh(solicitud.evaluacion, attribute_names=["fotografias_respaldo"])
 
 
 def _no_mobile_receipt_callback():
@@ -1094,6 +1185,7 @@ def obtener_ficha_campo(
     solicitud_id: int,
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
+    storage: SupabaseStorage = Depends(get_evaluacion_photo_storage),
 ):
     cooperativa_id = _validar_evaluador_crediticio(usuario)
     solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
@@ -1121,7 +1213,12 @@ def obtener_ficha_campo(
         },
         "datos_declarados": solicitud.datos_declarados,
         "evaluacion": (
-            EvaluacionOut.model_validate(solicitud.evaluacion).model_dump(mode="json")
+            {
+                **EvaluacionOut.model_validate(solicitud.evaluacion).model_dump(mode="json"),
+                "fotografias": _fotos_evaluacion(
+                    solicitud.evaluacion, storage, f"{cooperativa_id}/{solicitud.id}/"
+                ),
+            }
             if solicitud.evaluacion is not None else None
         ),
         "catalogos": {
@@ -1129,6 +1226,123 @@ def obtener_ficha_campo(
             "calificaciones_asfi": sorted(CALIFICACIONES_ASFI),
         },
     }
+
+
+@router.post("/solicitudes/{solicitud_id}/evaluacion/fotos", status_code=status.HTTP_201_CREATED)
+def subir_foto_evaluacion(
+    solicitud_id: int,
+    request: Request,
+    archivo: UploadFile = File(...),
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: SupabaseStorage = Depends(get_evaluacion_photo_storage),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    _lock_and_refresh_photo_request(db, solicitud)
+    if solicitud.estado not in ESTADOS_SOLICITUD_EN_CURSO:
+        raise HTTPException(status_code=409, detail="La solicitud ya no está en curso")
+    if solicitud.evaluacion is None:
+        raise HTTPException(status_code=422, detail="La solicitud no tiene evaluación de campo")
+
+    content = archivo.file.read(MAX_FOTO_EVALUACION_BYTES + 1)
+    if len(content) > MAX_FOTO_EVALUACION_BYTES:
+        raise HTTPException(status_code=413, detail="La fotografía no debe superar los 5 MB")
+    extension = _validar_foto(archivo.content_type, content)
+    object_keys = _parse_fotografias_respaldo(solicitud.evaluacion.fotografias_respaldo)
+    if len(object_keys) >= MAX_FOTOS_EVALUACION:
+        raise HTTPException(status_code=409, detail="La evaluación ya tiene el máximo de 5 fotografías")
+    object_key = f"{cooperativa_id}/{solicitud.id}/{uuid4()}.{extension}"
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=f".{extension}") as photo_file:
+            photo_file.write(content)
+            photo_file.flush()
+            storage.upload(object_key, photo_file.name, content_type=archivo.content_type)
+    except Exception as exc:
+        try:
+            storage.delete(object_key)
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="No se pudo guardar la fotografía") from exc
+
+    object_keys.append(object_key)
+    solicitud.evaluacion.fotografias_respaldo = json.dumps(object_keys)
+    registrar_accion(
+        db,
+        accion="SUBIR_FOTO_EVALUACION",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Fotografía agregada a la evaluación de la solicitud: {solicitud.id}",
+        request=request,
+    )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        try:
+            storage.delete(object_key)
+        except Exception:
+            pass
+        raise
+    return _fotos_evaluacion(solicitud.evaluacion, storage, f"{cooperativa_id}/{solicitud.id}/")
+
+
+@router.get("/solicitudes/{solicitud_id}/evaluacion/fotos")
+def listar_fotos_evaluacion(
+    solicitud_id: int,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: SupabaseStorage = Depends(get_evaluacion_photo_storage),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    return (
+        _fotos_evaluacion(solicitud.evaluacion, storage, f"{cooperativa_id}/{solicitud.id}/")
+        if solicitud.evaluacion is not None else []
+    )
+
+
+@router.delete("/solicitudes/{solicitud_id}/evaluacion/fotos/{foto_id:path}")
+def eliminar_foto_evaluacion(
+    solicitud_id: int,
+    foto_id: str,
+    request: Request,
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    storage: SupabaseStorage = Depends(get_evaluacion_photo_storage),
+):
+    cooperativa_id = _validar_evaluador_crediticio(usuario)
+    solicitud = _obtener_solicitud(db, cooperativa_id, solicitud_id)
+    _lock_and_refresh_photo_request(db, solicitud)
+    if solicitud.estado not in ESTADOS_SOLICITUD_EN_CURSO:
+        raise HTTPException(status_code=409, detail="La solicitud ya no está en curso")
+    if solicitud.evaluacion is None:
+        raise HTTPException(status_code=404, detail="La fotografía no existe")
+    object_keys = _parse_fotografias_respaldo(solicitud.evaluacion.fotografias_respaldo)
+    if foto_id not in object_keys:
+        raise HTTPException(status_code=404, detail="La fotografía no existe")
+    object_prefix = f"{cooperativa_id}/{solicitud.id}/"
+    managed_object = foto_id.startswith(object_prefix)
+    object_keys.remove(foto_id)
+    solicitud.evaluacion.fotografias_respaldo = json.dumps(object_keys)
+    registrar_accion(
+        db,
+        accion="ELIMINAR_FOTO_EVALUACION",
+        modulo="CREDITOS",
+        usuario_id=usuario.id,
+        cooperativa_id=cooperativa_id,
+        descripcion=f"Fotografía eliminada de la evaluación de la solicitud: {solicitud.id}",
+        request=request,
+    )
+    db.commit()
+    if managed_object:
+        try:
+            storage.delete(foto_id)
+        except Exception:
+            logger.warning("Unable to delete evaluation photo object %s", foto_id)
+    return _fotos_evaluacion(solicitud.evaluacion, storage, object_prefix)
 
 
 @router.get("/solicitudes/{solicitud_id}", response_model=SolicitudOut)

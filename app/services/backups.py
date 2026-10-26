@@ -109,10 +109,15 @@ class SupabaseStorage:
         response.raise_for_status()
         return response
 
-    def upload(self, key: str, source: str) -> None:
+    def upload(
+        self,
+        key: str,
+        source: str,
+        content_type: str = "application/octet-stream",
+    ) -> None:
         with open(source, "rb") as stream:
             self._request("POST", f"/object/{quote(self.bucket)}/{quote(key, safe='/')}",
-                          content=stream, headers={"Content-Type": "application/octet-stream", "x-upsert": "false"})
+                          content=stream, headers={"Content-Type": content_type, "x-upsert": "false"})
 
     def signed_url(self, key: str, expires_in: int) -> str:
         response = self._request(

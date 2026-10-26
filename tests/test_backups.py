@@ -18,6 +18,29 @@ def test_backup_settings_have_safe_defaults():
     assert settings.BACKUP_SIGNED_URL_SECONDS == 300
 
 
+def test_supabase_upload_defaults_to_octet_stream(monkeypatch, tmp_path):
+    from app.services import backups
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            pass
+
+    def fake_request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr(backups.httpx, "request", fake_request)
+    source = tmp_path / "backup.dump"
+    source.write_bytes(b"backup")
+    backups.SupabaseStorage("https://storage.test", "key", "backups").upload(
+        "backup.dump", str(source)
+    )
+
+    assert captured["headers"]["Content-Type"] == "application/octet-stream"
+
+
 def test_sanitize_error_does_not_expose_database_credentials():
     from app.services.backups import sanitize_backup_error
 
