@@ -39,8 +39,8 @@ Delivery: one commit per side. Runners: backend `.venv/bin/python -m pytest -q`;
 |---|---|---|---|---|
 | B1 | S2–S4 | Codex (wB:p2) | done (4 corrections) | see git log feat/mobile-fotos-gps |
 | V1 | S3–S4 | Orchestrator: suite, E2E, payload capture + independent verifier (risk 1/3/4) | done: PASS S2–S4 | same commit |
-| M1 | S5 | Antigravity (wB:p3); fixtures in SI2_mobile_app/test/fixtures/m9 | in progress | — |
-| V2 | S1–S5 | Orchestrator: flutter test/analyze, review | pending | — |
+| M1 | S5 | Antigravity (wB:p3); fixtures in SI2_mobile_app/test/fixtures/m9 | done | mobile d588236 |
+| V2 | S1–S5 | Orchestrator: flutter test/analyze, review | done: both native reviews approved + acknowledged | — |
 
 ## Log
 - L1 (2026-10-26, user): "mejor, no hagamos nada de momento y enfoquemonos en los CU que te pase antes de este, y si
@@ -61,4 +61,17 @@ Delivery: one commit per side. Runners: backend `.venv/bin/python -m pytest -q`;
   5, legacy rows untouched on read). Advisories fixed by Codex: signing failure on upload degrades to url null;
   failed upload commit rolls back + best-effort deletes the object; storage delete after DB commit. Final focused
   run (parent spot check): 57 passed. Note for M1: multipart must send image/jpeg or image/png (octet-stream -> 415).
+- 2026-10-26 Backend committed 2258671; RDD assess escalated (item 1) -> user granted native review (risk,
+  resilience, reliability lenses), running.
+- 2026-10-26 M1: agy was interrupted once (model picker); resumed. Removed a stray ios/Runner/Info.plist (repo has no
+  iOS Runner project, so iOS permissions are not applicable). Orchestrator fixed downscaled PNG being named .jpg
+  (would 415). flutter test 107 passed (baseline 90), analyze clean. Mobile commit d588236; assess medium,
+  under_budget (no review due).
+- 2026-10-26 Native reviews (user granted both): backend lineage review-2b361929f69acd8b (risk, resilience,
+  reliability) approved + acknowledged; mobile lineage review-59de7bc3c7f82d91 (reliability) approved +
+  acknowledged. Non-blocking follow-ups: backend — sequential signing latency in ficha-campo, row lock held during
+  storage upload, silent compensation failures, empty-string coordenadas rejected (422); mobile — non-list 2xx body
+  empties the photo grid, no timeout on reading the upload response body, setState after await without mounted
+  check, upload success path untested.
+- Production prerequisite: create Supabase bucket `evaluaciones` (EVALUATION_PHOTO_BUCKET).
 - 2026-10-26 (user): "ok" — authorizes agy to edit AndroidManifest.xml and Info.plist for camera/location permissions only.
