@@ -37,8 +37,8 @@ Branch `feat/mobile-precalificacion` in both repos, stacked on `feat/mobile-foto
 |---|---|---|---|---|
 | B1 | S2–S3 | Codex (wB:p2) | done (+1 correction) | see git log feat/mobile-precalificacion |
 | V1 | S3 | Orchestrator: focused + full suite vs baseline, E2E + payload capture | done: verifier PASS S2–S3 | same commit |
-| M1 | S4 | Antigravity (wB:p3); fixtures in SI2_mobile_app/test/fixtures/m10 | in progress | — |
-| V2 | S1–S4 | Orchestrator: flutter test/analyze, assess/review | pending | — |
+| M1 | S4 | Antigravity (wB:p3); fixtures in SI2_mobile_app/test/fixtures/m10 | done | mobile c1420cc |
+| V2 | S1–S4 | Orchestrator: flutter test/analyze, assess/review | done | backend 50c5132 |
 
 ## Log
 - L1 (2026-10-26, user): "ok" — in reply to "¿Seguimos con el CU-M10 (precalificación y scoring en campo)?"
@@ -54,3 +54,10 @@ Branch `feat/mobile-precalificacion` in both repos, stacked on `feat/mobile-foto
   scenarios incl. own-request exclusion) identical except solicitud_id; precalification flushes only Bitacora; roles
   and tenant 404 confirmed. Advisories fixed by Codex: product-active check before plazo/monto (simulation order);
   moneda_id different from the product currency -> 400; test for inactive socio 409. Parent spot check: 95 passed.
+- 2026-10-26 Backend 50c5132: assess escalated (item 3); user granted native review (risk, reliability) -> approved +
+  acknowledged. Follow-ups: hardcoded destino passed to validate_base_credit_request, more input-validation tests.
+- 2026-10-26 M1: flutter test 120 passed (baseline 107), analyze clean; mobile c1420cc (assess medium, under_budget).
+  Follow-up: GET /socios/ defaults to limite=50, so the socio picker misses socios beyond 50 (needs paging/search).
+- 2026-10-26 Whole-branch review vs main (CU-M9 + CU-M10, reliability lens; user granted) -> approved + acknowledged.
+  Follow-ups: coordinates re-validation of legacy stored values on round-trip, EvaluacionOut.fotografias empty outside
+  ficha-campo, photo tenant/role coverage in committed tests.
