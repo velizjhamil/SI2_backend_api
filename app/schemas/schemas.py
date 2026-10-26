@@ -407,7 +407,7 @@ class EvaluacionCreditoUpdate(BaseModel):
 
 
 def _normalizar_coordenadas(value: str | None) -> str | None:
-    if value is None:
+    if value is None or not value.strip():
         return None
     coordinates = value.split(",")
     if len(coordinates) != 2:
@@ -455,7 +455,6 @@ class EvaluacionOut(BaseModel):
     coordenadas: str | None
     observaciones: str | None
     fecha: date
-    fotografias: list[FotografiaEvaluacionOut] = Field(default_factory=list)
 
 
 class SolicitudCreditoCreate(BaseModel):

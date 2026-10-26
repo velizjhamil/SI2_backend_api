@@ -1401,7 +1401,8 @@ def subir_foto_evaluacion(
     object_keys = _parse_fotografias_respaldo(solicitud.evaluacion.fotografias_respaldo)
     client_object_id = str(client_id) if client_id is not None else str(uuid4())
     object_key = f"{cooperativa_id}/{solicitud.id}/{client_object_id}.{extension}"
-    if client_id is not None and object_key in object_keys:
+    client_object_prefix = f"{cooperativa_id}/{solicitud.id}/{client_id}."
+    if client_id is not None and any(key.startswith(client_object_prefix) for key in object_keys):
         response.status_code = status.HTTP_200_OK
         return _fotos_evaluacion(solicitud.evaluacion, storage, f"{cooperativa_id}/{solicitud.id}/")
     if len(object_keys) >= MAX_FOTOS_EVALUACION:

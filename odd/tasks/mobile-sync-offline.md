@@ -42,6 +42,9 @@ and with the server as the source of truth. Branch `feat/mobile-sync-offline` in
 | V1 | S3 | Orchestrator: focused + full suite vs baseline, E2E + fixtures | done | same commit |
 | V2 | S1–S4 | Orchestrator: flutter test/analyze, verifier, assess/review | done | backend 6b4e01f |
 
+| F1 | S4 | Antigravity (wB:p3): M11 review follow-ups 1-8 (no at-rest encryption) | done | see mobile git log |
+| F2 | S3 | Codex (wB:p2): backend review follow-ups R3-001/003/004/005 | done | see backend git log |
+
 ## Log
 - L1 (2026-10-26, user): "si, vamos con ese" — in reply to "¿Seguimos con el CU-M11 (sincronización offline/online)?"
 - 2026-10-26: design chosen by the orchestrator (no new dependencies; server wins; X-Client-Id idempotency);
@@ -68,3 +71,13 @@ and with the server as the source of truth. Branch `feat/mobile-sync-offline` in
   logout (PII at rest); manual sync button stuck if sync() throws (no try/finally); an online evaluation save can be
   overwritten by an older queued one (stale replay); prequalification replay after timeout may duplicate (bitácora
   only); 5xx items retried forever; worklist cache filter; raw exception text shown in UI.
+- 2026-10-26 (user): "corrigelas" — fix the CU-M11 review warnings. Dispatched F1 items 1-8 (stale eval replay,
+  stuck sync button, corrupt-queue recovery, malformed eval -> conflict, retry cap 5 then conflict, transport error
+  classification + generic UI message, prequalification local dedupe, per-filter worklist cache). Excluded pending a
+  product decision: plaintext PII at rest / purge on logout.
+- 2026-10-26 Backend whole-branch review vs main (user granted; reliability) -> approved + acknowledged. F2 (Codex):
+  X-Client-Id replay matches regardless of extension; EvaluacionOut no longer claims fotografias=[] outside ficha-campo
+  (no web consumer; mobile reads it only from ficha-campo); '' coordenadas -> null; POST/DELETE photo 403/404 tests.
+  Focused 121 passed; full suite failure set unchanged (82 incl. data-dependent payment flow).
+- 2026-10-26 F1 (agy): items 1-8 done; flutter test 155 passed, analyze clean.
+- 2026-10-26 (user): "una vez hechas las revisiones commitea a la main y has el push".
