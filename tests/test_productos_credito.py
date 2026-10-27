@@ -128,6 +128,15 @@ def _insert_product(db, coop_id, code, *, state="ACTIVO", name=None):
     return product
 
 
+def _snapshot_product(db, product_id):
+    product = db.get(models.ProductoCredito, product_id)
+    assert product is not None
+    return {
+        column.key: getattr(product, column.key)
+        for column in models.ProductoCredito.__table__.columns
+    }
+
+
 def test_producto_credito_model_and_schemas_are_defined():
     assert models.ProductoCredito.__tablename__ == "producto_credito"
     assert {"codigo", "cooperativa_id", "moneda_id", "monto_min", "monto_max"} <= set(
@@ -333,11 +342,15 @@ def test_product_partial_update_state_and_audit(client):
             headers=_auth(admin["token"]),
         )
         assert invalid.status_code == 400, invalid.text
+        with SessionLocal() as db:
+            before_foreign_update = _snapshot_product(db, product_id)
         foreign = client.put(
             f"/api/v1/creditos/productos/{product_id}", json={"nombre": "Foreign"},
             headers=_auth(foreign_admin["token"]),
         )
         assert foreign.status_code == 404
+        with SessionLocal() as db:
+            assert _snapshot_product(db, product_id) == before_foreign_update
 
         deactivated = client.patch(
             f"/api/v1/creditos/productos/{product_id}/estado", json={"estado": "INACTIVO"},
@@ -362,5 +375,30 @@ def test_product_partial_update_state_and_audit(client):
             ).order_by(models.Bitacora.id).all()]
             assert actions == ["CREAR_PRODUCTO", "ACTUALIZAR_PRODUCTO", "ACTUALIZAR_PRODUCTO",
                                "ACTUALIZAR_PRODUCTO", "DESACTIVAR_PRODUCTO"]
+    finally:
+        _limpiar_product_users(fixture)
+
+
+@pytest.mark.skipif(not _DB_DISPONIBLE, reason="PostgreSQL no disponible")
+def test_product_state_cannot_be_changed_by_another_tenant(client):
+    fixture = _fixture_product_users()
+    try:
+        coop_one, _ = fixture["coop_ids"]
+        foreign_admin = fixture["users"][(2, "ADMINISTRADOR")]
+        with SessionLocal() as db:
+            product = _insert_product(db, coop_one, "TENANT-STATE")
+            db.commit()
+            product_id = product.id
+            before_foreign_update = _snapshot_product(db, product_id)
+
+        response = client.patch(
+            f"/api/v1/creditos/productos/{product_id}/estado",
+            json={"estado": "INACTIVO"},
+            headers=_auth(foreign_admin["token"]),
+        )
+        assert response.status_code == 404
+
+        with SessionLocal() as db:
+            assert _snapshot_product(db, product_id) == before_foreign_update
     finally:
         _limpiar_product_users(fixture)
