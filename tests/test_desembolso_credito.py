@@ -611,6 +611,95 @@ def test_credit_detail_includes_schedule_and_hides_other_tenant(client, credit_f
     assert outside.status_code == 404
 
 
+def _make_credit_with_attribution(request_id, **attribution):
+    with SessionLocal() as db:
+        request_row = db.get(models.SolicitudCredito, request_id)
+        credit = models.Credito(
+            monto_aprobado=request_row.monto,
+            saldo_pendiente=request_row.monto,
+            solicitud_credito_id=request_id,
+            estado="VIGENTE",
+            **attribution,
+        )
+        db.add(credit)
+        db.commit()
+        return credit.id
+
+
+@pytest.mark.parametrize(
+    "direct_relation",
+    ["cooperativa_id", "socio_id", "producto_credito_id"],
+)
+def test_credit_portfolio_falls_back_to_each_direct_tenant_relation(
+    client, credit_fixture, direct_relation
+):
+    request_id = credit_fixture["make_request"]()
+    with SessionLocal() as db:
+        request_row = db.get(models.SolicitudCredito, request_id)
+        request_row.cooperativa_id = None
+        db.commit()
+
+    attribution = {
+        "cooperativa_id": None,
+        "socio_id": None,
+        "producto_credito_id": None,
+    }
+    attribution[direct_relation] = {
+        "cooperativa_id": credit_fixture["coop_ids"][0],
+        "socio_id": credit_fixture["socio_ids"][0],
+        "producto_credito_id": credit_fixture["product_ids"][0],
+    }[direct_relation]
+    credit_id = _make_credit_with_attribution(request_id, **attribution)
+
+    coop_a_token = credit_fixture["users"][(1, "CONTADOR")]["token"]
+    coop_b_token = credit_fixture["users"][(2, "CONTADOR")]["token"]
+    coop_a_list = client.get("/api/v1/creditos/creditos", headers=_auth(coop_a_token))
+    coop_a_detail = client.get(
+        f"/api/v1/creditos/creditos/{credit_id}", headers=_auth(coop_a_token)
+    )
+    coop_b_list = client.get("/api/v1/creditos/creditos", headers=_auth(coop_b_token))
+    coop_b_detail = client.get(
+        f"/api/v1/creditos/creditos/{credit_id}", headers=_auth(coop_b_token)
+    )
+
+    assert coop_a_list.status_code == 200, coop_a_list.text
+    assert any(row["id"] == credit_id for row in coop_a_list.json())
+    assert coop_a_detail.status_code == 200, coop_a_detail.text
+    assert coop_a_detail.json()["id"] == credit_id
+    assert coop_b_list.status_code == 200, coop_b_list.text
+    assert all(row["id"] != credit_id for row in coop_b_list.json())
+    assert coop_b_detail.status_code == 404
+
+
+def test_credit_portfolio_does_not_expose_conflicting_direct_cooperative_attribution(
+    client, credit_fixture
+):
+    request_id = credit_fixture["make_request"](coop_number=2)
+    credit_id = _make_credit_with_attribution(
+        request_id,
+        cooperativa_id=credit_fixture["coop_ids"][0],
+        socio_id=None,
+        producto_credito_id=None,
+    )
+    coop_b_token = credit_fixture["users"][(2, "CONTADOR")]["token"]
+
+    list_response = client.get(
+        "/api/v1/creditos/creditos", headers=_auth(coop_b_token)
+    )
+    detail_response = client.get(
+        f"/api/v1/creditos/creditos/{credit_id}", headers=_auth(coop_b_token)
+    )
+    observations = {
+        "list_contains_credit": (
+            list_response.status_code == 200
+            and any(row["id"] == credit_id for row in list_response.json())
+        ),
+        "detail_status": detail_response.status_code,
+    }
+
+    assert observations == {"list_contains_credit": False, "detail_status": 404}
+
+
 def test_seed_credit_is_exposed_only_to_unique_canonical_demo_cooperative(
     client, credit_fixture
 ):

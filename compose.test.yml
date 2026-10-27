@@ -1,0 +1,16 @@
+name: si2-backend-test
+
+services:
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: si2_test_db
+      POSTGRES_USER: si2_test_user
+      POSTGRES_PASSWORD: si2_test_password
+    ports:
+      - "127.0.0.1::5432"
+    volumes:
+      - test_data:/var/lib/postgresql/data
+
+volumes:
+  test_data:
