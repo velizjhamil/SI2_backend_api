@@ -128,6 +128,25 @@ ACCESS_TOKEN_EXPIRE_MINUTES=480
 
 > **Importante:** el `config.py` trae valores por defecto que apuntan a `postgres:postgres@localhost:5432`, pero el `compose.yml` expone PostgreSQL en el **5433** con usuario `yimysito`. El `.env` anterior corrige esa diferencia.
 
+#### Asistente IA y reportes PDF (opcional)
+
+El chatbot funciona sin LLM (responde con plantillas deterministas). Para que
+redacte las respuestas con IA agrega al `.env`:
+
+```env
+LLM_PROVIDER=gemini
+LLM_API_KEY=<tu_api_key>
+LLM_MODEL=gemini-3.5-flash
+```
+
+- La descarga de reportes **no** depende del LLM: los enlaces se construyen de
+  forma determinista y respetan el rol del usuario.
+- `gemini-2.5-flash` ya no está disponible para cuentas nuevas; usa
+  `gemini-3.5-flash`. El cliente corta a los 15 s y, si el proveedor falla, el
+  backend responde con la plantilla.
+- En Render configura estas variables en **Environment** del servicio; el
+  `.env` está ignorado por git y excluido de la imagen Docker.
+
 ### 6. Ejecutar migraciones (si aplica)
 
 El esquema base ya se crea con `bd.sql` al iniciar el contenedor. Las migraciones adicionales se aplican contra la BD:

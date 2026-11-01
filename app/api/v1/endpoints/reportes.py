@@ -206,6 +206,61 @@ def export_cartera(fecha_corte: date = Query(default_factory=date.today), moneda
     return _csv(f"cartera-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
+@router.get("/mora/export")
+def export_mora(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
+                formato: str = Query("csv", pattern="^(csv|pdf)$"),
+                user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Reporte de morosidad: resumen y distribución de la cartera vencida."""
+    pdf_meta = {}
+    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
+    totals = body["totales"]
+    filename = f"morosidad-{fecha_corte.isoformat()}"
+    summary = [
+        ["Cartera bruta", "", totals["cartera_bruta"]],
+        ["Cartera en mora", "", totals["cartera_en_mora"]],
+        ["Índice de mora (%)", "",
+         totals["indice_mora"] if totals["indice_mora"] is not None else "—"],
+        ["Créditos vigentes", totals["creditos"], ""],
+    ]
+    summary_amounts = [[row[0], row[2]] for row in summary if row[2] != ""]
+    summary_counts = [["Créditos vigentes", totals["creditos"]]]
+    ranges = [[row["rango"], row["creditos"], row["saldo"]] for row in body["por_rango_mora"]]
+    products = [[row["producto"], row["creditos"], row["saldo"]] for row in body["por_producto"]]
+    warnings = [[item["codigo"], item["creditos"], item["saldo"]]
+                for item in body["advertencias"]]
+    rows = ([["Resumen", *row] for row in summary]
+            + [["Días de atraso", *row] for row in ranges]
+            + [["Producto", *row] for row in products]
+            + [["Advertencia", *row] for row in warnings])
+    headers = ["Sección", "Concepto", "Créditos", "Monto"]
+    if formato == "pdf":
+        sections = [
+            {"title": "Resumen de mora", "headers": ["Concepto", "Valor"],
+             "rows": summary_amounts, "column_types": ["text", "amount"]},
+            {"title": "Créditos vigentes", "headers": ["Concepto", "Créditos"],
+             "rows": summary_counts, "column_types": ["text", "count"]},
+            {"title": "Distribución por días de atraso",
+             "headers": ["Días de atraso", "Créditos", "Saldo"],
+             "rows": ranges, "column_types": ["text", "count", "amount"]},
+            {"title": "Cartera por producto",
+             "headers": ["Producto", "Créditos", "Saldo"],
+             "rows": products, "column_types": ["text", "count", "amount"]},
+        ]
+        if warnings:
+            sections.append({"title": "Advertencias",
+                             "headers": ["Código", "Créditos", "Saldo"],
+                             "rows": warnings,
+                             "column_types": ["text", "count", "amount"]})
+        content = build_report_pdf(title="Reporte de morosidad", period=f"Al {fecha_corte.isoformat()}",
+            sections=sections,
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=pdf_meta["currency"], generated_by=user.nombre, orientation="L",
+            empty=not ranges)
+        return Response(content, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="{filename}.pdf"'})
+    return _csv(f"{filename}.csv", headers, rows)
+
+
 def _deposits(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_meta=None):
     params = _filters(db, cutoff, currency_id, tenant, pdf_meta)
     savings = db.execute(text("""
