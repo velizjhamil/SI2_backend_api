@@ -10,10 +10,12 @@ contexto calculado.
 import unicodedata
 from datetime import date
 from decimal import Decimal
+from urllib.parse import urlencode
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.models import (
     Caja,
     ControlCaja,
@@ -412,6 +414,192 @@ def _detectar_intent(mensaje: str, es_socio: bool) -> str:
     return "ayuda" if len(texto.strip()) < 4 else ("creditos" if es_socio else "general")
 
 
+_ROLES_GERENCIALES = {"ADMINISTRADOR", "CONTADOR", "OFICIAL_CREDITO"}
+_ROLES_CONTABILIDAD = {"ADMINISTRADOR", "CONTADOR"}
+_TIPOS_CONTABILIDAD = {
+    "libro-diario", "libro-mayor", "balance-comprobacion",
+    "balance-general", "estado-resultados",
+}
+
+# (tipo, nombre visible, palabras clave). El orden importa: "balance de
+# comprobación" debe resolverse antes que "balance general".
+_REPORTES = (
+    ("mora", "Reporte de morosidad", ("mora", "morosidad", "atras")),
+    ("cartera", "Reporte de cartera", ("cartera", "colocacion", "credito")),
+    ("captaciones", "Reporte de captaciones",
+     ("captacion", "ahorro", "deposito", "plazo fijo", "dpf")),
+    ("indicadores", "Reporte de indicadores de gestión",
+     ("indicador", "kpi", "gestion")),
+    ("balance-comprobacion", "Balance de comprobación",
+     ("balance de comprobacion", "comprobacion")),
+    ("balance-general", "Balance general", ("balance general", "balance")),
+    ("estado-resultados", "Estado de resultados",
+     ("estado de resultados", "resultados", "perdidas", "ganancias")),
+    ("libro-diario", "Libro diario", ("libro diario", "diario")),
+    ("libro-mayor", "Libro mayor", ("libro mayor", "mayor")),
+)
+
+_MENSAJE_REPORTES = (
+    "Puedo generar estos reportes en PDF:\n"
+    "{lista}\n"
+    "Indícame cuál; por ejemplo: «genera el reporte de morosidad en PDF»."
+)
+
+
+def _pide_reporte(texto: str) -> bool:
+    # Los documentos personales (comprobantes, certificados, estados de
+    # cuenta) no son reportes gerenciales: se responden como consultas.
+    if any(clave in texto for clave in ("comprobante", "certificado", "estado de cuenta")):
+        return False
+    if any(clave in texto for clave in ("reporte", "informe", "pdf", "exportar", "descargar")):
+        return True
+    # "Genera el balance general" sin la palabra "reporte" también es una
+    # solicitud, pero solo si nombra un reporte concreto. Así "¿cómo generar
+    # una solicitud de crédito?" sigue siendo una consulta normal.
+    verbos = ("generar", "generame", "genera ", "prepara", "preparame")
+    temas = ("mora", "morosidad", "cartera", "captacion", "indicador", "kpi",
+             "balance", "comprobacion", "estado de resultados", "resultados",
+             "libro diario", "libro mayor")
+    return any(clave in texto for clave in verbos) and any(clave in texto for clave in temas)
+
+
+def _sugerencias_reporte(usuario: Usuario, es_socio: bool) -> list[str]:
+    nombres = [nombre.lower() for _tipo, nombre in _reportes_permitidos(usuario)]
+    if not nombres:
+        return _sugerencias(es_socio)
+    return [f"Genera el {nombre} en PDF" for nombre in nombres[:4]]
+
+
+def _rol(usuario: Usuario) -> str | None:
+    return usuario.rol.nombre if usuario.rol else None
+
+
+def _reportes_permitidos(usuario: Usuario) -> list[tuple[str, str]]:
+    rol = _rol(usuario)
+    if usuario.cooperativa_id is None:
+        return []
+    permitidos = []
+    for tipo, nombre, _claves in _REPORTES:
+        if tipo in _TIPOS_CONTABILIDAD:
+            if rol in _ROLES_CONTABILIDAD:
+                permitidos.append((tipo, nombre))
+        elif rol in _ROLES_GERENCIALES:
+            permitidos.append((tipo, nombre))
+    return permitidos
+
+
+def _tipo_reporte(texto: str) -> tuple[str, str] | None:
+    for tipo, nombre, claves in _REPORTES:
+        if any(clave in texto for clave in claves):
+            return tipo, nombre
+    return None
+
+
+def _reporte_descarga(tipo: str, nombre: str) -> dict | None:
+    hoy = date.today()
+    desde = hoy.replace(day=1)
+    base = settings.API_V1_STR
+    if tipo == "mora":
+        path, params = "/reportes/mora/export", {
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
+        filename = f"morosidad-{hoy.isoformat()}.pdf"
+    elif tipo == "cartera":
+        path, params = "/reportes/cartera/export", {
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
+        filename = f"cartera-{hoy.isoformat()}.pdf"
+    elif tipo == "captaciones":
+        path, params = "/reportes/captaciones/export", {
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
+        filename = f"captaciones-{hoy.isoformat()}.pdf"
+    elif tipo == "indicadores":
+        path, params = "/reportes/indicadores/export", {
+            "fecha_corte": hoy.isoformat(), "formato": "pdf"}
+        filename = f"indicadores-{hoy.isoformat()}.pdf"
+    elif tipo == "libro-diario":
+        path, params = "/contabilidad/libro-diario/export", {
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
+            "moneda_id": 1, "formato": "pdf"}
+        filename = f"libro-diario-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+    elif tipo == "balance-comprobacion":
+        path, params = "/contabilidad/balance-comprobacion/export", {
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
+            "moneda_id": 1, "nivel": 4, "formato": "pdf"}
+        filename = f"balance-comprobacion-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+    elif tipo == "balance-general":
+        path, params = "/contabilidad/balance-general/export", {
+            "fecha_corte": hoy.isoformat(), "nivel": 3,
+            "moneda": "CONSOLIDADO", "formato": "pdf"}
+        filename = f"balance-general-{hoy.isoformat()}.pdf"
+    elif tipo == "estado-resultados":
+        path, params = "/contabilidad/estado-resultados/export", {
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
+            "moneda": "CONSOLIDADO", "formato": "pdf"}
+        filename = f"estado-resultados-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+    else:
+        return None
+    return {
+        "tipo": tipo,
+        "nombre": nombre,
+        "formato": "pdf",
+        "url": f"{base}{path}?{urlencode(params)}",
+        "filename": filename,
+    }
+
+
+def _respuesta_reporte(usuario: Usuario, mensaje: str) -> tuple[str, dict | None]:
+    permitidos = _reportes_permitidos(usuario)
+    if not permitidos:
+        return (
+            "Los reportes financieros en PDF están disponibles para el personal de una "
+            "cooperativa (Administrador, Contador u Oficial de Crédito). Como socio puedo "
+            "ayudarte con tus saldos, cuotas y comprobantes.",
+            None,
+        )
+
+    texto = _norm(mensaje)
+    if "libro mayor" in texto:
+        return (
+            "El libro mayor necesita elegir una cuenta contable, así que no puedo generarlo "
+            "directamente desde el chat. Puedes abrirlo en Contabilidad → Libro mayor, o pedirme "
+            "el libro diario completo.",
+            None,
+        )
+    if "asfi" in texto:
+        return (
+            "Los informes ASFI se generan como instantáneas desde el módulo Informes ASFI, "
+            "donde eliges el tipo y la fecha de corte. Desde el chat puedo prepararte los reportes "
+            "gerenciales y contables.",
+            None,
+        )
+
+    encontrado = _tipo_reporte(texto)
+    if encontrado is None:
+        lista = "\n".join(f"• {nombre}" for _tipo, nombre in permitidos)
+        return _MENSAJE_REPORTES.format(lista=lista), None
+
+    tipo, nombre = encontrado
+    if (tipo, nombre) not in permitidos:
+        lista = "\n".join(f"• {item}" for _tipo, item in permitidos)
+        return (
+            f"Tu rol no tiene acceso al {nombre.lower()}. Puedo generar:\n{lista}",
+            None,
+        )
+
+    reporte = _reporte_descarga(tipo, nombre)
+    if reporte is None:
+        return f"No pude preparar el {nombre.lower()}. Inténtalo desde el módulo de reportes.", None
+
+    desde = date.today().replace(day=1).strftime("%d/%m/%Y")
+    hasta = date.today().strftime("%d/%m/%Y")
+    periodo = (f"del {desde} al {hasta}" if tipo in
+               {"libro-diario", "balance-comprobacion", "estado-resultados"} else f"al {hasta}")
+    return (
+        f"Listo, preparé el {nombre} {periodo} en PDF. "
+        "Usa el botón «Descargar PDF» para obtenerlo.",
+        reporte,
+    )
+
+
 def _contexto_texto(ctx: dict) -> str:
     if ctx.get("es_socio"):
         socio = ctx.get("socio")
@@ -442,16 +630,21 @@ def _contexto_texto(ctx: dict) -> str:
 def responder(db: Session, usuario: Usuario, mensaje: str) -> dict:
     es_socio = _es_socio(usuario)
     ctx = contexto_socio(db, usuario) if es_socio else contexto_cooperativa(db, usuario)
-    intent = _detectar_intent(mensaje, es_socio)
+    reporte = None
 
-    if intent in {"ayuda", "general"}:
-        plantilla = MENSAJE_AYUDA_SOCIO if es_socio else MENSAJE_AYUDA
+    if _pide_reporte(_norm(mensaje)):
+        intent = "reporte"
+        plantilla, reporte = _respuesta_reporte(usuario, mensaje)
     else:
-        plantilla = _plantilla_socio(intent, ctx, mensaje) if es_socio else _plantilla_cooperativa(intent, ctx, mensaje)
+        intent = _detectar_intent(mensaje, es_socio)
+        if intent in {"ayuda", "general"}:
+            plantilla = MENSAJE_AYUDA_SOCIO if es_socio else MENSAJE_AYUDA
+        else:
+            plantilla = _plantilla_socio(intent, ctx, mensaje) if es_socio else _plantilla_cooperativa(intent, ctx, mensaje)
 
     fuente = "PLANTILLA"
     respuesta = plantilla
-    if llm.llm_configurado():
+    if intent != "reporte" and llm.llm_configurado():
         system = (
             "Eres el asistente virtual de una cooperativa de ahorro y crédito. "
             "Responde en español, de forma breve y profesional. Usa EXCLUSIVAMENTE los datos del contexto; "
@@ -467,12 +660,15 @@ def responder(db: Session, usuario: Usuario, mensaje: str) -> dict:
             respuesta = generado
             fuente = "LLM"
 
+    sugerencias = (_sugerencias_reporte(usuario, es_socio)
+                   if intent == "reporte" and reporte is None else _sugerencias(es_socio))
     return {
         "respuesta": respuesta,
         "intent": intent,
         "fuente": fuente,
         "datos": ctx,
-        "sugerencias": _sugerencias(es_socio),
+        "sugerencias": sugerencias,
+        "reporte": reporte,
     }
 
 

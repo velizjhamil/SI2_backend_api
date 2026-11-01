@@ -1538,9 +1538,18 @@ class ChatRequest(BaseModel):
     historial: list[ChatMessage] = Field(default_factory=list)
 
 
+class ChatReporte(BaseModel):
+    tipo: str
+    nombre: str
+    formato: Literal["pdf"] = "pdf"
+    url: str
+    filename: str
+
+
 class ChatResponse(BaseModel):
     respuesta: str
     intent: str
     fuente: Literal["PLANTILLA", "LLM"]
     datos: dict[str, Any] = Field(default_factory=dict)
     sugerencias: list[str] = Field(default_factory=list)
+    reporte: ChatReporte | None = None

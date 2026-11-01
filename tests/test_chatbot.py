@@ -28,6 +28,13 @@ def _db_disponible() -> bool:
 _DB_DISPONIBLE = _db_disponible()
 pytestmark = pytest.mark.skipif(not _DB_DISPONIBLE, reason="PostgreSQL no disponible")
 
+
+@pytest.fixture(autouse=True)
+def _sin_llm(monkeypatch):
+    """Fija las pruebas al modo determinista aunque haya un LLM configurado."""
+    for var in ("LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+
 if _DB_DISPONIBLE:
     from main import app
 else:

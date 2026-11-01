@@ -1,6 +1,14 @@
 import os
 import logging
+from pathlib import Path
+
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
+
+# Carga `.env` también en `os.environ` para que los servicios que leen
+# variables con `os.getenv` (por ejemplo el cliente LLM) vean la misma
+# configuración que `Settings`, sin depender del directorio de ejecución.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "CoopSmart API"

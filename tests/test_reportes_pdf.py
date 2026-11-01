@@ -186,6 +186,8 @@ def _assert_pdf_and_csv(client, url, case, title):
         "/balance-general/export": ("Sección", "Código", "Cuenta", "Saldo"),
         "/estado-resultados/export": ("Código", "Concepto", "Monto"),
         "/cartera/export": ("Cartera bruta", "Índice de mora", "N.º de créditos"),
+        "/reportes/mora/export": ("Cartera en mora", "Índice de mora",
+                                  "Distribución por días de atraso"),
         "/captaciones/export": ("Tipo de cuenta", "Saldo", "Plazo", "Capital", "Captaciones totales"),
         "/indicadores/export": ("Código", "Indicador", "Valor", "Liquidez (%)", "ROA (%)"),
     }
@@ -242,6 +244,18 @@ def test_cartera_export_pdf_and_unchanged_csv(report_case):
                               capture_output=True).stdout.decode("utf-8")
         assert "Advertencias" not in text
         _save_sample("cartera.pdf", sample.content)
+
+
+def test_mora_export_pdf_and_unchanged_csv(report_case):
+    url = f"/api/v1/reportes/mora/export?fecha_corte={date.today()}"
+    with TestClient(app) as client:
+        _assert_pdf_and_csv(client, url, report_case, "Reporte de morosidad")
+        csv = client.get(url, headers=auth(report_case))
+        assert csv.content.startswith("Sección,Concepto,Créditos,Monto".encode())
+        assert b"Resumen,Cartera en mora" in csv.content
+        assert b"Cartera bruta" in csv.content
+        sample = client.get(url + "&formato=pdf", headers=auth(report_case))
+        _save_sample("morosidad.pdf", sample.content)
 
 
 def test_captaciones_export_pdf_and_unchanged_csv(report_case):
