@@ -8,7 +8,7 @@ recibe información personal (saldos, créditos, precalificación).
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import get_current_user
+from app.api.v1.deps import get_current_socio, get_current_user
 from app.db.session import get_db
 from app.models.models import Usuario
 from app.schemas.schemas import ChatRequest, ChatResponse
@@ -17,11 +17,21 @@ from app.services.chatbot import responder
 router = APIRouter()
 
 
+def get_chat_user(
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Usuario:
+    """Validate socio self-service through the shared authenticated dependency."""
+    if usuario.rol and usuario.rol.nombre == "SOCIO":
+        get_current_socio(usuario=usuario, db=db)
+    return usuario
+
+
 @router.post("/chat", response_model=ChatResponse)
 def chat(
     payload: ChatRequest,
-    usuario: Usuario = Depends(get_current_user),
+    usuario: Usuario = Depends(get_chat_user),
     db: Session = Depends(get_db),
 ):
     """Responde una consulta en lenguaje natural sobre datos reales del sistema."""
-    return responder(db, usuario, payload.mensaje)
+    return responder(db, usuario, payload.mensaje, payload.historial)

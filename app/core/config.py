@@ -22,6 +22,10 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str = "postgresql://yimysito:tarqui231B@localhost:5433/cooperativa_db"
 
+    LLM_PROVIDER: str = ""
+    LLM_MODEL: str = ""
+    LLM_API_KEY: str = ""
+
     BACKUP_DATABASE_URL: str = ""
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""
