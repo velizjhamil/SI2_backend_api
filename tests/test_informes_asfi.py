@@ -456,3 +456,40 @@ def test_exporta_csv_tabular_por_tipo_con_bom_y_nombre(tipo, payload, headers, e
     rows = list(csv.reader(io.StringIO(response.body.decode("utf-8-sig"))))
     assert rows[0] == headers
     assert rows[1:] == expected
+
+
+def test_calificacion_advierte_productos_sin_tipo_con_contrato_de_la_ui(monkeypatch):
+    from app.api.v1.endpoints import informes_asfi
+
+    credit = SimpleNamespace(
+        numero_credito="ASFI-002",
+        producto=SimpleNamespace(tipo_credito_asfi=None, nombre="Sin tipo"),
+        solicitud=SimpleNamespace(producto=None, moneda=None, garantias=[]),
+        moneda=SimpleNamespace(codigo_iso="BOB"),
+    )
+
+    class Result:
+        def unique(self): return self
+        def scalars(self): return self
+        def all(self): return [credit]
+
+    class DB:
+        def execute(self, _statement): return Result()
+
+    monkeypatch.setattr(informes_asfi, "_unclassified_credit_warnings", lambda *args: [])
+    monkeypatch.setattr(informes_asfi, "_get_prevision_contable", lambda *args: {})
+    user = SimpleNamespace(rol=SimpleNamespace(nombre="CONTADOR"), cooperativa_id=7)
+
+    body = informes_asfi.calificacion_cartera(date(2026, 6, 30), user, DB())
+
+    assert body["creditos"] == []
+    assert body["advertencias"] == [{
+        "codigo": "PRODUCTOS_SIN_TIPO_ASFI",
+        "mensaje": "Hay productos de crédito sin clasificación ASFI; sus créditos se excluyen de la calificación.",
+        "creditos": 1,
+        "detalle": [{
+            "numero_credito": "ASFI-002",
+            "producto": "Sin tipo",
+            "motivo": "Producto sin tipo_credito_asfi; crédito excluido de la calificación.",
+        }],
+    }]

@@ -155,7 +155,9 @@ def calificacion_cartera(fecha_corte: date = Query(...), user: Usuario = Depends
         reserve_totals[currency_code] = reserve_totals.get(currency_code, Decimal("0")) + specific
         cyclic_totals[currency_code] = cyclic_totals.get(currency_code, Decimal("0")) + cyclic
     if untyped:
-        advertencias.append({"codigo": "PRODUCTOS_SIN_TIPO_ASFI", "creditos": untyped})
+        advertencias.append({"codigo": "PRODUCTOS_SIN_TIPO_ASFI",
+                             "mensaje": "Hay productos de crédito sin clasificación ASFI; sus créditos se excluyen de la calificación.",
+                             "creditos": len(untyped), "detalle": untyped})
     contable = _get_prevision_contable(db, tenant, fecha_corte)
     currencies = set(reserve_totals) | set(cyclic_totals) | set(contable)
     difference = {code: _money(reserve_totals.get(code, Decimal("0")) + cyclic_totals.get(code, Decimal("0")) - contable.get(code, Decimal("0")))
