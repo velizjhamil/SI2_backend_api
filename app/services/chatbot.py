@@ -627,7 +627,8 @@ def _contexto_texto(ctx: dict) -> str:
     )
 
 
-def responder(db: Session, usuario: Usuario, mensaje: str) -> dict:
+def responder(db: Session, usuario: Usuario, mensaje: str, historial: list | None = None) -> dict:
+    # historial is part of the client contract but does not affect the answer yet.
     es_socio = _es_socio(usuario)
     ctx = contexto_socio(db, usuario) if es_socio else contexto_cooperativa(db, usuario)
     reporte = None

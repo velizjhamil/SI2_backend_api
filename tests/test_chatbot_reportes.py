@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api.v1.endpoints.chatbot import chat
+from app.schemas.schemas import ChatRequest
 from app.services import chatbot
 
 
@@ -186,4 +188,22 @@ def test_intencion_de_reporte_no_invoca_al_llm(responder, monkeypatch):
     salida = responder("ADMINISTRADOR", "Genera el reporte de morosidad en PDF")
 
     assert salida["fuente"] == "PLANTILLA"
+    assert salida["reporte"]["tipo"] == "mora"
+
+
+def test_endpoint_chat_acepta_historial_enviado_por_clientes(responder):
+    payload = ChatRequest(
+        mensaje="Genera el reporte de morosidad en PDF",
+        historial=[{"role": "user", "content": "Hola"}],
+    )
+    usuario = SimpleNamespace(
+        id=1,
+        cooperativa_id=1,
+        nombre="Usuario de prueba",
+        rol=SimpleNamespace(nombre="ADMINISTRADOR"),
+    )
+
+    salida = chat(payload, usuario, None)
+
+    assert salida["intent"] == "reporte"
     assert salida["reporte"]["tipo"] == "mora"
