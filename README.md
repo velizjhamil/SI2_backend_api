@@ -139,6 +139,11 @@ LLM_API_KEY=<tu_api_key>
 LLM_MODEL=gemini-3.5-flash
 ```
 
+En el frontend también se puede dictar una consulta con el botón del micrófono
+y activar la lectura en voz alta desde el encabezado del chat. El reconocimiento
+de voz depende de las funciones disponibles y los permisos del navegador; la
+transcripción reconocida se envía al chatbot como un mensaje normal.
+
 - La descarga de reportes **no** depende del LLM: los enlaces se construyen de
   forma determinista y respetan el rol del usuario.
 - `gemini-2.5-flash` ya no está disponible para cuentas nuevas; usa
