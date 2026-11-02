@@ -7,9 +7,10 @@ lanza excepciones hacia arriba.
 """
 
 import logging
-import os
 
 import httpx
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,9 @@ def llm_configurado() -> bool:
 
 def _config() -> tuple[str | None, str | None, str | None]:
     return (
-        os.getenv("LLM_PROVIDER"),
-        os.getenv("LLM_API_KEY"),
-        os.getenv("LLM_MODEL"),
+        settings.LLM_PROVIDER,
+        settings.LLM_API_KEY,
+        settings.LLM_MODEL,
     )
 
 
@@ -52,7 +53,7 @@ def generar_texto(system: str, prompt: str, *, max_tokens: int = 400, timeout: i
         else:  # gemini
             response = httpx.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                params={"key": key},
+                headers={"x-goog-api-key": key},
                 json={
                     "systemInstruction": {"parts": [{"text": system}]},
                     "contents": [{"parts": [{"text": prompt}]}],
