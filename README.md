@@ -282,6 +282,24 @@ docker exec -it coopDB psql -U yimysito -d cooperativa_db
 python -m app.db.seed_users
 ```
 
+## 🗺️ Diagrama de la base de datos
+
+El diagrama entidad-relación se genera desde los modelos SQLAlchemy con un
+script Node sin dependencias:
+
+```bash
+node scripts/generar_diagrama_bd.mjs
+```
+
+Produce dos archivos en `docs/`:
+
+- `diagrama_bd.mmd`: diagrama Mermaid (para GitHub, Notion, draw.io, etc.).
+- `diagrama_bd.html`: visor autónomo con zoom, paneo y descarga en SVG
+  (Mermaid se carga desde un CDN, así que requiere Internet).
+
+Opciones: `--models <ruta>` para indicar otro archivo de modelos y
+`--out <carpeta>` para cambiar el directorio de salida.
+
 ## 🔧 CORS
 
 El servidor permite peticiones desde el frontend de desarrollo en:

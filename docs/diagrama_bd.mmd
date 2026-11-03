@@ -1,0 +1,762 @@
+%% Diagrama entidad-relación generado desde app/models/models.py
+%% Tablas: 49
+erDiagram
+    rol_permiso {
+        smallint rol_id PK
+        smallint permiso_id PK
+    }
+    cooperativa {
+        bigint id PK
+        uuid uuid UK
+        varchar nombre
+        varchar razon_social
+        varchar nit UK
+        varchar correo
+        varchar telefono
+        text direccion
+        varchar estado
+        timestamp fecha_creacion
+        timestamp fecha_baja
+        boolean dpf_permite_cancelacion_anticipada
+        numeric dpf_tasa_penalizacion
+    }
+    permiso {
+        smallint id PK
+        varchar nombre UK
+        text descripcion
+    }
+    rol {
+        smallint id PK
+        varchar nombre UK
+        text descripcion
+    }
+    usuario {
+        bigint id PK
+        uuid uuid UK
+        smallint rol_id
+        bigint cooperativa_id
+        varchar nombre
+        varchar contrasena
+        varchar correo UK
+        varchar estado
+        timestamp fecha_creacion
+        timestamp fecha_baja
+    }
+    bitacora {
+        bigint id PK
+        bigint usuario_id
+        bigint cooperativa_id
+        varchar modulo
+        varchar accion
+        text descripcion
+        varchar ip
+        text user_agent
+        timestamp fecha_hora
+    }
+    backup {
+        bigint id PK
+        varchar tipo
+        varchar estado
+        text archivo
+        bigint tamano_bytes
+        varchar checksum_sha256
+        text error
+        bigint usuario_id
+        timestamp iniciado_en
+        timestamp finalizado_en
+    }
+    comprobante_secuencia {
+        bigint cooperativa_id PK
+        varchar tipo PK
+        integer anio PK
+        bigint ultimo
+    }
+    comprobante_transaccion {
+        bigint id PK
+        bigint cooperativa_id
+        varchar numero
+        varchar tipo
+        varchar canal
+        bigint socio_id
+        bigint usuario_id
+        numeric monto
+        varchar moneda
+        bigint cuenta_origen_id
+        bigint cuenta_destino_id
+        integer credito_id
+        integer numero_cuota
+        bigint transaccion_salida_id
+        bigint transaccion_entrada_id
+        integer pago_cuota_id
+        text glosa
+        timestamp emitido_en
+        varchar codigo_verificacion UK
+        varchar firma
+    }
+    reporte {
+        integer id PK
+        varchar tipo
+        varchar formato
+        text parametros
+        timestamp fecha_generacion
+        bigint usuario_id
+        bigint cooperativa_id
+        date periodo
+        varchar estado
+        jsonb contenido
+        jsonb resumen
+        varchar hash_contenido
+    }
+    socio {
+        bigint id PK
+        uuid uuid
+        bigint cooperativa_id
+        varchar ci UK
+        varchar nombre
+        varchar apellido
+        text direccion
+        varchar telefono
+        varchar correo
+        varchar estado
+        date fecha_registro
+        date fecha_baja
+        bigint usuario_id
+    }
+    moneda {
+        smallint id PK
+        varchar codigo_iso UK
+        varchar nombre
+        varchar simbolo
+        default es_moneda_base
+    }
+    tipo_cambio {
+        bigint id PK
+        bigint cooperativa_id
+        smallint moneda_id
+        date fecha
+        numeric valor
+        varchar fuente
+        bigint usuario_id
+        timestamp fecha_registro
+    }
+    cuenta_ahorro {
+        bigint id PK
+        varchar numero UK
+        varchar tipo_producto
+        numeric saldo_disponible
+        numeric saldo_bloqueado
+        varchar estado
+        date fecha_registro
+        bigint socio_id
+        integer moneda_id
+    }
+    producto_credito {
+        integer id PK
+        bigint cooperativa_id
+        varchar codigo
+        varchar nombre
+        text descripcion
+        integer moneda_id
+        numeric monto_min
+        numeric monto_max
+        integer plazo_min_meses
+        integer plazo_max_meses
+        numeric tasa_interes_anual
+        varchar tipo_amortizacion
+        integer dias_gracia_mora
+        numeric tasa_mora_anual
+        numeric relacion_cuota_ingreso_max
+        boolean requiere_garantia
+        varchar tipo_credito_asfi
+        boolean sector_productivo
+        numeric cobertura_minima_garantia
+        numeric monto_aprobacion_directa
+        varchar estado
+        timestamp fecha_creacion
+        timestamp fecha_actualizacion
+    }
+    evaluacion_campo {
+        integer id PK
+        numeric ingreso_mensual
+        numeric egreso_mensual
+        numeric capacidad_pago
+        text fotografias_respaldo
+        varchar coordenadas
+        date fecha
+        text resumen_cualitativo_ia
+        integer usuario_id
+        integer socio_id
+        numeric cuota_deudas_mensual
+        varchar actividad_economica
+        varchar fuente_ingresos
+        integer antiguedad_laboral_meses
+        varchar calificacion_asfi
+        text observaciones
+    }
+    solicitud_credito {
+        integer id PK
+        numeric monto
+        integer plazo_meses
+        numeric tasa_interes
+        varchar calificacion_asfi
+        boolean tiene_deudas
+        varchar estado
+        integer socio_id
+        integer usuario_id
+        integer evaluacion_campo_id
+        integer producto_credito_id
+        varchar numero_solicitud
+        varchar destino
+        text destino_detalle
+        text observaciones
+        text motivo_anulacion
+        timestamp fecha_solicitud
+        timestamp fecha_actualizacion
+        integer moneda_id
+        bigint cooperativa_id
+        integer ronda_comite
+        varchar resultado_comite
+        timestamp fecha_resolucion_comite
+        varchar canal_origen
+        jsonb datos_declarados
+    }
+    garantia {
+        bigint id PK
+        bigint cooperativa_id
+        integer solicitud_credito_id
+        varchar tipo
+        text descripcion
+        integer moneda_id
+        numeric valor_comercial
+        numeric valor_realizable
+        varchar documento_referencia
+        varchar avalista_nombre
+        varchar avalista_ci
+        numeric avalista_ingreso_mensual
+        varchar avalista_relacion
+        varchar avalista_telefono
+        integer socio_avalista_id
+        varchar estado
+        text observacion_verificacion
+        bigint usuario_registro_id
+        bigint usuario_verificacion_id
+        timestamp fecha_registro
+        timestamp fecha_verificacion
+        timestamp fecha_liberacion
+    }
+    evaluacion_crediticia {
+        bigint id PK
+        integer solicitud_credito_id
+        bigint cooperativa_id
+        varchar version_modelo
+        integer score
+        varchar dictamen
+        jsonb factores
+        jsonb knockouts
+        text explicacion
+        numeric cuota_estimada
+        numeric relacion_cuota_ingreso
+        bigint usuario_id
+        timestamp fecha
+        varchar resolucion
+        text resolucion_justificacion
+        bigint resolucion_usuario_id
+        timestamp resolucion_fecha
+        numeric probabilidad_mora
+        varchar nivel_riesgo
+        varchar version_modelo_mora
+    }
+    voto_comite {
+        bigint id PK
+        integer solicitud_credito_id
+        bigint cooperativa_id
+        integer ronda
+        bigint usuario_id
+        varchar voto
+        text comentario
+        timestamp fecha
+    }
+    credito {
+        integer id PK
+        numeric monto_aprobado
+        numeric saldo_pendiente
+        varchar estado
+        integer solicitud_credito_id UK
+        varchar numero_credito
+        bigint cooperativa_id
+        integer socio_id
+        integer producto_credito_id
+        integer moneda_id
+        numeric tasa_interes
+        integer plazo_meses
+        varchar tipo_amortizacion
+        date fecha_desembolso
+        varchar modalidad_desembolso
+        integer cuenta_desembolso_id
+        integer transaccion_desembolso_id
+        bigint usuario_id
+        timestamp fecha_creacion
+    }
+    tabla_amortizacion {
+        integer id PK
+        integer numero_cuota
+        date fecha_vencimiento
+        numeric monto_capital
+        numeric monto_interes
+        numeric monto_cuota_total
+        varchar estado_pago
+        integer credito_id
+        numeric saldo_inicial
+        numeric saldo_final
+        numeric monto_pagado
+        timestamp fecha_pago
+    }
+    pago_cuota {
+        integer id PK
+        numeric monto_capital
+        numeric monto_interes_pagado
+        numeric monto_mora
+        timestamp fecha
+        integer tabla_amortizacion_id
+        integer credito_id
+        bigint cooperativa_id
+        varchar numero_recibo
+        varchar modalidad
+        numeric monto_total
+        integer dias_atraso
+        integer transaccion_id
+        bigint usuario_id
+    }
+    morosidad {
+        integer id PK
+        integer dias_de_retaso
+        numeric monto_penalizado
+        varchar estado
+        integer credito_id UK
+        timestamp fecha_actualizacion
+    }
+    caja {
+        integer id PK
+        varchar nombre
+        varchar estado
+        bigint cooperativa_id
+        numeric monto_maximo_efectivo
+        numeric umbral_diferencia_arqueo
+    }
+    control_caja {
+        integer id PK
+        numeric monto_apertura
+        numeric monto_cierre
+        numeric saldo_sistema
+        timestamp fecha_apertura
+        timestamp fecha_cierre
+        varchar estado
+        integer caja_id
+        integer usuario_id
+    }
+    arqueo_caja {
+        bigint id PK
+        integer control_caja_id
+        bigint usuario_id
+        bigint supervisor_id
+        timestamp fecha
+        timestamp fecha_autorizacion
+        boolean cierre
+        boolean requiere_supervisor
+        text observacion
+    }
+    arqueo_caja_moneda {
+        bigint id PK
+        bigint arqueo_id
+        integer moneda_id
+        numeric saldo_teorico
+        numeric total_contado
+        numeric diferencia
+        varchar resultado
+    }
+    arqueo_caja_detalle {
+        bigint id PK
+        bigint arqueo_moneda_id
+        varchar tipo
+        numeric denominacion
+        integer cantidad
+        numeric subtotal
+    }
+    cierre_caja {
+        bigint id PK
+        integer control_caja_id UK
+        bigint arqueo_id
+        bigint usuario_id
+        timestamp fecha
+        text observacion
+    }
+    cierre_caja_moneda {
+        bigint id PK
+        bigint cierre_id
+        integer moneda_id
+        numeric monto_apertura
+        numeric total_depositos
+        integer cantidad_depositos
+        numeric total_retiros
+        integer cantidad_retiros
+        integer cantidad_transferencias
+        numeric saldo_teorico
+        numeric total_contado
+        numeric diferencia
+        numeric traspaso_boveda
+    }
+    certificado_aportacion {
+        bigint id PK
+        nullable correlativo
+        nullable numero_titulos
+        numeric valor_unitario
+        numeric monto
+        date fecha_emision
+        varchar estado
+        bigint socio_id
+        smallint moneda_id
+    }
+    declaracion_jurada_uif {
+        integer id PK
+        varchar origen
+        varchar destino
+        varchar tipo_operacion
+        numeric monto
+        integer moneda_id
+        bigint socio_id
+        varchar realizado_por
+        varchar tercero_nombre
+        varchar tercero_ci
+        varchar tercero_parentesco
+        varchar actividad_economica
+        text origen_detalle
+        text destino_detalle
+        boolean declara_bajo_juramento
+        boolean fraccionada
+        bigint usuario_id
+        bigint cooperativa_id
+        timestamp fecha
+    }
+    deposito_plazo_fijo {
+        integer id PK
+        numeric monto
+        numeric tasa_interes_anual
+        integer plazo_dias
+        date fecha_inicio
+        date fecha_vencimiento
+        numeric interes_calculado
+        varchar estado
+        bigint socio_id
+        integer moneda_id
+        varchar numero_certificado
+        varchar modalidad_pago_interes
+        numeric interes_bruto
+        numeric retencion_rciva
+        numeric interes_neto
+        varchar origen_fondos
+        bigint cuenta_origen_id
+        bigint cuenta_abono_id
+        varchar codigo_verificacion
+        integer dpf_origen_id
+        integer declaracion_jurada_uif_id
+        bigint usuario_id
+        bigint cooperativa_id
+        timestamp fecha_emision
+    }
+    tasa_dpf {
+        integer id PK
+        bigint cooperativa_id
+        integer moneda_id
+        integer plazo_min_dias
+        integer plazo_max_dias
+        numeric tna
+    }
+    dpf_cronograma {
+        bigint id PK
+        integer deposito_plazo_fijo_id
+        integer numero
+        date fecha_pago
+        integer dias
+        numeric interes_bruto
+        numeric retencion_rciva
+        numeric interes_neto
+        varchar estado
+        timestamp fecha_pago_real
+        integer transaccion_id
+    }
+    liquidacion {
+        integer id PK
+        numeric monto_capital_retornado
+        numeric monto_interes_pagado
+        varchar tipo_operacion
+        timestamp fecha
+        integer deposito_plazo_fijo_id UK
+        varchar tipo
+        numeric retencion_rciva
+        bigint usuario_id
+        bigint cuenta_abono_id
+        integer dpf_renovado_id
+        numeric interes_ya_pagado
+        numeric descuento_capital
+    }
+    prediccion_de_morosidad {
+        bigint id PK
+        integer credito_id UK
+        numeric probabilidad_mora
+        varchar nivel_riesgo
+        varchar version_modelo
+        timestamp fecha
+    }
+    historial_gestion_de_cobranza {
+        integer id PK
+        varchar tipo_contacto
+        text resultado_gestion
+        text fecha_compromiso_pago
+        integer credito_id
+        bigint cooperativa_id
+        bigint usuario_id
+        timestamp fecha
+        bigint alerta_id
+    }
+    alerta_credito {
+        bigint id PK
+        bigint cooperativa_id
+        integer credito_id
+        integer tabla_amortizacion_id
+        varchar tipo
+        varchar severidad
+        text mensaje
+        jsonb datos
+        varchar estado
+        timestamp fecha_creacion
+        timestamp fecha_cierre
+        bigint usuario_cierre_id
+        text comentario_cierre
+        integer gestion_id
+    }
+    oferta_recredito {
+        bigint id PK
+        bigint cooperativa_id
+        integer socio_id
+        integer credito_origen_id
+        integer producto_credito_id
+        numeric monto_sugerido
+        integer plazo_meses
+        numeric tasa_interes
+        numeric cuota_estimada
+        numeric probabilidad_mora
+        varchar nivel_riesgo
+        jsonb motivos
+        varchar estado
+        timestamp fecha_generacion
+        date fecha_vencimiento
+        integer solicitud_generada_id
+        bigint usuario_id
+        text motivo_descarte
+    }
+    plan_cuenta {
+        integer id PK
+        varchar codigo
+        text nombre
+        integer nivel
+        varchar tipo
+        varchar naturaleza
+        boolean es_regularizadora
+        boolean es_oficial
+        bigint cooperativa_id
+        varchar estado
+        boolean acepta_movimientos
+        text descripcion
+        timestamp fecha_creacion
+        integer plan_cuenta_padre_id
+    }
+    comprobante_contable {
+        integer id PK
+        varchar tipo
+        text glosa
+        boolean es_automatico
+        timestamp fecha
+        integer transaccion_id
+        bigint cooperativa_id
+        varchar numero
+        integer gestion
+        date fecha_contable
+        smallint moneda_id
+        varchar estado
+        bigint usuario_id
+        varchar origen
+        integer comprobante_reversion_id
+        integer revierte_a_id
+        text motivo_anulacion
+        timestamp fecha_registro
+    }
+    detalle_asiento {
+        integer id PK
+        numeric debe
+        numeric haber
+        integer comprobante_contable_id
+        integer plan_cuenta_id
+        text glosa
+        integer orden
+    }
+    parametro_contable {
+        bigint id PK
+        bigint cooperativa_id
+        varchar clave
+        integer plan_cuenta_id
+    }
+    plan_suscripcion {
+        bigint id PK
+        varchar codigo UK
+        varchar nombre
+        text descripcion
+        jsonb features
+        jsonb incluye
+        numeric precio_mensual
+        varchar moneda
+        integer limite_usuarios
+        varchar estado
+        timestamp fecha_creacion
+    }
+    suscripcion {
+        bigint id PK
+        bigint cooperativa_id UK
+        bigint plan_id
+        varchar estado
+        date fecha_inicio
+        date fecha_fin
+        timestamp fecha_creacion
+        timestamp fecha_actualizacion
+    }
+    notificacion {
+        bigint id PK
+        bigint cooperativa_id
+        varchar tipo
+        varchar titulo
+        text mensaje
+        varchar destino
+        bigint usuario_id
+        integer total_destinatarios
+        timestamp fecha_creacion
+    }
+    notificacion_destinatario {
+        bigint id PK
+        bigint notificacion_id
+        bigint socio_id
+        bigint usuario_id
+        text mensaje
+        timestamp leida_en
+    }
+    rol_permiso }o--|| rol : "rol_id"
+    rol_permiso }o--|| permiso : "permiso_id"
+    usuario }o--|| rol : "rol_id"
+    usuario }o--o| cooperativa : "cooperativa_id"
+    bitacora }o--|| usuario : "usuario_id"
+    bitacora }o--o| cooperativa : "cooperativa_id"
+    backup }o--o| usuario : "usuario_id"
+    comprobante_transaccion }o--|| cooperativa : "cooperativa_id"
+    comprobante_transaccion }o--|| socio : "socio_id"
+    comprobante_transaccion }o--|| usuario : "usuario_id"
+    reporte }o--|| usuario : "usuario_id"
+    reporte }o--o| cooperativa : "cooperativa_id"
+    socio }o--o| cooperativa : "cooperativa_id"
+    socio }o--o| usuario : "usuario_id"
+    tipo_cambio }o--|| cooperativa : "cooperativa_id"
+    tipo_cambio }o--|| moneda : "moneda_id"
+    tipo_cambio }o--|| usuario : "usuario_id"
+    cuenta_ahorro }o--|| socio : "socio_id"
+    cuenta_ahorro }o--|| moneda : "moneda_id"
+    producto_credito }o--|| cooperativa : "cooperativa_id"
+    producto_credito }o--|| moneda : "moneda_id"
+    evaluacion_campo }o--|| usuario : "usuario_id"
+    evaluacion_campo }o--o| socio : "socio_id"
+    solicitud_credito }o--|| socio : "socio_id"
+    solicitud_credito }o--|| usuario : "usuario_id"
+    solicitud_credito }o--o| evaluacion_campo : "evaluacion_campo_id"
+    solicitud_credito }o--o| producto_credito : "producto_credito_id"
+    solicitud_credito }o--o| moneda : "moneda_id"
+    solicitud_credito }o--o| cooperativa : "cooperativa_id"
+    garantia }o--|| cooperativa : "cooperativa_id"
+    garantia }o--|| solicitud_credito : "solicitud_credito_id"
+    garantia }o--|| moneda : "moneda_id"
+    garantia }o--o| socio : "socio_avalista_id"
+    garantia }o--|| usuario : "usuario_registro_id"
+    evaluacion_crediticia }o--|| solicitud_credito : "solicitud_credito_id"
+    evaluacion_crediticia }o--|| cooperativa : "cooperativa_id"
+    evaluacion_crediticia }o--|| usuario : "usuario_id"
+    voto_comite }o--|| solicitud_credito : "solicitud_credito_id"
+    voto_comite }o--|| usuario : "usuario_id"
+    credito }o--|| solicitud_credito : "solicitud_credito_id"
+    credito }o--o| cooperativa : "cooperativa_id"
+    credito }o--o| socio : "socio_id"
+    credito }o--o| producto_credito : "producto_credito_id"
+    credito }o--o| moneda : "moneda_id"
+    credito }o--o| cuenta_ahorro : "cuenta_desembolso_id"
+    credito }o--o| usuario : "usuario_id"
+    tabla_amortizacion }o--|| credito : "credito_id"
+    pago_cuota }o--|| tabla_amortizacion : "tabla_amortizacion_id"
+    pago_cuota }o--o| credito : "credito_id"
+    pago_cuota }o--o| cooperativa : "cooperativa_id"
+    pago_cuota }o--o| usuario : "usuario_id"
+    morosidad }o--|| credito : "credito_id"
+    caja }o--o| cooperativa : "cooperativa_id"
+    control_caja }o--|| caja : "caja_id"
+    control_caja }o--|| usuario : "usuario_id"
+    arqueo_caja }o--|| control_caja : "control_caja_id"
+    arqueo_caja }o--|| usuario : "usuario_id"
+    arqueo_caja_moneda }o--|| arqueo_caja : "arqueo_id"
+    arqueo_caja_moneda }o--|| moneda : "moneda_id"
+    arqueo_caja_detalle }o--|| arqueo_caja_moneda : "arqueo_moneda_id"
+    cierre_caja }o--|| control_caja : "control_caja_id"
+    cierre_caja }o--|| arqueo_caja : "arqueo_id"
+    cierre_caja }o--|| usuario : "usuario_id"
+    cierre_caja_moneda }o--|| cierre_caja : "cierre_id"
+    cierre_caja_moneda }o--|| moneda : "moneda_id"
+    certificado_aportacion }o--|| socio : "socio_id"
+    certificado_aportacion }o--|| moneda : "moneda_id"
+    declaracion_jurada_uif }o--o| moneda : "moneda_id"
+    declaracion_jurada_uif }o--o| socio : "socio_id"
+    declaracion_jurada_uif }o--o| usuario : "usuario_id"
+    declaracion_jurada_uif }o--o| cooperativa : "cooperativa_id"
+    deposito_plazo_fijo }o--|| socio : "socio_id"
+    deposito_plazo_fijo }o--|| moneda : "moneda_id"
+    deposito_plazo_fijo }o--o| cuenta_ahorro : "cuenta_origen_id"
+    deposito_plazo_fijo }o--o| declaracion_jurada_uif : "declaracion_jurada_uif_id"
+    deposito_plazo_fijo }o--o| usuario : "usuario_id"
+    deposito_plazo_fijo }o--o| cooperativa : "cooperativa_id"
+    tasa_dpf }o--|| cooperativa : "cooperativa_id"
+    tasa_dpf }o--|| moneda : "moneda_id"
+    dpf_cronograma }o--|| deposito_plazo_fijo : "deposito_plazo_fijo_id"
+    liquidacion }o--|| deposito_plazo_fijo : "deposito_plazo_fijo_id"
+    liquidacion }o--o| usuario : "usuario_id"
+    liquidacion }o--o| cuenta_ahorro : "cuenta_abono_id"
+    prediccion_de_morosidad }o--|| credito : "credito_id"
+    historial_gestion_de_cobranza }o--|| credito : "credito_id"
+    historial_gestion_de_cobranza }o--o| cooperativa : "cooperativa_id"
+    historial_gestion_de_cobranza }o--o| usuario : "usuario_id"
+    alerta_credito }o--|| cooperativa : "cooperativa_id"
+    alerta_credito }o--|| credito : "credito_id"
+    alerta_credito }o--o| tabla_amortizacion : "tabla_amortizacion_id"
+    alerta_credito }o--o| usuario : "usuario_cierre_id"
+    alerta_credito }o--o| historial_gestion_de_cobranza : "gestion_id"
+    oferta_recredito }o--|| cooperativa : "cooperativa_id"
+    oferta_recredito }o--|| socio : "socio_id"
+    oferta_recredito }o--|| credito : "credito_origen_id"
+    oferta_recredito }o--|| producto_credito : "producto_credito_id"
+    oferta_recredito }o--o| solicitud_credito : "solicitud_generada_id"
+    oferta_recredito }o--o| usuario : "usuario_id"
+    plan_cuenta }o--o| cooperativa : "cooperativa_id"
+    comprobante_contable }o--|| cooperativa : "cooperativa_id"
+    comprobante_contable }o--|| moneda : "moneda_id"
+    comprobante_contable }o--o| usuario : "usuario_id"
+    detalle_asiento }o--|| comprobante_contable : "comprobante_contable_id"
+    detalle_asiento }o--|| plan_cuenta : "plan_cuenta_id"
+    parametro_contable }o--|| cooperativa : "cooperativa_id"
+    parametro_contable }o--|| plan_cuenta : "plan_cuenta_id"
+    suscripcion }o--|| cooperativa : "cooperativa_id"
+    suscripcion }o--|| plan_suscripcion : "plan_id"
+    notificacion }o--|| cooperativa : "cooperativa_id"
+    notificacion }o--|| usuario : "usuario_id"
+    notificacion_destinatario }o--|| notificacion : "notificacion_id"
+    notificacion_destinatario }o--|| socio : "socio_id"
+    notificacion_destinatario }o--|| usuario : "usuario_id"
