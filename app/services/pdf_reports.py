@@ -36,7 +36,8 @@ PDF_HEADERS = {
 }
 PDF_CONCEPTS = {
     "cartera_bruta": "Cartera bruta", "cartera_en_mora": "Cartera en mora",
-    "indice_mora": "Índice de mora", "creditos": "N.º de créditos", "cuentas_ahorro": "N.º de cuentas de ahorro",
+    "indice_mora": "Índice de mora", "motivo_indice_mora": "Observación del índice de mora",
+    "creditos": "N.º de créditos", "cuentas_ahorro": "N.º de cuentas de ahorro",
     "saldo_ahorro": "Saldo de ahorro", "certificados_dpf": "N.º de certificados DPF",
     "capital_dpf": "Capital de DPF", "captaciones": "Captaciones totales",
     "liquidez": "Liquidez (%)", "cobertura_previsiones": "Cobertura de previsiones (%)",
@@ -219,6 +220,43 @@ def _is_total_row(row):
     return label.startswith(("total", "subtotal", "resultado"))
 
 
+def prepare_sections(sections):
+    """Normalize caller sections for presentation (PDF and HTML share these rules).
+
+    Drops all-empty columns, translates technical headers/concepts and resolves the
+    column types. Sections without headers or rows are omitted.
+    """
+    prepared = []
+    for section in sections:
+        source_headers = [str(header) for header in section.get("headers", [])]
+        rows = [list(row) for row in section.get("rows", [])]
+        totals = [list(row) for row in section.get("totals", [])]
+        # Presentation metadata never changes the caller's CSV rows/headers.
+        keep = [i for i in range(len(source_headers)) if any(
+            i < len(row) and row[i] not in (None, "") for row in rows + totals)]
+        if not keep:
+            keep = list(range(len(source_headers)))
+        source_headers = [source_headers[i] for i in keep]
+        rows = [[row[i] if i < len(row) else None for i in keep] for row in rows]
+        totals = [[row[i] if i < len(row) else None for i in keep] for row in totals]
+        row_types = [[row[i] if i < len(row) else "text" for i in keep]
+                     for row in section.get("row_types", [])]
+        headers = [PDF_HEADERS.get(header.strip().lower(), header) for header in source_headers]
+        rows = [[PDF_CONCEPTS.get(str(value), value) for value in row] for row in rows]
+        totals = [[PDF_CONCEPTS.get(str(value), value) for value in row] for row in totals]
+        if not headers or not rows + totals:
+            continue
+        provided_types = section.get("column_types", [])
+        column_types = [provided_types[source_i] if source_i < len(provided_types) else
+                        ("amount" if _is_amount_column(header) else "text")
+                        for source_i, header in zip(keep, headers)]
+        # Human-friendly headings such as "Debe" still mean amounts unless the caller marks a code/text column.
+        column_types = ["amount" if t == "text" and _is_amount_column(h) else t for t, h in zip(column_types, headers)]
+        prepared.append({"title": section.get("title"), "headers": headers, "rows": rows,
+                         "totals": totals, "row_types": row_types, "column_types": column_types})
+    return prepared
+
+
 def build_report_pdf(*, title, period, sections, cooperative=None, currency=None,
                      generated_by=None, orientation=None, empty=False):
     """Render supplied report rows; callers own the single source-data execution."""
@@ -232,37 +270,15 @@ def build_report_pdf(*, title, period, sections, cooperative=None, currency=None
     available_width = pdf.w - pdf.l_margin - pdf.r_margin
     bottom = pdf.h - pdf.b_margin
     rendered_rows = 0
-    for section in sections:
-        source_headers = [str(header) for header in section.get("headers", [])]
-        rows = [list(row) for row in section.get("rows", [])]
-        totals = [list(row) for row in section.get("totals", [])]
-        # PDF-only presentation metadata never changes the caller's CSV rows/headers.
-        keep = [i for i in range(len(source_headers)) if any(
-            i < len(row) and row[i] not in (None, "") for row in rows + totals)]
-        if not keep:
-            keep = list(range(len(source_headers)))
-        source_headers = [source_headers[i] for i in keep]
-        rows = [[row[i] if i < len(row) else None for i in keep] for row in rows]
-        totals = [[row[i] if i < len(row) else None for i in keep] for row in totals]
-        row_types = [[row[i] if i < len(row) else "text" for i in keep]
-                     for row in section.get("row_types", [])]
-        headers = [PDF_HEADERS.get(header.strip().lower(), header) for header in source_headers]
-        rows = [[PDF_CONCEPTS.get(str(value), value) for value in row] for row in rows]
-        totals = [[PDF_CONCEPTS.get(str(value), value) for value in row] for row in totals]
+    for section in prepare_sections(sections):
+        headers, rows, totals = section["headers"], section["rows"], section["totals"]
+        row_types, column_types = section["row_types"], section["column_types"]
         all_rows = rows + totals
-        if not headers or not all_rows:
-            continue
-        if section.get("title"):
+        if section["title"]:
             pdf.set_font("DejaVu", "B", 9)
             pdf.multi_cell(0, 6, str(section["title"]))
             pdf.set_x(pdf.l_margin)
         rendered_rows += len(all_rows)
-        provided_types = section.get("column_types", [])
-        column_types = [provided_types[source_i] if source_i < len(provided_types) else
-                        ("amount" if _is_amount_column(header) else "text")
-                        for source_i, header in zip(keep, headers)]
-        # Human-friendly headings such as "Debe" still mean amounts unless the caller marks a code/text column.
-        column_types = ["amount" if t == "text" and _is_amount_column(h) else t for t, h in zip(column_types, headers)]
         widths = _preferred_widths(pdf, headers, all_rows, column_types, available_width)
 
         def heading():

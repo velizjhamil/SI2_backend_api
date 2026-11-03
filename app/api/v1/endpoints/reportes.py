@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 from sqlalchemy import Date, cast, func, select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -14,8 +15,9 @@ from app.api.v1.deps import get_current_user, get_db
 from app.api.v1.endpoints.creditos import _configuracion_mora
 from app.api.v1.endpoints.estados_financieros import _balance_data, _income_data
 from app.models.models import Credito, SolicitudCredito, Usuario
-from app.services.pdf_reports import build_report_pdf
+from app.services.report_exports import DOCUMENT_FORMATS, EXPORT_FORMAT_PATTERN, report_response
 from app.services.cobro_cuotas import resumir_morosidad
+from app.services.comando_voz_reportes import interpretar_comando
 
 router = APIRouter()
 ROLES = {"ADMINISTRADOR", "CONTADOR", "OFICIAL_CREDITO"}
@@ -180,35 +182,35 @@ def cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: in
 
 @router.get("/cartera/export")
 def export_cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                   formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+                   formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     pdf_meta = {}
     body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
     rows = [["Total", key, value] for key, value in body["totales"].items()]
     rows += [["Advertencia", item["codigo"], item["creditos"], item["saldo"], item["mensaje"]]
              for item in body["advertencias"]]
     headers = ["Sección", "Concepto", "Valor", "Saldo", "Mensaje"]
-    if formato == "pdf":
+    if formato in DOCUMENT_FORMATS:
         totals = [[key, value] for key, value in body["totales"].items()]
         total_types = [["text", "count" if key == "creditos" else
-                        "percentage" if key == "indice_mora" else "amount"]
+                        "percentage" if key == "indice_mora" else
+                        "text" if key.startswith("motivo") else "amount"]
                        for key in body["totales"]]
         warnings = [[item["codigo"], item["creditos"], item["saldo"], item["mensaje"]]
                     for item in body["advertencias"]]
-        content = build_report_pdf(title="Cartera", period=f"Al {fecha_corte.isoformat()}",
+        return report_response(formato, f"cartera-{fecha_corte.isoformat()}",
+            title="Cartera", period=f"Al {fecha_corte.isoformat()}",
             sections=[{"title": "Totales de cartera", "headers": ["Concepto", "Valor"], "rows": totals,
                        "column_types": ["text", "amount"], "row_types": total_types},
                       {"title": "Advertencias", "headers": ["Código", "N.º de créditos", "Saldo", "Mensaje"],
                        "rows": warnings, "column_types": ["text", "count", "amount", "text"]}],
             cooperative=user.cooperativa.nombre if user.cooperativa else None,
             currency=pdf_meta["currency"], generated_by=user.nombre, orientation="L", empty=not rows)
-        return Response(content, media_type="application/pdf", headers={
-            "Content-Disposition": f'attachment; filename="cartera-{fecha_corte.isoformat()}.pdf"'})
     return _csv(f"cartera-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
 @router.get("/mora/export")
 def export_mora(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                formato: str = Query("csv", pattern="^(csv|pdf)$"),
+                formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN),
                 user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     """Reporte de morosidad: resumen y distribución de la cartera vencida."""
     pdf_meta = {}
@@ -233,7 +235,7 @@ def export_mora(fecha_corte: date = Query(default_factory=date.today), moneda_id
             + [["Producto", *row] for row in products]
             + [["Advertencia", *row] for row in warnings])
     headers = ["Sección", "Concepto", "Créditos", "Monto"]
-    if formato == "pdf":
+    if formato in DOCUMENT_FORMATS:
         sections = [
             {"title": "Resumen de mora", "headers": ["Concepto", "Valor"],
              "rows": summary_amounts, "column_types": ["text", "amount"]},
@@ -251,13 +253,12 @@ def export_mora(fecha_corte: date = Query(default_factory=date.today), moneda_id
                              "headers": ["Código", "Créditos", "Saldo"],
                              "rows": warnings,
                              "column_types": ["text", "count", "amount"]})
-        content = build_report_pdf(title="Reporte de morosidad", period=f"Al {fecha_corte.isoformat()}",
+        return report_response(formato, filename,
+            title="Reporte de morosidad", period=f"Al {fecha_corte.isoformat()}",
             sections=sections,
             cooperative=user.cooperativa.nombre if user.cooperativa else None,
             currency=pdf_meta["currency"], generated_by=user.nombre, orientation="L",
             empty=not ranges)
-        return Response(content, media_type="application/pdf", headers={
-            "Content-Disposition": f'attachment; filename="{filename}.pdf"'})
     return _csv(f"{filename}.csv", headers, rows)
 
 
@@ -322,19 +323,20 @@ def captaciones(fecha_corte: date = Query(default_factory=date.today), moneda_id
 
 @router.get("/captaciones/export")
 def export_captaciones(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                       formato: str = Query("csv", pattern="^(csv|pdf)$"), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+                       formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     pdf_meta = {}
     body = _deposits(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
     rows = [["Ahorros", r["tipo"], r["saldo"]] for r in body["ahorros_por_tipo"]]
     rows += [["DPF", r["rango"], r["capital"]] for r in body["dpf_por_plazo"]]
     headers = ["Sección", "Concepto", "Monto"]
-    if formato == "pdf":
+    if formato in DOCUMENT_FORMATS:
         savings = [[row[1], row[2]] for row in rows if row[0] == "Ahorros"]
         dpfs = [[row[1], row[2]] for row in rows if row[0] == "DPF"]
         totals = [[key, value] for key, value in body["totales"].items()]
         total_types = [["text", "count" if "cuentas" in key or "certificados" in key else "amount"]
                        for key in body["totales"]]
-        content = build_report_pdf(title="Captaciones", period=f"Al {fecha_corte.isoformat()}",
+        return report_response(formato, f"captaciones-{fecha_corte.isoformat()}",
+            title="Captaciones", period=f"Al {fecha_corte.isoformat()}",
             sections=[{"title": "Ahorros por tipo", "headers": ["Tipo de cuenta", "Saldo"], "rows": savings,
                        "column_types": ["text", "amount"]},
                       {"title": "Depósitos a plazo fijo", "headers": ["Plazo", "Capital"], "rows": dpfs,
@@ -343,8 +345,6 @@ def export_captaciones(fecha_corte: date = Query(default_factory=date.today), mo
                        "column_types": ["text", "amount"], "row_types": total_types}],
             cooperative=user.cooperativa.nombre if user.cooperativa else None,
             currency=pdf_meta["currency"], generated_by=user.nombre, empty=not rows)
-        return Response(content, media_type="application/pdf", headers={
-            "Content-Disposition": f'attachment; filename="captaciones-{fecha_corte.isoformat()}.pdf"'})
     return _csv(f"captaciones-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
@@ -485,20 +485,19 @@ def indicadores(fecha_corte: date = Query(default_factory=date.today), user: Usu
 
 
 @router.get("/indicadores/export")
-def export_indicadores(fecha_corte: date = Query(default_factory=date.today), formato: str = Query("csv", pattern="^(csv|pdf)$"),
+def export_indicadores(fecha_corte: date = Query(default_factory=date.today), formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN),
                        user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     body = _indicators(db, _tenant(user), fecha_corte)
     rows = [[i["clave"], i["nombre"], i["valor"], i.get("motivo", ""), i["definicion"]]
             for i in body["indicadores"]]
     headers = ["Clave", "Indicador", "Valor", "Motivo", "Definición"]
-    if formato == "pdf":
-        content = build_report_pdf(title="Indicadores de gestión", period=f"Al {fecha_corte.isoformat()}",
+    if formato in DOCUMENT_FORMATS:
+        return report_response(formato, f"indicadores-{fecha_corte.isoformat()}",
+            title="Indicadores de gestión", period=f"Al {fecha_corte.isoformat()}",
             sections=[{"headers": headers, "rows": rows,
                        "column_types": ["text", "text", "percentage", "text", "text"]}],
             cooperative=user.cooperativa.nombre if user.cooperativa else None,
             currency="BOB (Bolivianos)", generated_by=user.nombre, orientation="L", empty=not rows)
-        return Response(content, media_type="application/pdf", headers={
-            "Content-Disposition": f'attachment; filename="indicadores-{fecha_corte.isoformat()}.pdf"'})
     return _csv(f"indicadores-{fecha_corte.isoformat()}.csv", headers, rows)
 
 
@@ -512,3 +511,49 @@ def resumen_ejecutivo(fecha_corte: date = Query(default_factory=date.today), mon
             "fecha_corte": fecha_corte.isoformat(), "cartera": portfolio["totales"],
             "captaciones": _deposits(db, tenant, fecha_corte, moneda_id)["totales"],
             "indicadores": _indicators(db, tenant, fecha_corte)["indicadores"]}
+
+
+@router.get("/resumen-ejecutivo/export")
+def export_resumen_ejecutivo(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
+                             formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN),
+                             user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    tenant = _tenant(user)
+    pdf_meta = {}
+    portfolio = _portfolio(db, tenant, fecha_corte, moneda_id, pdf_meta)["totales"]
+    deposits = _deposits(db, tenant, fecha_corte, moneda_id)["totales"]
+    indicators = _indicators(db, tenant, fecha_corte)["indicadores"]
+    filename = f"resumen-ejecutivo-{fecha_corte.isoformat()}"
+    rows = [["Cartera", key, value, ""] for key, value in portfolio.items()]
+    rows += [["Captaciones", key, value, ""] for key, value in deposits.items()]
+    rows += [["Indicadores", i["nombre"], i["valor"], i.get("motivo", "")] for i in indicators]
+    headers = ["Sección", "Concepto", "Valor", "Motivo"]
+    if formato in DOCUMENT_FORMATS:
+        portfolio_types = [["text", "count" if key == "creditos" else
+                            "percentage" if key == "indice_mora" else "text" if key.startswith("motivo") else "amount"]
+                           for key in portfolio]
+        deposit_types = [["text", "count" if "cuentas" in key or "certificados" in key else "amount"]
+                         for key in deposits]
+        return report_response(formato, filename,
+            title="Resumen ejecutivo", period=f"Al {fecha_corte.isoformat()}",
+            sections=[{"title": "Cartera de créditos", "headers": ["Concepto", "Valor"],
+                       "rows": [[key, value] for key, value in portfolio.items()],
+                       "column_types": ["text", "amount"], "row_types": portfolio_types},
+                      {"title": "Captaciones (ahorro y DPF)", "headers": ["Concepto", "Valor"],
+                       "rows": [[key, value] for key, value in deposits.items()],
+                       "column_types": ["text", "amount"], "row_types": deposit_types},
+                      {"title": "Indicadores de gestión", "headers": ["Indicador", "Valor", "Observación"],
+                       "rows": [[i["nombre"], i["valor"], i.get("motivo", "")] for i in indicators],
+                       "column_types": ["text", "percentage", "text"]}],
+            cooperative=user.cooperativa.nombre if user.cooperativa else None,
+            currency=pdf_meta["currency"], generated_by=user.nombre, empty=not rows)
+    return _csv(f"{filename}.csv", headers, rows)
+
+
+class ComandoVozIn(BaseModel):
+    texto: str = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/comando-voz")
+def comando_voz(body: ComandoVozIn, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Interpreta un comando de voz (ya transcrito) y devuelve qué reporte exportar."""
+    return interpretar_comando(body.texto, user, db)
