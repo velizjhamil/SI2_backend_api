@@ -7,7 +7,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.v1.deps import get_db, require_admin
+from app.api.v1.deps import get_db, require_admin, require_feature
 from app.core.bitacora import registrar_accion
 from app.core.security import hash_password
 from app.models.models import (
@@ -422,6 +422,7 @@ MODULOS_VALIDOS = ["CAJA", "CONTABILIDAD", "CREDITO", "DPF", "REPORTE",
 def get_bitacora(
     admin: Usuario = Depends(require_admin),
     db: Session = Depends(get_db),
+    _feature: Usuario = Depends(require_feature("respaldos_bitacora")),
     limite: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     modulo: Annotated[str | None, Query()] = None,
@@ -467,6 +468,7 @@ def get_bitacora(
 def get_modulos(
     _admin: Usuario = Depends(require_admin),
     db: Session = Depends(get_db),
+    _feature: Usuario = Depends(require_feature("respaldos_bitacora")),
 ):
     """Devuelve los módulos que tienen registros en la bitácora (dinámico)."""
     rows = db.execute(

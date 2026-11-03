@@ -5,10 +5,13 @@ from sqlalchemy.orm import Session
 
 from app.core.security import decode_access_token
 from app.db.session import get_db
-from app.models.models import Socio, Usuario
+from app.models.models import PlanSuscripcion, Socio, Usuario
 from app.services.suscripciones import (
     DETALLE_SUSCRIPCION_NO_VIGENTE,
+    NOMBRES_MODULOS,
+    get_suscripcion,
     usuario_tiene_suscripcion_vigente,
+    usuario_tiene_modulo,
 )
 
 bearer_scheme = HTTPBearer(auto_error=True)
@@ -95,9 +98,29 @@ def require_operaciones(usuario: Usuario = Depends(get_current_user)) -> Usuario
     return usuario
 
 
+def require_feature(modulo: str):
+    """Build a reusable API dependency for a plan-restricted module."""
+    def dependency(
+        usuario: Usuario = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ) -> Usuario:
+        if usuario_tiene_modulo(db, usuario, modulo):
+            return usuario
+        suscripcion = get_suscripcion(db, usuario.cooperativa_id)
+        plan = db.get(PlanSuscripcion, suscripcion.plan_id) if suscripcion else None
+        nombre_plan = plan.nombre if plan else "desconocido"
+        nombre_modulo = NOMBRES_MODULOS.get(modulo, modulo)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"El módulo {nombre_modulo} no está incluido en el plan {nombre_plan}.",
+        )
+    return dependency
+
+
 def get_current_socio(
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _feature_access: Usuario = Depends(require_feature("banca_movil")),
 ) -> Socio:
     """Dependencia de autoservicio: resuelve el `Socio` propio del usuario autenticado.
 

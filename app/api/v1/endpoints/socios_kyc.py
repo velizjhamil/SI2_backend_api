@@ -2,15 +2,40 @@
 
 from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_db, require_admin, require_operaciones
 from app.core.bitacora import registrar_accion
-from app.models.models import Socio, Usuario
+from app.models.models import PlanSuscripcion, Socio, Suscripcion, Usuario
 from app.schemas.schemas import SocioCreate, SocioOut, SocioRegistroResponse, SocioUpdate
 
 router = APIRouter()
+LIMITE_SOCIOS_BASICO = 500
+
+
+def _validar_limite_socios(db: Session, admin: Usuario) -> None:
+    if admin.cooperativa_id is None or admin.rol.nombre == "SUPERADMIN":
+        return
+    suscripcion = db.execute(
+        select(Suscripcion)
+        .where(Suscripcion.cooperativa_id == admin.cooperativa_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    plan = db.get(PlanSuscripcion, suscripcion.plan_id) if suscripcion else None
+    if plan is None or plan.codigo != "BASICO":
+        return
+    activos = db.execute(
+        select(func.count(Socio.id)).where(
+            Socio.cooperativa_id == admin.cooperativa_id,
+            Socio.estado == "ACTIVO",
+        )
+    ).scalar_one()
+    if activos >= LIMITE_SOCIOS_BASICO:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Se alcanzó el límite de {LIMITE_SOCIOS_BASICO} socios activos del plan {plan.nombre}.",
+        )
 
 
 def _socio_visible(admin: Usuario, socio: Socio) -> bool:
@@ -56,6 +81,8 @@ def registrar_socio(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Ya existe un socio con la CI '{body.ci}'",
         )
+
+    _validar_limite_socios(db, admin)
 
     # Crear el socio
     nuevo_socio = Socio(
@@ -105,7 +132,10 @@ def actualizar_socio(
     socio = db.get(Socio, socio_id)
     if socio is None or not _socio_visible(admin, socio):
         raise HTTPException(status_code=404, detail="Socio no encontrado")
-    for campo, valor in body.model_dump(exclude_unset=True).items():
+    cambios = body.model_dump(exclude_unset=True)
+    if socio.estado != "ACTIVO" and cambios.get("estado") == "ACTIVO":
+        _validar_limite_socios(db, admin)
+    for campo, valor in cambios.items():
         setattr(socio, campo, valor)
     registrar_accion(db, accion="ACTUALIZAR", modulo="SOCIO", usuario_id=admin.id, descripcion=f"Socio actualizado: {socio.id}", request=request)
     db.commit()

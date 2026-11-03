@@ -28,7 +28,7 @@ from sqlalchemy import Date, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.v1.deps import get_current_user, get_db, require_admin
+from app.api.v1.deps import get_current_user, get_db, require_admin, require_feature
 from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.core.config import settings
@@ -568,6 +568,7 @@ def precalificar_solicitud_credito(
     request: Request,
     usuario: Usuario = Depends(get_current_user),
     db: Session = Depends(get_db),
+    _feature: Usuario = Depends(require_feature("scoring_crediticio")),
 ):
     cooperativa_id = _validar_evaluador_crediticio(usuario)
     socio = db.execute(
@@ -3184,7 +3185,7 @@ def obtener_resumen_monitoreo_mora(usuario: Usuario = Depends(get_current_user),
 
 
 @router.get("/evaluaciones/{evaluacion_id}/explicacion")
-def explicar_evaluacion_mora(evaluacion_id: int, request: Request, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def explicar_evaluacion_mora(evaluacion_id: int, request: Request, usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db), _feature: Usuario = Depends(require_feature("scoring_crediticio"))):
     coop_id = _validar_lector(usuario)
     evaluacion = db.execute(select(EvaluacionCrediticia).where(EvaluacionCrediticia.id == evaluacion_id, EvaluacionCrediticia.cooperativa_id == coop_id)).scalar_one_or_none()
     if evaluacion is None:
@@ -3253,7 +3254,7 @@ def _oferta_out(db, offer):
 
 
 @router.post("/recreditos/generar", response_model=GeneracionRecreditosOut)
-def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_current_user), db: Session=Depends(get_db)):
+def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_current_user), db: Session=Depends(get_db), _feature: Usuario=Depends(require_feature("recredito_ia"))):
     coop_id=_validar_escritor_solicitud(usuario)
     credits=db.execute(select(Credito).options(joinedload(Credito.socio),joinedload(Credito.producto),joinedload(Credito.solicitud).joinedload(SolicitudCredito.evaluacion)).where(Credito.cooperativa_id==coop_id, Credito.estado.in_(("VIGENTE","CANCELADO")))).unique().scalars().all()
     generated=[]; omitted=0
@@ -3290,7 +3291,7 @@ def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_cur
 
 
 @router.get("/recreditos", response_model=list[OfertaOut])
-def listar_ofertas_recredito(estado: str|None=Query(None),usuario: Usuario=Depends(get_current_user),db: Session=Depends(get_db)):
+def listar_ofertas_recredito(estado: str|None=Query(None),usuario: Usuario=Depends(get_current_user),db: Session=Depends(get_db),_feature: Usuario=Depends(require_feature("recredito_ia"))):
     coop_id=_validar_lector(usuario)
     offers=db.execute(select(OfertaRecredito).where(OfertaRecredito.cooperativa_id==coop_id).order_by(OfertaRecredito.fecha_generacion.desc(),OfertaRecredito.id.desc())).scalars().all()
     result=[]
@@ -3350,7 +3351,7 @@ def aceptar_oferta_core(db: Session, offer: OfertaRecredito, usuario: Usuario, c
 
 
 @router.post("/recreditos/{oferta_id}/descartar", response_model=OfertaOut)
-def descartar_oferta_recredito(oferta_id:int,body:DescartarRecreditoIn,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db)):
+def descartar_oferta_recredito(oferta_id:int,body:DescartarRecreditoIn,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db),_feature: Usuario=Depends(require_feature("recredito_ia"))):
     coop_id=_validar_escritor_solicitud(usuario); reason=body.motivo
     if not isinstance(reason,str) or len(reason.strip())<5: raise HTTPException(status_code=422,detail="El motivo debe contener al menos 5 caracteres")
     offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id)).scalar_one_or_none()
@@ -3359,7 +3360,7 @@ def descartar_oferta_recredito(oferta_id:int,body:DescartarRecreditoIn,request:R
 
 
 @router.post("/recreditos/{oferta_id}/aceptar",status_code=201,response_model=OfertaAceptadaOut)
-def aceptar_oferta_recredito(oferta_id:int,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db)):
+def aceptar_oferta_recredito(oferta_id:int,request:Request,usuario:Usuario=Depends(get_current_user),db:Session=Depends(get_db),_feature: Usuario=Depends(require_feature("recredito_ia"))):
     coop_id=_validar_escritor_solicitud(usuario)
     offer=db.execute(select(OfertaRecredito).where(OfertaRecredito.id==oferta_id,OfertaRecredito.cooperativa_id==coop_id).with_for_update()).scalar_one_or_none()
     if offer is None: raise HTTPException(status_code=404,detail="Oferta no encontrada")

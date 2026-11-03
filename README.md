@@ -234,6 +234,12 @@ Una suscripción está vigente cuando su estado es `ACTIVA` y no tiene fecha de 
 
 `SUPERADMIN`, usuarios sin cooperativa y cooperativas sin una fila de suscripción conservan el acceso. Al crear usuarios de personal, reactivar personal o cambiar a un rol de personal/estado activo, la API respeta `limite_usuarios` del plan: cuenta solo usuarios `ACTIVO` cuyo rol no sea `SOCIO`, y rechaza con `409` al alcanzar el límite. Los socios no consumen cupos; un plan con límite `NULL` no restringe altas.
 
+### Módulos habilitados por plan
+
+La API verifica las funciones restringidas en el backend usando la suscripción activa de cada cooperativa. `BASICO` conserva socios/KYC, ahorros, créditos, caja, contabilidad y reportes gerenciales; admite hasta 500 socios activos. `CRECIMIENTO_PRO` agrega banca móvil del socio y comprobantes digitales, scoring crediticio, informes ASFI, respaldos/bitácora, chatbot y dictado por voz, y notificaciones. `RED_ENTERPRISE` agrega además recomendaciones de recrédito con IA. El scoring restringido es el avanzado: precalificación y explicación de evaluación. La evaluación interna de solicitudes, su historial y la resolución quedan disponibles en todos los planes para mantener el flujo de aprobación crediticia. Un código de plan desconocido solo habilita los módulos de la primera fila de la matriz (socios/KYC, ahorros, créditos, caja y contabilidad), sin reportes gerenciales ni funciones adicionales.
+
+Las rutas restringidas responden `403` cuando la función no está incluida. `SUPERADMIN`, usuarios sin cooperativa y cooperativas sin suscripción conservan las excepciones de la fase 1. El tope de socios aplica solo al crear un socio `ACTIVO` en `BASICO` y responde `409` al superar el límite. Las operaciones de crédito usadas por el personal —incluida la ficha de campo— permanecen disponibles en todos los planes; no se limita el router completo de créditos. Las operaciones globales de respaldos y la verificación pública de comprobantes no se asocian a un plan de cooperativa.
+
 ## 📌 Endpoints principales
 
 Prefijo global: `/api/v1`

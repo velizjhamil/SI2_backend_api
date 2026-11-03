@@ -8,7 +8,7 @@ from fpdf import FPDF
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.v1.deps import get_current_socio, get_current_user, get_db, require_operaciones
+from app.api.v1.deps import get_current_socio, get_current_user, get_db, require_feature, require_operaciones
 from app.core.bitacora import registrar_accion
 from app.models.models import CertificadoAportacion, CuentaAhorro, Moneda, Socio, Usuario
 from app.services.comprobantes_movil import issue_receipt, receipt_payload
@@ -363,7 +363,7 @@ def comprobante_certificado_pdf(
 
 
 @router.get("/mis-cuentas", response_model=list[CuentaAhorroOut], summary="Consultar mis cuentas")
-def mis_cuentas(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def mis_cuentas(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db), _feature: Usuario = Depends(require_feature("banca_movil"))):
     query = (
         select(CuentaAhorro)
         .join(Socio, CuentaAhorro.socio_id == Socio.id)
@@ -375,7 +375,7 @@ def mis_cuentas(usuario: Usuario = Depends(get_current_user), db: Session = Depe
 
 
 @router.get("/mis-certificados", response_model=list[CertificadoAportacionOut], summary="Consultar mis certificados")
-def mis_certificados(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def mis_certificados(usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db), _feature: Usuario = Depends(require_feature("banca_movil"))):
     query = (
         select(CertificadoAportacion)
         .join(Socio, CertificadoAportacion.socio_id == Socio.id)
@@ -499,6 +499,7 @@ def transferir_entre_cuentas_propias(
     usuario: Usuario = Depends(get_current_user),
     socio: Socio = Depends(get_current_socio),
     db: Session = Depends(get_db),
+    _feature: Usuario = Depends(require_feature("banca_movil")),
 ):
     """Autoservicio: el socio autenticado mueve saldo entre dos cuentas
     propias, sin comisión ni conversión de moneda en v1."""

@@ -30,7 +30,6 @@ PLANES_DEFAULT: list[dict] = [
         "features": [
             {"text": "Hasta 500 socios", "icon": "group"},
             {"text": "Módulos de ahorros y créditos", "icon": "savings"},
-            {"text": "Reportes regulatorios ASFI", "icon": "assessment"},
         ],
         "incluye": [
             "Gestión de socios y KYC",
@@ -82,6 +81,31 @@ PLANES_DEFAULT: list[dict] = [
     },
 ]
 
+MODULOS_PRIMERA_FILA = frozenset({
+    "socios_kyc", "ahorros", "creditos", "caja", "contabilidad",
+})
+MODULOS_COMUNES = MODULOS_PRIMERA_FILA | frozenset({"reportes_gerenciales"})
+MODULOS_POR_PLAN = {
+    "BASICO": MODULOS_COMUNES,
+    "CRECIMIENTO_PRO": MODULOS_COMUNES | frozenset({
+        "banca_movil", "scoring_crediticio", "informes_asfi", "respaldos_bitacora",
+        "chatbot_ia", "notificaciones_socios",
+    }),
+    "RED_ENTERPRISE": MODULOS_COMUNES | frozenset({
+        "banca_movil", "scoring_crediticio", "informes_asfi", "respaldos_bitacora",
+        "chatbot_ia", "notificaciones_socios", "recredito_ia",
+    }),
+}
+NOMBRES_MODULOS = {
+    "banca_movil": "banca móvil y comprobantes digitales",
+    "scoring_crediticio": "scoring crediticio",
+    "informes_asfi": "informes ASFI",
+    "respaldos_bitacora": "respaldos y bitácora",
+    "chatbot_ia": "chatbot con IA y dictado por voz",
+    "notificaciones_socios": "notificaciones a socios",
+    "recredito_ia": "recomendación de recrédito con IA",
+}
+
 
 def get_default_plan(db: Session) -> PlanSuscripcion | None:
     return db.execute(
@@ -93,6 +117,20 @@ def get_suscripcion(db: Session, cooperativa_id: int) -> Suscripcion | None:
     return db.execute(
         select(Suscripcion).where(Suscripcion.cooperativa_id == cooperativa_id)
     ).scalar_one_or_none()
+
+
+def usuario_tiene_modulo(db: Session, usuario, modulo: str) -> bool:
+    """Check a feature using the tenant's active subscription plan."""
+    if usuario.rol and usuario.rol.nombre == "SUPERADMIN":
+        return True
+    if usuario.cooperativa_id is None:
+        return True
+    suscripcion = get_suscripcion(db, usuario.cooperativa_id)
+    if suscripcion is None:
+        return True
+    plan = db.get(PlanSuscripcion, suscripcion.plan_id)
+    modulos = MODULOS_POR_PLAN.get(plan.codigo, MODULOS_PRIMERA_FILA) if plan else MODULOS_PRIMERA_FILA
+    return modulo in modulos
 
 
 def usuario_tiene_suscripcion_vigente(db: Session, usuario) -> bool:

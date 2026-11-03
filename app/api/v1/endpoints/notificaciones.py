@@ -7,14 +7,14 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import get_current_user, get_db
+from app.api.v1.deps import get_current_user, get_db, require_feature
 from app.core.bitacora import registrar_accion
 from app.models.models import Notificacion, NotificacionDestinatario, Usuario
 from app.services.notificaciones import (
     DESTINOS, DIAS_POR_VENCER, TIPOS, buscar_socios, contar_segmentos, personalizar, resolver_destinatarios,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature("notificaciones_socios"))])
 ROLES_ENVIO = {"ADMINISTRADOR", "CAJERO"}
 
 

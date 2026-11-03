@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import Date, cast, func, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.v1.deps import get_current_user, get_db
+from app.api.v1.deps import get_current_user, get_db, require_feature
 from app.api.v1.endpoints.creditos import _configuracion_mora
 from app.api.v1.endpoints.reportes import _unclassified_credit_warnings
 from app.core.bitacora import registrar_accion
@@ -30,7 +30,7 @@ from app.services.informes_asfi import (
     porcentaje_prevision_especifica,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature("informes_asfi"))])
 ROLES = {"ADMINISTRADOR", "CONTADOR"}
 CENT = Decimal("0.01")
 ASFI_CREDIT_URL = "https://servdmzw.asfi.gob.bo/circular/Textos/L03T02.pdf"

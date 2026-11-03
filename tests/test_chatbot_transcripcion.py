@@ -44,6 +44,9 @@ def app():
 def client(app, monkeypatch):
     monkeypatch.setattr(settings, "GROQ_API_KEY", CLAVE)
     app.dependency_overrides[chatbot_endpoint.get_chat_user] = lambda: SimpleNamespace(id=1)
+    app.dependency_overrides[chatbot_endpoint.get_current_user] = lambda: SimpleNamespace(
+        id=1, cooperativa_id=None, rol=SimpleNamespace(nombre="ADMINISTRADOR")
+    )
     return TestClient(app)
 
 

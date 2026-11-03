@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Date, cast, func, select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.v1.deps import get_current_user, get_db
+from app.api.v1.deps import get_current_user, get_db, require_feature
 from app.api.v1.endpoints.creditos import _configuracion_mora
 from app.api.v1.endpoints.estados_financieros import _balance_data, _income_data
 from app.models.models import Credito, SolicitudCredito, Usuario
@@ -19,7 +19,7 @@ from app.services.report_exports import DOCUMENT_FORMATS, EXPORT_FORMAT_PATTERN,
 from app.services.cobro_cuotas import resumir_morosidad
 from app.services.comando_voz_reportes import interpretar_comando
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature("reportes_gerenciales"))])
 ROLES = {"ADMINISTRADOR", "CONTADOR", "OFICIAL_CREDITO"}
 CENT = Decimal("0.01")
 CREDIT_EFFECTIVE_DATE_SQL = "COALESCE(c.fecha_desembolso, s.fecha_resolucion_comite::date, s.fecha_solicitud::date, c.fecha_creacion::date)"
@@ -554,6 +554,6 @@ class ComandoVozIn(BaseModel):
 
 
 @router.post("/comando-voz")
-def comando_voz(body: ComandoVozIn, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def comando_voz(body: ComandoVozIn, user: Usuario = Depends(get_current_user), db: Session = Depends(get_db), _feature: Usuario = Depends(require_feature("chatbot_ia"))):
     """Interpreta un comando de voz (ya transcrito) y devuelve qué reporte exportar."""
     return interpretar_comando(body.texto, user, db)

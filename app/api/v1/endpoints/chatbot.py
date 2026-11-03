@@ -8,7 +8,7 @@ recibe información personal (saldos, créditos, precalificación).
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import get_current_socio, get_current_user
+from app.api.v1.deps import get_current_socio, get_current_user, require_feature
 from app.db.session import get_db
 from app.models.models import Usuario
 from app.schemas.schemas import ChatRequest, ChatResponse, TranscripcionResponse
@@ -19,7 +19,7 @@ from app.services.transcripcion import (
     transcribir_audio,
 )
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_feature("chatbot_ia"))])
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
 # Groq identifica el formato por la extensión del archivo.

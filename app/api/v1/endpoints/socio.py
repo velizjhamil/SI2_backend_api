@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session, joinedload, selectinload
 
-from app.api.v1.deps import get_current_socio, get_db
+from app.api.v1.deps import get_current_socio, get_db, require_feature
 from app.core.config import settings
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
@@ -548,7 +548,7 @@ def detalle_dpf_socio(dpf_id: int, socio: Socio = Depends(get_current_socio), db
 
 
 @router.get("/recreditos")
-def listar_recreditos_socio(socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+def listar_recreditos_socio(socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db), _feature: Usuario = Depends(require_feature("recredito_ia"))):
     offers = db.execute(select(OfertaRecredito).where(
         OfertaRecredito.socio_id == socio.id,
         OfertaRecredito.estado == "VIGENTE",
@@ -560,7 +560,8 @@ def listar_recreditos_socio(socio: Socio = Depends(get_current_socio), db: Sessi
 
 @router.post("/recreditos/{oferta_id}/aceptar", status_code=status.HTTP_201_CREATED)
 def aceptar_recredito_socio(oferta_id: int, request: Request, body: dict | None = None,
-                            socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+                            socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db),
+                            _feature: Usuario = Depends(require_feature("recredito_ia"))):
     offer = db.execute(select(OfertaRecredito).where(
         OfertaRecredito.id == oferta_id, OfertaRecredito.socio_id == socio.id
     ).with_for_update()).scalar_one_or_none()
@@ -576,7 +577,8 @@ def aceptar_recredito_socio(oferta_id: int, request: Request, body: dict | None 
 
 @router.post("/recreditos/{oferta_id}/descartar")
 def descartar_recredito_socio(oferta_id: int, request: Request,
-                              socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+                              socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db),
+                              _feature: Usuario = Depends(require_feature("recredito_ia"))):
     offer = db.execute(select(OfertaRecredito).where(
         OfertaRecredito.id == oferta_id, OfertaRecredito.socio_id == socio.id
     ).with_for_update()).scalar_one_or_none()
