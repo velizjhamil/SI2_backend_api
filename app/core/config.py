@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     LLM_MODEL: str = ""
     LLM_API_KEY: str = ""
 
+    GROQ_API_KEY: str = ""
+    GROQ_TRANSCRIPTION_MODEL: str = "whisper-large-v3-turbo"
+
     BACKUP_DATABASE_URL: str = ""
     SUPABASE_URL: str = ""
     SUPABASE_SERVICE_KEY: str = ""

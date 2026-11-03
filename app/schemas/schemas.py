@@ -1627,3 +1627,7 @@ class ChatResponse(BaseModel):
     datos: dict[str, Any] = Field(default_factory=dict)
     sugerencias: list[str] = Field(default_factory=list)
     reporte: ChatReporte | None = None
+
+
+class TranscripcionResponse(BaseModel):
+    texto: str

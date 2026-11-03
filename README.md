@@ -140,9 +140,19 @@ LLM_MODEL=gemini-3.5-flash
 ```
 
 En el frontend también se puede dictar una consulta con el botón del micrófono
-y activar la lectura en voz alta desde el encabezado del chat. El reconocimiento
-de voz depende de las funciones disponibles y los permisos del navegador; la
-transcripción reconocida se envía al chatbot como un mensaje normal.
+y activar la lectura en voz alta desde el encabezado del chat. El audio se envía
+a `POST /api/v1/chatbot/transcribir`, que lo transcribe con Groq, y el texto llega
+al chatbot como un mensaje normal, de modo que también sirve para pedir reportes.
+Para activarlo agrega al `.env`:
+
+```env
+GROQ_API_KEY=<tu_api_key>
+# Opcional; este es el valor por defecto
+GROQ_TRANSCRIPTION_MODEL=whisper-large-v3-turbo
+```
+
+Sin `GROQ_API_KEY` el endpoint responde 503. El audio admite hasta 10 MB y sale
+hacia Groq, un proveedor externo.
 
 - La descarga de reportes **no** depende del LLM: los enlaces se construyen de
   forma determinista y respetan el rol del usuario.
