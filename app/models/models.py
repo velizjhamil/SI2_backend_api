@@ -1248,3 +1248,52 @@ class Suscripcion(Base):
         if self.fecha_fin is None:
             return None
         return (self.fecha_fin - date.today()).days
+
+
+class Notificacion(Base):
+    """Envío de una notificación a socios (recordatorio de pago, promoción o aviso)."""
+
+    __tablename__ = "notificacion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    titulo: Mapped[str] = mapped_column(String(120), nullable=False)
+    mensaje: Mapped[str] = mapped_column(Text, nullable=False)
+    destino: Mapped[str] = mapped_column(String(20), nullable=False)
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    total_destinatarios: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("tipo IN ('RECORDATORIO_PAGO','PROMOCION','AVISO')", name="chk_notificacion_tipo"),
+        CheckConstraint("destino IN ('SOCIO','TODOS','CUOTAS_POR_VENCER','EN_MORA')",
+                        name="chk_notificacion_destino"),
+        Index("ix_notificacion_cooperativa_fecha", "cooperativa_id", "fecha_creacion"),
+    )
+
+    usuario: Mapped["Usuario"] = relationship()
+    destinatarios: Mapped[list["NotificacionDestinatario"]] = relationship(
+        back_populates="notificacion", cascade="all, delete-orphan")
+
+
+class NotificacionDestinatario(Base):
+    """Copia personalizada de una notificación en la bandeja de un socio."""
+
+    __tablename__ = "notificacion_destinatario"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    notificacion_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("notificacion.id", ondelete="CASCADE"), nullable=False)
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    usuario_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("usuario.id"), nullable=False)
+    mensaje: Mapped[str] = mapped_column(Text, nullable=False)
+    leida_en = mapped_column(TIMESTAMP(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("notificacion_id", "socio_id", name="uq_notificacion_destinatario_socio"),
+        Index("ix_notificacion_destinatario_bandeja", "usuario_id", "leida_en"),
+    )
+
+    notificacion: Mapped["Notificacion"] = relationship(back_populates="destinatarios")
+    socio: Mapped["Socio"] = relationship()
