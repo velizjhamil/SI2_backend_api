@@ -10,7 +10,17 @@ from sqlalchemy.orm import Session, joinedload
 from app.api.v1.deps import get_db, require_admin
 from app.core.bitacora import registrar_accion
 from app.core.security import hash_password
-from app.models.models import Bitacora, Cooperativa, CuentaAhorro, Permiso, Rol, Socio, Usuario
+from app.models.models import (
+    Bitacora,
+    Cooperativa,
+    CuentaAhorro,
+    Permiso,
+    PlanSuscripcion,
+    Rol,
+    Socio,
+    Suscripcion,
+    Usuario,
+)
 from app.schemas.schemas import (
     AdminStatsOut,
     BitacoraOut,
@@ -49,6 +59,39 @@ def _validar_rol_y_permisos(db: Session, nombre: str, permiso_ids: list[int] | N
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uno o más permisos no existen")
         rol.permisos = permisos
     return rol
+
+
+def _validar_limite_usuarios(db: Session, cooperativa_id: int) -> None:
+    """Lock the tenant subscription and reject new staff seats over its plan cap."""
+    suscripcion = db.execute(
+        select(Suscripcion)
+        .where(Suscripcion.cooperativa_id == cooperativa_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if suscripcion is None:
+        return
+
+    plan = db.get(PlanSuscripcion, suscripcion.plan_id)
+    if plan is None or plan.limite_usuarios is None:
+        return
+
+    usuarios_activos = db.execute(
+        select(func.count(Usuario.id))
+        .join(Rol, Usuario.rol_id == Rol.id)
+        .where(
+            Usuario.cooperativa_id == cooperativa_id,
+            Usuario.estado == "ACTIVO",
+            Rol.nombre != "SOCIO",
+        )
+    ).scalar_one()
+    if usuarios_activos >= plan.limite_usuarios:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Se alcanzó el límite de {plan.limite_usuarios} usuarios "
+                f"del plan {plan.nombre}."
+            ),
+        )
 
 
 @router.get("/usuarios", response_model=list[UserOut], summary="Listar usuarios")
@@ -97,11 +140,27 @@ def actualizar_usuario(
         cambios["correo"] = correo
     if "contrasena" in cambios:
         cambios["contrasena"] = hash_password(cambios["contrasena"])
+
+    nuevo_rol = None
     if "rol" in cambios:
         rol_nombre = cambios.pop("rol").strip().upper()
         if rol_nombre == "SUPERADMIN" and admin.rol.nombre != "SUPERADMIN":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No puede asignar SUPERADMIN")
-        usuario.rol = _validar_rol_y_permisos(db, rol_nombre)
+        nuevo_rol = _validar_rol_y_permisos(db, rol_nombre)
+
+    rol_final = nuevo_rol.nombre if nuevo_rol is not None else usuario.rol.nombre
+    estado_final = cambios.get("estado", usuario.estado)
+    ya_ocupa_cupo = usuario.estado == "ACTIVO" and usuario.rol.nombre != "SOCIO"
+    ocupara_cupo = estado_final == "ACTIVO" and rol_final != "SOCIO"
+    if (
+        ocupara_cupo
+        and not ya_ocupa_cupo
+        and usuario.cooperativa_id is not None
+    ):
+        _validar_limite_usuarios(db, usuario.cooperativa_id)
+
+    if nuevo_rol is not None:
+        usuario.rol = nuevo_rol
     for campo, valor in cambios.items():
         setattr(usuario, campo, valor)
     registrar_accion(db, accion="ACTUALIZAR", modulo="USUARIO", usuario_id=admin.id, descripcion=f"Usuario actualizado: {usuario.correo}", request=request)
@@ -141,6 +200,12 @@ def reactivar_usuario(
     db: Session = Depends(get_db),
 ):
     usuario = _get_usuario_visible(db, admin, usuario_id)
+    if (
+        usuario.estado != "ACTIVO"
+        and usuario.rol.nombre != "SOCIO"
+        and usuario.cooperativa_id is not None
+    ):
+        _validar_limite_usuarios(db, usuario.cooperativa_id)
     usuario.estado = "ACTIVO"
     registrar_accion(db, accion="REACTIVAR", modulo="USUARIO", usuario_id=admin.id, descripcion=f"Usuario reactivado: {usuario.correo}", request=request)
     db.commit()
@@ -269,6 +334,9 @@ def crear_usuario(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="La cooperativa indicada no existe o está inactiva",
             )
+
+    if rol_nombre not in {"SOCIO", "SUPERADMIN"} and cooperativa_id is not None:
+        _validar_limite_usuarios(db, cooperativa_id)
 
     usuario = Usuario(
         nombre=body.nombre.strip(),

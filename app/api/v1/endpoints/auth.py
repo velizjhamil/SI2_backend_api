@@ -14,6 +14,10 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
+from app.services.suscripciones import (
+    DETALLE_SUSCRIPCION_NO_VIGENTE,
+    usuario_tiene_suscripcion_vigente,
+)
 from app.db.session import get_db
 from app.models.models import Rol, Usuario
 from app.schemas.schemas import (
@@ -49,6 +53,11 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario inactivo o bloqueado",
+        )
+    if not usuario_tiene_suscripcion_vigente(db, usuario):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=DETALLE_SUSCRIPCION_NO_VIGENTE,
         )
 
     token, expires_in = create_access_token(

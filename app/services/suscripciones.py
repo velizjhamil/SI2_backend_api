@@ -17,6 +17,10 @@ from app.models.models import Cooperativa, PlanSuscripcion, Suscripcion
 logger = logging.getLogger(__name__)
 
 DEFAULT_PLAN_CODIGO = "RED_ENTERPRISE"
+DETALLE_SUSCRIPCION_NO_VIGENTE = (
+    "La suscripción de tu cooperativa no está vigente. "
+    "Contacta al administrador de la plataforma."
+)
 
 PLANES_DEFAULT: list[dict] = [
     {
@@ -89,6 +93,22 @@ def get_suscripcion(db: Session, cooperativa_id: int) -> Suscripcion | None:
     return db.execute(
         select(Suscripcion).where(Suscripcion.cooperativa_id == cooperativa_id)
     ).scalar_one_or_none()
+
+
+def usuario_tiene_suscripcion_vigente(db: Session, usuario) -> bool:
+    """Return whether subscription rules permit this authenticated user."""
+    if usuario.rol and usuario.rol.nombre == "SUPERADMIN":
+        return True
+    if usuario.cooperativa_id is None:
+        return True
+
+    suscripcion = get_suscripcion(db, usuario.cooperativa_id)
+    if suscripcion is None:
+        return True
+
+    return suscripcion.estado == "ACTIVA" and (
+        suscripcion.fecha_fin is None or suscripcion.fecha_fin >= date.today()
+    )
 
 
 def ensure_suscripcion(

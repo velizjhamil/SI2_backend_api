@@ -6,6 +6,10 @@ from sqlalchemy.orm import Session
 from app.core.security import decode_access_token
 from app.db.session import get_db
 from app.models.models import Socio, Usuario
+from app.services.suscripciones import (
+    DETALLE_SUSCRIPCION_NO_VIGENTE,
+    usuario_tiene_suscripcion_vigente,
+)
 
 bearer_scheme = HTTPBearer(auto_error=True)
 
@@ -36,6 +40,12 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuario no encontrado o inactivo",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if not usuario_tiene_suscripcion_vigente(db, user):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=DETALLE_SUSCRIPCION_NO_VIGENTE,
             headers={"WWW-Authenticate": "Bearer"},
         )
     return user

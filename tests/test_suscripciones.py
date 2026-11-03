@@ -158,53 +158,58 @@ def test_mi_suscripcion_de_superadmin_sin_cooperativa_404(client, contexto):
 def test_superadmin_puede_crear_cambiar_y_renovar(client, contexto):
     headers = _token_superadmin(contexto)
 
-    # Asegura una cooperativa sin suscripción (se elimina la creada por seed).
     with SessionLocal() as db:
-        db.execute(
-            delete(Suscripcion).where(
-                Suscripcion.cooperativa_id == contexto["cooperativa_id"]
-            )
-        )
+        cooperativa = Cooperativa(nombre="Coop CRUD Suscripciones Test")
+        db.add(cooperativa)
         db.commit()
+        cooperativa_id = cooperativa.id
 
-    planes = client.get("/api/v1/suscripciones/planes", headers=headers).json()
-    plan_crecimiento = next(p for p in planes if p["codigo"] == "CRECIMIENTO_PRO")
+    try:
+        planes = client.get("/api/v1/suscripciones/planes", headers=headers).json()
+        plan_crecimiento = next(p for p in planes if p["codigo"] == "CRECIMIENTO_PRO")
 
-    resp = client.post(
-        "/api/v1/suscripciones",
-        json={"cooperativa_id": contexto["cooperativa_id"], "plan_id": plan_crecimiento["id"]},
-        headers=headers,
-    )
-    assert resp.status_code == 201, resp.text
-    suscripcion = resp.json()
-    assert suscripcion["plan"]["codigo"] == "CRECIMIENTO_PRO"
-    assert suscripcion["fecha_fin"] is None
+        resp = client.post(
+            "/api/v1/suscripciones",
+            json={"cooperativa_id": cooperativa_id, "plan_id": plan_crecimiento["id"]},
+            headers=headers,
+        )
+        assert resp.status_code == 201, resp.text
+        suscripcion = resp.json()
+        assert suscripcion["plan"]["codigo"] == "CRECIMIENTO_PRO"
+        assert suscripcion["fecha_fin"] is None
 
-    # Cambiar de plan y estado
-    resp = client.put(
-        f"/api/v1/suscripciones/{suscripcion['id']}",
-        json={"estado": "SUSPENDIDA"},
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    assert resp.json()["estado"] == "SUSPENDIDA"
+        # Cambiar de plan y estado
+        resp = client.put(
+            f"/api/v1/suscripciones/{suscripcion['id']}",
+            json={"estado": "SUSPENDIDA"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["estado"] == "SUSPENDIDA"
 
-    # Renovar reactiva y fija fecha_fin
-    resp = client.post(
-        f"/api/v1/suscripciones/{suscripcion['id']}/renovar",
-        json={"meses": 6},
-        headers=headers,
-    )
-    assert resp.status_code == 200
-    cuerpo = resp.json()
-    assert cuerpo["estado"] == "ACTIVA"
-    assert cuerpo["fecha_fin"] is not None
-    assert cuerpo["dias_restantes"] is not None and cuerpo["dias_restantes"] > 150
+        # Renovar reactiva y fija fecha_fin
+        resp = client.post(
+            f"/api/v1/suscripciones/{suscripcion['id']}/renovar",
+            json={"meses": 6},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        cuerpo = resp.json()
+        assert cuerpo["estado"] == "ACTIVA"
+        assert cuerpo["fecha_fin"] is not None
+        assert cuerpo["dias_restantes"] is not None and cuerpo["dias_restantes"] > 150
 
-    # Baja lógica
-    resp = client.delete(f"/api/v1/suscripciones/{suscripcion['id']}", headers=headers)
-    assert resp.status_code == 200
-    assert resp.json()["estado"] == "CANCELADA"
+        # Baja lógica
+        resp = client.delete(f"/api/v1/suscripciones/{suscripcion['id']}", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["estado"] == "CANCELADA"
+    finally:
+        with SessionLocal() as db:
+            db.execute(
+                delete(Suscripcion).where(Suscripcion.cooperativa_id == cooperativa_id)
+            )
+            db.execute(delete(Cooperativa).where(Cooperativa.id == cooperativa_id))
+            db.commit()
 
 
 def test_listado_solo_superadmin(client, contexto):

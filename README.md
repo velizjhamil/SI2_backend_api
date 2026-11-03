@@ -228,6 +228,12 @@ Todos comparten la contraseña `Password123`:
 Authorization: Bearer <access_token>
 ```
 
+### Control de acceso por suscripción
+
+Una suscripción está vigente cuando su estado es `ACTIVA` y no tiene fecha de fin, o cuando `fecha_fin` es hoy o una fecha futura. Si deja de estar vigente, el login devuelve `403` después de validar credenciales y estado del usuario; las sesiones ya abiertas reciben `401` en su siguiente petición protegida. Ambos casos usan el mensaje: `La suscripción de tu cooperativa no está vigente. Contacta al administrador de la plataforma.`
+
+`SUPERADMIN`, usuarios sin cooperativa y cooperativas sin una fila de suscripción conservan el acceso. Al crear usuarios de personal, reactivar personal o cambiar a un rol de personal/estado activo, la API respeta `limite_usuarios` del plan: cuenta solo usuarios `ACTIVO` cuyo rol no sea `SOCIO`, y rechaza con `409` al alcanzar el límite. Los socios no consumen cupos; un plan con límite `NULL` no restringe altas.
+
 ## 📌 Endpoints principales
 
 Prefijo global: `/api/v1`
