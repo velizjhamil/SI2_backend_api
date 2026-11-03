@@ -71,7 +71,7 @@ def test_reporte_de_morosidad_incluye_descarga_pdf(responder):
     assert salida["intent"] == "reporte"
     assert salida["fuente"] == "PLANTILLA"
     reporte = salida["reporte"]
-    assert set(reporte) == {"tipo", "nombre", "formato", "url", "filename"}
+    assert set(reporte) == {"tipo", "nombre", "formato", "url", "filename", "descargas"}
     assert reporte["tipo"] == "mora"
     assert reporte["nombre"] == "Reporte de morosidad"
     assert reporte["formato"] == "pdf"
@@ -80,6 +80,34 @@ def test_reporte_de_morosidad_incluye_descarga_pdf(responder):
     assert reporte["filename"].startswith("morosidad-")
     assert reporte["filename"].endswith(".pdf")
     assert "Reporte de morosidad" in salida["respuesta"]
+    assert [d["formato"] for d in reporte["descargas"]] == ["pdf", "csv", "html"]
+
+
+@pytest.mark.parametrize(
+    ("mensaje", "formato"),
+    [
+        ("Genera el reporte de cartera en CSV", "csv"),
+        ("Exporta la cartera a Excel", "csv"),
+        ("Dame el reporte de cartera en HTML", "html"),
+        ("Reporte de cartera como página web", "html"),
+        ("Reporte de cartera", "pdf"),
+    ],
+)
+def test_reporte_respeta_el_formato_pedido(responder, mensaje, formato):
+    salida = responder("ADMINISTRADOR", mensaje)
+
+    reporte = salida["reporte"]
+    assert reporte["tipo"] == "cartera"
+    assert reporte["formato"] == formato
+    assert f"formato={formato}" in reporte["url"]
+    assert reporte["filename"].endswith(f".{formato}")
+    assert f"en {formato.upper()}" in salida["respuesta"]
+    # The requested format comes first; the other two are always offered too.
+    descargas = reporte["descargas"]
+    assert descargas[0] == {"formato": formato, "url": reporte["url"], "filename": reporte["filename"]}
+    assert sorted(d["formato"] for d in descargas) == ["csv", "html", "pdf"]
+    assert all(f"formato={d['formato']}" in d["url"] and d["filename"].endswith(f".{d['formato']}")
+               for d in descargas)
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,7 @@ from app.models.models import (
     Usuario,
 )
 from app.services import llm
+from app.services.comando_voz_reportes import detectar_formato, normalizar
 
 MENSAJE_AYUDA = (
     "Soy el asistente de la cooperativa. Puedo ayudarte con:\n"
@@ -440,10 +441,12 @@ _REPORTES = (
 )
 
 _MENSAJE_REPORTES = (
-    "Puedo generar estos reportes en PDF:\n"
+    "Puedo generar estos reportes en PDF, CSV o HTML:\n"
     "{lista}\n"
-    "Indícame cuál; por ejemplo: «genera el reporte de morosidad en PDF»."
+    "Indícame cuál y en qué formato; por ejemplo: «genera el reporte de morosidad en CSV»."
 )
+# Orden de las sugerencias y de los botones de descarga cuando no se pide un formato.
+FORMATOS_CHAT = ("pdf", "csv", "html")
 
 
 def _pide_reporte(texto: str) -> bool:
@@ -451,7 +454,8 @@ def _pide_reporte(texto: str) -> bool:
     # cuenta) no son reportes gerenciales: se responden como consultas.
     if any(clave in texto for clave in ("comprobante", "certificado", "estado de cuenta")):
         return False
-    if any(clave in texto for clave in ("reporte", "informe", "pdf", "exportar", "descargar")):
+    if any(clave in texto for clave in ("reporte", "informe", "pdf", "csv", "html", "excel",
+                                        "exportar", "descargar")):
         return True
     # "Genera el balance general" sin la palabra "reporte" también es una
     # solicitud, pero solo si nombra un reporte concreto. Así "¿cómo generar
@@ -467,7 +471,9 @@ def _sugerencias_reporte(usuario: Usuario, es_socio: bool) -> list[str]:
     nombres = [nombre.lower() for _tipo, nombre in _reportes_permitidos(usuario)]
     if not nombres:
         return _sugerencias(es_socio)
-    return [f"Genera el {nombre} en PDF" for nombre in nombres[:4]]
+    # Alterna formatos para mostrar que el chat también entrega CSV y HTML.
+    return [f"Genera el {nombre} en {FORMATOS_CHAT[i % len(FORMATOS_CHAT)].upper()}"
+            for i, nombre in enumerate(nombres[:4])]
 
 
 def _rol(usuario: Usuario) -> str | None:
@@ -495,54 +501,58 @@ def _tipo_reporte(texto: str) -> tuple[str, str] | None:
     return None
 
 
-def _reporte_descarga(tipo: str, nombre: str) -> dict | None:
+def _formato_pedido(texto: str) -> str:
+    """Formato que el usuario nombró (PDF, CSV/Excel o HTML/página web); PDF por defecto."""
+    return detectar_formato(normalizar(texto)) or "pdf"
+
+
+def _reporte_descarga(tipo: str, nombre: str, formato: str = "pdf") -> dict | None:
     hoy = date.today()
     desde = hoy.replace(day=1)
     base = settings.API_V1_STR
     if tipo == "mora":
         path, params = "/reportes/mora/export", {
-            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
-        filename = f"morosidad-{hoy.isoformat()}.pdf"
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1}
+        archivo = f"morosidad-{hoy.isoformat()}"
     elif tipo == "cartera":
         path, params = "/reportes/cartera/export", {
-            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
-        filename = f"cartera-{hoy.isoformat()}.pdf"
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1}
+        archivo = f"cartera-{hoy.isoformat()}"
     elif tipo == "captaciones":
         path, params = "/reportes/captaciones/export", {
-            "fecha_corte": hoy.isoformat(), "moneda_id": 1, "formato": "pdf"}
-        filename = f"captaciones-{hoy.isoformat()}.pdf"
+            "fecha_corte": hoy.isoformat(), "moneda_id": 1}
+        archivo = f"captaciones-{hoy.isoformat()}"
     elif tipo == "indicadores":
         path, params = "/reportes/indicadores/export", {
-            "fecha_corte": hoy.isoformat(), "formato": "pdf"}
-        filename = f"indicadores-{hoy.isoformat()}.pdf"
+            "fecha_corte": hoy.isoformat()}
+        archivo = f"indicadores-{hoy.isoformat()}"
     elif tipo == "libro-diario":
         path, params = "/contabilidad/libro-diario/export", {
-            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
-            "moneda_id": 1, "formato": "pdf"}
-        filename = f"libro-diario-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(), "moneda_id": 1}
+        archivo = f"libro-diario-{desde.isoformat()}-{hoy.isoformat()}"
     elif tipo == "balance-comprobacion":
         path, params = "/contabilidad/balance-comprobacion/export", {
-            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
-            "moneda_id": 1, "nivel": 4, "formato": "pdf"}
-        filename = f"balance-comprobacion-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(), "moneda_id": 1, "nivel": 4}
+        archivo = f"balance-comprobacion-{desde.isoformat()}-{hoy.isoformat()}"
     elif tipo == "balance-general":
         path, params = "/contabilidad/balance-general/export", {
-            "fecha_corte": hoy.isoformat(), "nivel": 3,
-            "moneda": "CONSOLIDADO", "formato": "pdf"}
-        filename = f"balance-general-{hoy.isoformat()}.pdf"
+            "fecha_corte": hoy.isoformat(), "nivel": 3, "moneda": "CONSOLIDADO"}
+        archivo = f"balance-general-{hoy.isoformat()}"
     elif tipo == "estado-resultados":
         path, params = "/contabilidad/estado-resultados/export", {
-            "desde": desde.isoformat(), "hasta": hoy.isoformat(),
-            "moneda": "CONSOLIDADO", "formato": "pdf"}
-        filename = f"estado-resultados-{desde.isoformat()}-{hoy.isoformat()}.pdf"
+            "desde": desde.isoformat(), "hasta": hoy.isoformat(), "moneda": "CONSOLIDADO"}
+        archivo = f"estado-resultados-{desde.isoformat()}-{hoy.isoformat()}"
     else:
         return None
+    # Un enlace por formato; el pedido va primero y también en los campos principales.
+    descargas = [{"formato": fmt, "url": f"{base}{path}?{urlencode({**params, 'formato': fmt})}",
+                  "filename": f"{archivo}.{fmt}"}
+                 for fmt in sorted(FORMATOS_CHAT, key=lambda fmt: fmt != formato)]
     return {
         "tipo": tipo,
         "nombre": nombre,
-        "formato": "pdf",
-        "url": f"{base}{path}?{urlencode(params)}",
-        "filename": filename,
+        **descargas[0],
+        "descargas": descargas,
     }
 
 
@@ -550,7 +560,7 @@ def _respuesta_reporte(usuario: Usuario, mensaje: str) -> tuple[str, dict | None
     permitidos = _reportes_permitidos(usuario)
     if not permitidos:
         return (
-            "Los reportes financieros en PDF están disponibles para el personal de una "
+            "Los reportes financieros (PDF, CSV o HTML) están disponibles para el personal de una "
             "cooperativa (Administrador, Contador u Oficial de Crédito). Como socio puedo "
             "ayudarte con tus saldos, cuotas y comprobantes.",
             None,
@@ -585,7 +595,8 @@ def _respuesta_reporte(usuario: Usuario, mensaje: str) -> tuple[str, dict | None
             None,
         )
 
-    reporte = _reporte_descarga(tipo, nombre)
+    formato = _formato_pedido(mensaje)
+    reporte = _reporte_descarga(tipo, nombre, formato)
     if reporte is None:
         return f"No pude preparar el {nombre.lower()}. Inténtalo desde el módulo de reportes.", None
 
@@ -593,9 +604,10 @@ def _respuesta_reporte(usuario: Usuario, mensaje: str) -> tuple[str, dict | None
     hasta = date.today().strftime("%d/%m/%Y")
     periodo = (f"del {desde} al {hasta}" if tipo in
                {"libro-diario", "balance-comprobacion", "estado-resultados"} else f"al {hasta}")
+    otros = " o ".join(fmt.upper() for fmt in FORMATOS_CHAT if fmt != formato)
     return (
-        f"Listo, preparé el {nombre} {periodo} en PDF. "
-        "Usa el botón «Descargar PDF» para obtenerlo.",
+        f"Listo, preparé el {nombre} {periodo} en {formato.upper()}. "
+        f"Usa el botón «Descargar {formato.upper()}» para obtenerlo; también puedes descargarlo en {otros}.",
         reporte,
     )
 

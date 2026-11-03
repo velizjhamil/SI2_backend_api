@@ -1612,12 +1612,20 @@ class ChatRequest(BaseModel):
     historial: list[ChatMessage] = Field(default_factory=list)
 
 
+class ChatDescarga(BaseModel):
+    formato: Literal["pdf", "csv", "html"]
+    url: str
+    filename: str
+
+
 class ChatReporte(BaseModel):
     tipo: str
     nombre: str
-    formato: Literal["pdf"] = "pdf"
+    # Formato pedido en el mensaje (PDF por defecto); `descargas` trae los tres, el pedido primero.
+    formato: Literal["pdf", "csv", "html"] = "pdf"
     url: str
     filename: str
+    descargas: list[ChatDescarga] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
