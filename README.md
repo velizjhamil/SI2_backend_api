@@ -240,6 +240,8 @@ La API verifica las funciones restringidas en el backend usando la suscripción 
 
 Las rutas restringidas responden `403` cuando la función no está incluida. `SUPERADMIN`, usuarios sin cooperativa y cooperativas sin suscripción conservan las excepciones de la fase 1. El tope de socios aplica solo al crear un socio `ACTIVO` en `BASICO` y responde `409` al superar el límite. Las operaciones de crédito usadas por el personal —incluida la ficha de campo— permanecen disponibles en todos los planes; no se limita el router completo de créditos. Las operaciones globales de respaldos y la verificación pública de comprobantes no se asocian a un plan de cooperativa.
 
+Cualquier usuario autenticado, incluido `SOCIO`, puede consultar `GET /api/v1/suscripciones/mis-modulos`. La respuesta contiene `plan` (`codigo` y `nombre`, o `null`), `modulos` (los módulos planificados que puede usar) y `sin_restriccion`. Para `SUPERADMIN`, usuarios sin cooperativa y cooperativas sin suscripción, `sin_restriccion` es `true` y se devuelven todos los módulos planificados; los demás usuarios reciben los módulos derivados de la misma matriz que usa el backend para aplicar las restricciones.
+
 ## 📌 Endpoints principales
 
 Prefijo global: `/api/v1`

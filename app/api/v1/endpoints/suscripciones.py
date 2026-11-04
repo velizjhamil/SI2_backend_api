@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.v1.deps import require_admin, require_superadmin
+from app.api.v1.deps import get_current_user, require_admin, require_superadmin
 from app.db.session import get_db
 from app.models.models import Cooperativa, PlanSuscripcion, Suscripcion, Usuario
 from app.schemas.schemas import (
@@ -21,9 +21,45 @@ from app.schemas.schemas import (
     SuscripcionRenovar,
     SuscripcionUpdate,
 )
-from app.services.suscripciones import ensure_suscripcion, get_suscripcion
+from app.services.suscripciones import (
+    MODULOS_POR_PLAN,
+    MODULOS_PRIMERA_FILA,
+    ensure_suscripcion,
+    get_suscripcion,
+    usuario_tiene_modulo,
+)
 
 router = APIRouter()
+
+
+@router.get("/mis-modulos")
+def mis_modulos(
+    usuario: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return plan-controlled modules visible to the authenticated user."""
+    suscripcion = (
+        get_suscripcion(db, usuario.cooperativa_id)
+        if usuario.cooperativa_id is not None
+        else None
+    )
+    plan = db.get(PlanSuscripcion, suscripcion.plan_id) if suscripcion else None
+    modulos_configurados = set().union(*MODULOS_POR_PLAN.values()) - MODULOS_PRIMERA_FILA
+    modulos = sorted(
+        modulo
+        for modulo in modulos_configurados
+        if usuario_tiene_modulo(db, usuario, modulo)
+    )
+    sin_restriccion = (
+        (usuario.rol is not None and usuario.rol.nombre == "SUPERADMIN")
+        or usuario.cooperativa_id is None
+        or suscripcion is None
+    )
+    return {
+        "plan": {"codigo": plan.codigo, "nombre": plan.nombre} if plan else None,
+        "modulos": modulos,
+        "sin_restriccion": sin_restriccion,
+    }
 
 
 @router.get("/planes", response_model=list[PlanSuscripcionOut])
