@@ -64,8 +64,12 @@ def generar_plan_pagos(
     tipo_amortizacion: str,
     fecha_desembolso: date,
     fecha_primer_vencimiento: date | None = None,
+    tasa_seguro_desgravamen: Decimal = Decimal("0.00"),
 ) -> dict:
     """Generate a full French/German amortization schedule using Decimal only."""
+    if tasa_seguro_desgravamen < 0 or tasa_seguro_desgravamen > Decimal("5.00"):
+        raise ValueError("tasa_seguro_desgravamen debe estar entre 0 y 5")
+
     cuota_fija = calcular_cuota_inicial(
         monto, plazo_meses, tasa_anual, tipo_amortizacion
     )
@@ -87,6 +91,9 @@ def generar_plan_pagos(
         for numero in range(1, plazo_meses + 1):
             saldo_inicial = saldo
             interes = _redondear_monto(saldo_inicial * tasa)
+            seguro = _redondear_monto(
+                saldo_inicial * tasa_seguro_desgravamen / _CIEN
+            )
             if numero == plazo_meses:
                 capital = saldo_inicial
             elif tipo_amortizacion == "ALEMAN":
@@ -97,13 +104,14 @@ def generar_plan_pagos(
             saldo_final = _redondear_monto(saldo_inicial - capital)
             if numero == plazo_meses:
                 saldo_final = Decimal("0.00")
-            cuota = _redondear_monto(capital + interes)
+            cuota = _redondear_monto(capital + interes + seguro)
             cuotas.append({
                 "numero": numero,
                 "fecha_vencimiento": _sumar_meses(primer_vencimiento, numero - 1, dia_ancla),
                 "saldo_inicial": saldo_inicial,
                 "capital": capital,
                 "interes": interes,
+                "seguro": seguro,
                 "cuota": cuota,
                 "saldo_final": saldo_final,
                 "estado_pago": "PENDIENTE",
@@ -112,7 +120,8 @@ def generar_plan_pagos(
 
     total_capital = _redondear_monto(sum((row["capital"] for row in cuotas), Decimal("0.00")))
     total_interes = _redondear_monto(sum((row["interes"] for row in cuotas), Decimal("0.00")))
-    total_pagar = _redondear_monto(total_capital + total_interes)
+    total_seguro = _redondear_monto(sum((row["seguro"] for row in cuotas), Decimal("0.00")))
+    total_pagar = _redondear_monto(total_capital + total_interes + total_seguro)
     return {
         "tipo_amortizacion": tipo_amortizacion,
         "monto": _redondear_monto(monto),
@@ -123,5 +132,6 @@ def generar_plan_pagos(
         "cuotas": cuotas,
         "total_capital": total_capital,
         "total_interes": total_interes,
+        "total_seguro": total_seguro,
         "total_pagar": total_pagar,
     }

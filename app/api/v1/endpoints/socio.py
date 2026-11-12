@@ -150,6 +150,7 @@ def listar_productos_credito_socio(socio: Socio = Depends(get_current_socio), db
         "monto_max": _money(item.monto_max), "plazo_min_meses": item.plazo_min_meses,
         "plazo_max_meses": item.plazo_max_meses,
         "tasa_interes_anual": _money(item.tasa_interes_anual),
+        "tasa_seguro_desgravamen": _money(item.tasa_seguro_desgravamen),
         "tipo_amortizacion": item.tipo_amortizacion,
         "requiere_garantia": item.requiere_garantia,
     } for item in products]
@@ -173,13 +174,17 @@ def simular_credito_socio(
     if plazo_meses < product.plazo_min_meses or plazo_meses > product.plazo_max_meses:
         raise HTTPException(status_code=422, detail="El plazo está fuera del rango permitido para el producto")
     plan = generar_plan_pagos(monto=monto, tasa_anual=product.tasa_interes_anual,
-        plazo_meses=plazo_meses, tipo_amortizacion=product.tipo_amortizacion, fecha_desembolso=date.today())
+        plazo_meses=plazo_meses, tipo_amortizacion=product.tipo_amortizacion,
+        tasa_seguro_desgravamen=product.tasa_seguro_desgravamen,
+        fecha_desembolso=date.today())
     return {
         "cuota_estimada": _money(plan["cuotas"][0]["cuota"]),
         "total_intereses": _money(plan["total_interes"]),
+        "total_seguro": _money(plan["total_seguro"]),
         "total_a_pagar": _money(plan["total_pagar"]),
         "cronograma": [{"numero": row["numero"], "capital": _money(row["capital"]),
-            "interes": _money(row["interes"]), "cuota": _money(row["cuota"]),
+            "interes": _money(row["interes"]), "seguro": _money(row["seguro"]),
+            "cuota": _money(row["cuota"]),
             "saldo": _money(row["saldo_final"])} for row in plan["cuotas"]],
     }
 
@@ -523,16 +528,20 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
             "fecha_vencimiento": row.fecha_vencimiento.isoformat() if hasattr(row.fecha_vencimiento, "isoformat") else str(row.fecha_vencimiento),
             "capital": _money(Decimal(str(row.monto_capital or 0))),
             "interes": _money(Decimal(str(row.monto_interes or 0))),
-            "seguro": "0.00",
+            "seguro": _money(Decimal(str(row.monto_seguro or 0))),
             "mora": _money(mora_val),
             "monto_total": _money(Decimal(str(row.monto_cuota_total or 0)) + mora_val),
             "saldo_capital": _money(Decimal(str(row.saldo_final or 0))),
             "estado": estado,
             "fecha_pago": fecha_pago_str,
         })
+    total_seguro = sum(
+        (Decimal(str(row.monto_seguro or 0)) for row in schedule), Decimal("0.00")
+    )
     return {"credito": {"id": credit.id, "numero_credito": credit.numero_credito,
             "moneda": None if currency is None else currency.codigo_iso,
             "estado": credit.estado, "saldo_pendiente": _money(Decimal(credit.saldo_pendiente))},
+        "total_seguro": _money(total_seguro),
         "cuotas": cuotas_out}
 
 

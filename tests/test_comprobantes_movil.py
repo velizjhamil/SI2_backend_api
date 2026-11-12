@@ -472,7 +472,7 @@ def test_mobile_payment_receipt_failure_rolls_back_before_commit(monkeypatch):
 
     current = SimpleNamespace(
         id=22, numero_cuota=1, estado_pago="PENDIENTE", monto_cuota_total=Decimal("15.00"),
-        monto_capital=Decimal("10.00"), monto_interes=Decimal("5.00"), fecha_vencimiento=date(2026, 1, 1),
+        monto_capital=Decimal("10.00"), monto_interes=Decimal("5.00"), monto_seguro=Decimal("0.00"), fecha_vencimiento=date(2026, 1, 1),
     )
     later = SimpleNamespace(id=23, numero_cuota=2, estado_pago="PENDIENTE")
     member = SimpleNamespace(id=11)

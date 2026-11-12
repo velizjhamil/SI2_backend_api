@@ -76,6 +76,72 @@ def test_zero_rate_and_last_installment_absorb_principal_rounding(tipo):
     assert plan["total_pagar"] == Decimal("1000.00")
 
 
+@pytest.mark.parametrize("tipo", ["FRANCES", "ALEMAN"])
+def test_schedule_adds_monthly_credit_life_insurance_without_changing_capital_or_interest(tipo):
+    plan = _service().generar_plan_pagos(
+        monto=Decimal("1000.00"), tasa_anual=Decimal("12.00"),
+        plazo_meses=3, tipo_amortizacion=tipo,
+        fecha_desembolso=date(2025, 12, 17),
+        fecha_primer_vencimiento=date(2026, 1, 31),
+        tasa_seguro_desgravamen=Decimal("1.00"),
+    )
+
+    assert [row["capital"] for row in plan["cuotas"]] == (
+        [Decimal("330.02"), Decimal("333.32"), Decimal("336.66")]
+        if tipo == "FRANCES"
+        else [Decimal("333.33"), Decimal("333.33"), Decimal("333.34")]
+    )
+    assert [row["interes"] for row in plan["cuotas"]] == (
+        [Decimal("10.00"), Decimal("6.70"), Decimal("3.37")]
+        if tipo == "FRANCES"
+        else [Decimal("10.00"), Decimal("6.67"), Decimal("3.33")]
+    )
+    assert [row["seguro"] for row in plan["cuotas"]] == [
+        Decimal("10.00"),
+        Decimal("6.70") if tipo == "FRANCES" else Decimal("6.67"),
+        Decimal("3.37") if tipo == "FRANCES" else Decimal("3.33"),
+    ]
+    assert [row["cuota"] for row in plan["cuotas"]] == [
+        row["capital"] + row["interes"] + row["seguro"]
+        for row in plan["cuotas"]
+    ]
+    assert plan["total_seguro"] == (Decimal("20.07") if tipo == "FRANCES" else Decimal("20.00"))
+    assert plan["total_pagar"] == plan["total_capital"] + plan["total_interes"] + plan["total_seguro"]
+
+
+@pytest.mark.parametrize("tipo", ["FRANCES", "ALEMAN"])
+def test_zero_insurance_rate_preserves_existing_schedule_amounts(tipo):
+    plan = _service().generar_plan_pagos(
+        monto=Decimal("1000.00"), tasa_anual=Decimal("12.00"),
+        plazo_meses=3, tipo_amortizacion=tipo,
+        fecha_desembolso=date(2025, 12, 17),
+        fecha_primer_vencimiento=date(2026, 1, 31),
+        tasa_seguro_desgravamen=Decimal("0.00"),
+    )
+
+    assert [row["seguro"] for row in plan["cuotas"]] == [
+        Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+    ]
+    assert [row["cuota"] for row in plan["cuotas"]] == (
+        [Decimal("340.02"), Decimal("340.02"), Decimal("340.03")]
+        if tipo == "FRANCES"
+        else [Decimal("343.33"), Decimal("340.00"), Decimal("336.67")]
+    )
+    assert plan["total_seguro"] == Decimal("0.00")
+
+
+def test_insurance_amount_rounds_half_up_to_cents():
+    plan = _service().generar_plan_pagos(
+        monto=Decimal("1001.00"), tasa_anual=Decimal("0.00"),
+        plazo_meses=1, tipo_amortizacion="FRANCES",
+        fecha_desembolso=date(2025, 12, 17),
+        tasa_seguro_desgravamen=Decimal("0.50"),
+    )
+
+    assert plan["cuotas"][0]["seguro"] == Decimal("5.01")
+    assert plan["total_pagar"] == Decimal("1006.01")
+
+
 def test_due_dates_keep_the_anchor_day_and_clamp_to_each_month_end():
     plan = _plan("ALEMAN")
     assert [row["fecha_vencimiento"] for row in plan["cuotas"]] == [

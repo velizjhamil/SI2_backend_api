@@ -1,6 +1,6 @@
 import logging
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -154,17 +154,22 @@ def asegurar_credito_demo_socio(db: Session, socio: Socio) -> Credito | None:
             est_pago = "PAGADA" if i == 1 else "PENDIENTE"
             m_pagado = Decimal("535.00") if i == 1 else Decimal("0.00")
             interes = Decimal("35.00") - Decimal(f"{i * 2}.00")
-            cuota_tot = monto_cap + interes
+            saldo_ini = monto_total - (monto_cap * (i - 1))
+            seguro = (saldo_ini * Decimal(product.tasa_seguro_desgravamen or 0) / Decimal("100")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            cuota_tot = monto_cap + interes + seguro
 
             cuota = TablaAmortizacion(
                 numero_cuota=i,
                 fecha_vencimiento=f_venc,
                 monto_capital=monto_cap,
                 monto_interes=interes,
+                monto_seguro=seguro,
                 monto_cuota_total=cuota_tot,
                 estado_pago=est_pago,
                 credito_id=credito.id,
-                saldo_inicial=monto_total - (monto_cap * (i - 1)),
+                saldo_inicial=saldo_ini,
                 saldo_final=monto_total - (monto_cap * i),
                 monto_pagado=m_pagado,
                 fecha_pago=f_pago,

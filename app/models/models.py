@@ -360,6 +360,7 @@ class ProductoCredito(Base):
         CheckConstraint("plazo_min_meses > 0 AND plazo_min_meses <= plazo_max_meses", name="chk_producto_credito_plazos"),
         CheckConstraint("tasa_interes_anual >= 0 AND tasa_interes_anual <= 100", name="chk_producto_credito_tasa"),
         CheckConstraint("tasa_mora_anual >= 0 AND tasa_mora_anual <= 100", name="chk_producto_credito_tasa_mora"),
+        CheckConstraint("tasa_seguro_desgravamen >= 0 AND tasa_seguro_desgravamen <= 5", name="chk_producto_credito_tasa_seguro_desgravamen"),
         CheckConstraint("relacion_cuota_ingreso_max > 0 AND relacion_cuota_ingreso_max <= 100", name="chk_producto_credito_ratio"),
         CheckConstraint("dias_gracia_mora >= 0", name="chk_producto_credito_gracia"),
         CheckConstraint(
@@ -380,6 +381,7 @@ class ProductoCredito(Base):
     plazo_min_meses: Mapped[int] = mapped_column(Integer, nullable=False)
     plazo_max_meses: Mapped[int] = mapped_column(Integer, nullable=False)
     tasa_interes_anual = mapped_column(Numeric(5, 2), nullable=False)
+    tasa_seguro_desgravamen = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0.00")
     tipo_amortizacion: Mapped[str] = mapped_column(String(10), nullable=False)
     dias_gracia_mora: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     tasa_mora_anual = mapped_column(Numeric(5, 2), nullable=False, default=0, server_default="0")
@@ -632,6 +634,7 @@ class TablaAmortizacion(Base):
     monto_capital = mapped_column(Numeric(12, 2), nullable=False)
     monto_interes = mapped_column(Numeric(12, 2), nullable=False)
     monto_cuota_total = mapped_column(Numeric(12, 2), nullable=False)
+    monto_seguro = mapped_column(Numeric(12, 2), nullable=False, default=0, server_default="0.00")
     estado_pago: Mapped[str | None] = mapped_column(String(20), default="PENDIENTE", server_default="PENDIENTE")
     credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
     saldo_inicial = mapped_column(Numeric(14, 2))
@@ -661,6 +664,7 @@ class PagoCuota(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     monto_capital = mapped_column(Numeric(12, 2), nullable=False)
     monto_interes_pagado = mapped_column(Numeric(12, 2), nullable=False)
+    monto_seguro = mapped_column(Numeric(12, 2), nullable=False, default=0, server_default="0.00")
     monto_mora = mapped_column(Numeric(12, 2), default=0, server_default="0.00")
     fecha = mapped_column(TIMESTAMP(timezone=False), server_default=func.now())
     tabla_amortizacion_id: Mapped[int] = mapped_column(

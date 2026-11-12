@@ -289,6 +289,7 @@ class ProductoCreditoCreate(BaseModel):
     plazo_min_meses: int
     plazo_max_meses: int
     tasa_interes_anual: Decimal
+    tasa_seguro_desgravamen: Decimal = Field(default=Decimal("0.00"), ge=0, le=5)
     tipo_amortizacion: str
     dias_gracia_mora: int = 0
     tasa_mora_anual: Decimal = Decimal("0.00")
@@ -312,6 +313,7 @@ class ProductoCreditoUpdate(BaseModel):
     plazo_min_meses: int | None = None
     plazo_max_meses: int | None = None
     tasa_interes_anual: Decimal | None = None
+    tasa_seguro_desgravamen: Decimal | None = Field(None, ge=0, le=5)
     tipo_amortizacion: str | None = None
     dias_gracia_mora: int | None = None
     tasa_mora_anual: Decimal | None = None
@@ -343,6 +345,7 @@ class ProductoCreditoOut(BaseModel):
     plazo_min_meses: int
     plazo_max_meses: int
     tasa_interes_anual: Decimal
+    tasa_seguro_desgravamen: Decimal
     tipo_amortizacion: str
     dias_gracia_mora: int
     tasa_mora_anual: Decimal
@@ -726,8 +729,10 @@ class SolicitudSimulacionOut(BaseModel):
     monto: Decimal
     plazo_meses: int
     tasa_interes: Decimal
+    tasa_seguro_desgravamen: Decimal
     cuota_estimada: Decimal
     total_intereses_estimado: Decimal
+    total_seguro: Decimal
     capacidad_pago: Decimal | None
     relacion_cuota_ingreso: Decimal | None
     relacion_maxima: Decimal
@@ -772,6 +777,7 @@ class CuotaOut(BaseModel):
     saldo_inicial: Decimal | None
     capital: Decimal
     interes: Decimal
+    seguro: Decimal
     cuota: Decimal
     saldo_final: Decimal | None
     estado_pago: str
@@ -788,6 +794,7 @@ class PlanPagosOut(BaseModel):
     cuotas: list[CuotaOut]
     total_capital: Decimal
     total_interes: Decimal
+    total_seguro: Decimal
     total_pagar: Decimal
 
 
@@ -843,6 +850,7 @@ class CreditoOut(BaseModel):
 
 class CreditoDetalleOut(CreditoOut):
     cronograma: list[CuotaOut]
+    total_seguro: Decimal
     transaccion_desembolso_id: int | None
     usuario: UsuarioDesembolsoOut | None
 
@@ -885,6 +893,7 @@ class PagoOut(BaseModel):
     numero_cuota: int
     capital: Decimal
     interes: Decimal
+    seguro: Decimal
     mora: Decimal
     total: Decimal
     dias_atraso: int

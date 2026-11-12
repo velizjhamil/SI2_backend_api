@@ -286,10 +286,15 @@ def _validar_datos_producto(db: Session, datos: dict) -> None:
     grace_days = datos.get("dias_gracia_mora")
     if not isinstance(grace_days, int) or grace_days < 0:
         raise HTTPException(status_code=400, detail="Los días de gracia no pueden ser negativos")
+    insurance_rate = datos.get("tasa_seguro_desgravamen", Decimal("0.00"))
+    if not isinstance(insurance_rate, Decimal) or insurance_rate < 0 or insurance_rate > 5:
+        raise HTTPException(status_code=400, detail="La tasa de seguro de desgravamen debe estar entre 0 y 5")
 
     for value, label in ((monto_min, "El monto mínimo"), (monto_max, "El monto máximo"),
                          (datos["tasa_interes_anual"], "La tasa anual"),
-                         (datos["tasa_mora_anual"], "La tasa de mora"), (ratio, "La relación cuota-ingreso")):
+                         (datos["tasa_mora_anual"], "La tasa de mora"),
+                         (insurance_rate, "La tasa de seguro de desgravamen"),
+                         (ratio, "La relación cuota-ingreso")):
         if value != value.quantize(Decimal("0.01")):
             raise HTTPException(status_code=400, detail=f"{label} admite hasta dos decimales")
 
@@ -461,10 +466,15 @@ def simular_solicitud_credito(
     )):
         raise HTTPException(status_code=400, detail="Los ingresos, egresos y deudas no pueden ser negativos")
 
-    cuota = _cuota_estimada(body.monto, body.plazo_meses, producto.tasa_interes_anual, producto.tipo_amortizacion)
-    total_intereses = _intereses_estimados(
-        body.monto, body.plazo_meses, producto.tasa_interes_anual, producto.tipo_amortizacion
+    plan = generar_plan_pagos(
+        monto=body.monto,
+        tasa_anual=producto.tasa_interes_anual,
+        plazo_meses=body.plazo_meses,
+        tipo_amortizacion=producto.tipo_amortizacion,
+        fecha_desembolso=date.today(),
+        tasa_seguro_desgravamen=producto.tasa_seguro_desgravamen,
     )
+    cuota = plan["cuotas"][0]["cuota"]
     dentro_de_monto = producto.monto_min <= body.monto <= producto.monto_max
     dentro_de_plazo = producto.plazo_min_meses <= body.plazo_meses <= producto.plazo_max_meses
     errores = []
@@ -496,8 +506,10 @@ def simular_solicitud_credito(
         "monto": body.monto,
         "plazo_meses": body.plazo_meses,
         "tasa_interes": producto.tasa_interes_anual,
+        "tasa_seguro_desgravamen": producto.tasa_seguro_desgravamen,
         "cuota_estimada": cuota,
-        "total_intereses_estimado": total_intereses,
+        "total_intereses_estimado": plan["total_interes"],
+        "total_seguro": plan["total_seguro"],
         "capacidad_pago": capacidad_pago,
         "relacion_cuota_ingreso": relacion,
         "relacion_maxima": producto.relacion_cuota_ingreso_max,
@@ -1532,6 +1544,7 @@ def obtener_plan_pagos_solicitud(
             tasa_anual=solicitud.tasa_interes,
             plazo_meses=solicitud.plazo_meses,
             tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+            tasa_seguro_desgravamen=solicitud.producto.tasa_seguro_desgravamen,
             fecha_desembolso=fecha_desembolso,
         )
         fecha_primer_vencimiento = plan["fecha_primer_vencimiento"]
@@ -1544,6 +1557,7 @@ def obtener_plan_pagos_solicitud(
             tasa_anual=solicitud.tasa_interes,
             plazo_meses=solicitud.plazo_meses,
             tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+            tasa_seguro_desgravamen=solicitud.producto.tasa_seguro_desgravamen,
             fecha_desembolso=fecha_desembolso,
             fecha_primer_vencimiento=fecha_primer_vencimiento,
         )
@@ -1994,6 +2008,7 @@ def actualizar_producto_crediticio(
         "plazo_min_meses": producto.plazo_min_meses,
         "plazo_max_meses": producto.plazo_max_meses,
         "tasa_interes_anual": producto.tasa_interes_anual,
+        "tasa_seguro_desgravamen": producto.tasa_seguro_desgravamen,
         "tipo_amortizacion": producto.tipo_amortizacion,
         "dias_gracia_mora": producto.dias_gracia_mora,
         "tasa_mora_anual": producto.tasa_mora_anual,
@@ -2091,6 +2106,7 @@ def _cuota_credito_out(cuota) -> dict:
         "saldo_inicial": cuota.saldo_inicial,
         "capital": cuota.monto_capital,
         "interes": cuota.monto_interes,
+        "seguro": cuota.monto_seguro,
         "cuota": cuota.monto_cuota_total,
         "saldo_final": cuota.saldo_final,
         "estado_pago": cuota.estado_pago or "PENDIENTE",
@@ -2140,6 +2156,9 @@ def _credito_detalle_out(credito: Credito) -> dict:
         "estado_mora": None if credito.mora is None else credito.mora.estado,
         "dias_de_retaso": None if credito.mora is None else credito.mora.dias_de_retaso,
         "cronograma": [_cuota_credito_out(row) for row in cuotas],
+        "total_seguro": sum(
+            (Decimal(str(row.monto_seguro or 0)) for row in cuotas), Decimal("0.00")
+        ),
         "transaccion_desembolso_id": credito.transaccion_desembolso_id,
         "usuario": None if credito.usuario is None else {
             "id": credito.usuario.id,
@@ -2445,7 +2464,12 @@ def _pago_out(db: Session, pago: PagoCuota) -> dict:
             cuenta = {"id": cuenta_row.id, "numero": cuenta_row.numero}
     total = pago.monto_total
     if total is None:
-        total = pago.monto_capital + pago.monto_interes_pagado + (pago.monto_mora or Decimal("0.00"))
+        total = (
+            pago.monto_capital
+            + pago.monto_interes_pagado
+            + (pago.monto_seguro or Decimal("0.00"))
+            + (pago.monto_mora or Decimal("0.00"))
+        )
     return {
         "id": pago.id,
         "numero_recibo": pago.numero_recibo,
@@ -2460,6 +2484,7 @@ def _pago_out(db: Session, pago: PagoCuota) -> dict:
         "numero_cuota": pago.cuota.numero_cuota,
         "capital": pago.monto_capital,
         "interes": pago.monto_interes_pagado,
+        "seguro": pago.monto_seguro,
         "mora": pago.monto_mora or Decimal("0.00"),
         "total": total,
         "dias_atraso": pago.dias_atraso or 0,
@@ -2594,6 +2619,7 @@ def cobrar_cuota(
     pago = PagoCuota(
         monto_capital=cuota.monto_capital,
         monto_interes_pagado=cuota.monto_interes,
+        monto_seguro=cuota.monto_seguro,
         monto_mora=mora,
         tabla_amortizacion_id=cuota.id,
         credito_id=credito.id,
@@ -2810,6 +2836,7 @@ def desembolsar_solicitud_credito(
         tasa_anual=solicitud.tasa_interes,
         plazo_meses=solicitud.plazo_meses,
         tipo_amortizacion=solicitud.producto.tipo_amortizacion,
+        tasa_seguro_desgravamen=solicitud.producto.tasa_seguro_desgravamen,
         fecha_desembolso=hoy,
         fecha_primer_vencimiento=primer_vencimiento,
     )
@@ -2838,6 +2865,7 @@ def desembolsar_solicitud_credito(
         TablaAmortizacion(
             numero_cuota=row["numero"], fecha_vencimiento=row["fecha_vencimiento"],
             monto_capital=row["capital"], monto_interes=row["interes"],
+            monto_seguro=row["seguro"],
             monto_cuota_total=row["cuota"], estado_pago="PENDIENTE",
             credito_id=credito.id, saldo_inicial=row["saldo_inicial"],
             saldo_final=row["saldo_final"], monto_pagado=Decimal("0.00"),

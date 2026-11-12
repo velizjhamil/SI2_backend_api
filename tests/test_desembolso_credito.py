@@ -322,7 +322,7 @@ def test_plan_pagos_preview_returns_complete_schedule(client, credit_fixture):
     assert set(body) == {
         "tipo_amortizacion", "monto", "tasa_interes", "plazo_meses", "moneda",
         "fecha_desembolso", "fecha_primer_vencimiento", "cuotas", "total_capital",
-        "total_interes", "total_pagar",
+        "total_interes", "total_seguro", "total_pagar",
     }
     assert body["tipo_amortizacion"] == "FRANCES"
     assert body["fecha_primer_vencimiento"] == "2026-01-31"
@@ -447,6 +447,44 @@ def test_disburse_credit_to_savings_account_persists_credit_schedule_and_audit(
         assert transaction.cuenta_ahorro_id == account_id
         assert Decimal(transaction.monto) == Decimal("1200.00")
         assert audit.modulo == "CREDITOS" and audit.accion == "DESEMBOLSAR_CREDITO"
+
+
+def test_disbursement_persists_insurance_in_schedule_and_payment(client, credit_fixture):
+    request_id = credit_fixture["make_request"]()
+    account_id = credit_fixture["make_account"](request_id)
+    token = credit_fixture["users"][(1, "OFICIAL_CREDITO")]["token"]
+    with SessionLocal() as db:
+        request_row = db.get(models.SolicitudCredito, request_id)
+        product = db.get(models.ProductoCredito, request_row.producto_credito_id)
+        product.tasa_seguro_desgravamen = Decimal("1.00")
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/creditos/solicitudes/{request_id}/desembolso",
+        json={"modalidad": "CUENTA", "cuenta_ahorro_id": account_id},
+        headers=_auth(token),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    credit_fixture["credit_ids"].append(body["id"])
+    assert body["cronograma"][0]["seguro"] == "12.00"
+    assert body["cronograma"][0]["cuota"] == "122.02"
+    assert Decimal(body["total_seguro"]) == sum(
+        (Decimal(row["seguro"]) for row in body["cronograma"]), Decimal("0.00")
+    )
+    with SessionLocal() as db:
+        installment = db.query(models.TablaAmortizacion).filter_by(
+            credito_id=body["id"], numero_cuota=1
+        ).one()
+        assert installment.monto_seguro == Decimal("12.00")
+
+
+def test_disbursement_migration_has_idempotent_insurance_columns():
+    migration = Path(__file__).parents[1] / "migrations" / "035_seguro_desgravamen.sql"
+    sql = migration.read_text(encoding="utf-8").lower()
+    assert "add column if not exists tasa_seguro_desgravamen" in sql
+    assert "add column if not exists monto_seguro" in sql
+    assert "default 0" in sql
 
 
 def test_disburse_cash_uses_open_box_and_links_cash_transaction(client, credit_fixture):

@@ -393,6 +393,31 @@ def test_account_payments_settle_one_oldest_installment_per_call(client, payment
     assert receipt.json()["numero_cuota"] == 1
 
 
+def test_payment_records_installment_insurance(client, payment_case_factory):
+    case = payment_case_factory()
+    insurance = Decimal("7.25")
+    with SessionLocal() as db:
+        installment = db.get(models.TablaAmortizacion, case["installment_ids"][0])
+        installment.monto_seguro = insurance
+        installment.monto_cuota_total += insurance
+        db.commit()
+
+    response = client.post(
+        f"/api/v1/creditos/creditos/{case['credit_id']}/pagos",
+        json={"modalidad": "CUENTA", "cuenta_ahorro_id": case["account_id"]},
+        headers=_auth(case["tokens"]["OFICIAL_CREDITO"]["token"]),
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["seguro"] == "7.25"
+    assert response.json()["total"] == str(
+        case["first_total"] + insurance + Decimal("0.10")
+    )
+    with SessionLocal() as db:
+        payment = db.query(models.PagoCuota).filter_by(credito_id=case["credit_id"]).one()
+        assert payment.monto_seguro == insurance
+
+
 def test_partial_payment_keeps_verified_guarantee_and_final_payment_releases_it(client, payment_case_factory):
     case = payment_case_factory()
     token = case["tokens"]["OFICIAL_CREDITO"]["token"]

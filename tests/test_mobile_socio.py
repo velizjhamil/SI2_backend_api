@@ -156,6 +156,25 @@ def test_mobile_credit_products_and_simulation(socio_case):
                for key in ("cuota_estimada", "total_intereses", "total_a_pagar"))
 
 
+def test_mobile_credit_schedule_returns_real_installment_insurance(socio_case):
+    installment_id = socio_case["ids"]["installments"][0]
+    with SessionLocal() as db:
+        installment = db.get(models.TablaAmortizacion, installment_id)
+        installment.monto_seguro = Decimal("7.25")
+        installment.monto_cuota_total = Decimal("517.25")
+        db.commit()
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/socio/creditos/{socio_case['ids']['credits'][0]}/cronograma",
+            headers=auth(socio_case),
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["cuotas"][0]["seguro"] == "7.25"
+    assert response.json()["total_seguro"] == "7.25"
+
+
 def test_mobile_simulation_rejects_out_of_range_values(socio_case):
     with TestClient(app) as client:
         response = client.get("/api/v1/socio/creditos/simulacion", headers=auth(socio_case), params={

@@ -136,6 +136,17 @@ def init_db() -> None:
             "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS monto_aprobacion_directa NUMERIC(14,2) NOT NULL DEFAULT 0.00"
         ))
 
+        # --- seguro de desgravamen (migration 035) ---
+        conn.execute(text(
+            "ALTER TABLE producto_credito ADD COLUMN IF NOT EXISTS tasa_seguro_desgravamen NUMERIC(5,2) NOT NULL DEFAULT 0.00"
+        ))
+        conn.execute(text(
+            "ALTER TABLE tabla_amortizacion ADD COLUMN IF NOT EXISTS monto_seguro NUMERIC(12,2) NOT NULL DEFAULT 0.00"
+        ))
+        conn.execute(text(
+            "ALTER TABLE pago_cuota ADD COLUMN IF NOT EXISTS monto_seguro NUMERIC(12,2) NOT NULL DEFAULT 0.00"
+        ))
+
         # --- solicitud_credito: comité y canal de origen móvil ---
         conn.execute(text(
             "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS ronda_comite INT NOT NULL DEFAULT 0"
