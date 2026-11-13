@@ -16,8 +16,8 @@ Branch: `feat/seguro-desgravamen` in SI2_backend_api, SI2_frontend_web, SI2_mobi
 ## Tasks
 
 - [x] T1 S2-S6 backend — route: delegated to codex (team split, memory `si2-delegate-to-codex-and-agy`); evidence: no new test failures vs main baseline
-- [ ] T2 S7 web — route: delegated to agy
-- [ ] T3 S7 mobile — route: delegated to agy
+- [x] T2 S7 web — route: delegated to agy; build+lint OK
+- [x] T3 S7 mobile — route: delegated to agy; analyze OK, 220 tests pass (1 live-API test needs running server)
 
 ## Log
 
@@ -26,3 +26,4 @@ Branch: `feat/seguro-desgravamen` in SI2_backend_api, SI2_frontend_web, SI2_mobi
 - Risk: item 1 (migration adds persisted columns), item 3 (schedule API shapes).
 - L3 (2026-11-12, user): "lo estas haciendo con .py, recuerda que necesito un .sql, para poder hacer correr en supabase" → delivered as `migrations/035_seguro_desgravamen.sql`; `app/db/session.py` mirrors it for local startup.
 - L4: Review fixes: reverted unrequested demo schedule rewrite (only adds seguro now); added columns to `init_db`; test fake gained `monto_seguro`. Suite vs main baseline: 0 new failures (132 pre-existing environment failures).
+- L5: Web and mobile delivered. Gap: mobile payment receipt payload (comprobantes_movil.receipt_payload) has no capital/interes/seguro breakdown, so the receipt lines stay hidden.
