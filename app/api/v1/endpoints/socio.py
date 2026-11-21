@@ -21,6 +21,7 @@ from app.services.credit_request_rules import (
 from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, ProductoCredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
 from app.models.models import ComprobanteTransaccion
 from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut
+from app.services.report_exports import DOCUMENT_FORMATS, EXPORT_FORMAT_PATTERN, report_response
 
 router = APIRouter()
 CENT = Decimal("0.01")
@@ -312,6 +313,7 @@ def listar_creditos_socio(socio: Socio = Depends(get_current_socio), db: Session
         output.append({
             "id": credit.id, "numero_credito": credit.numero_credito,
             "producto": None if product is None else product.nombre,
+            **_tipo_credito(credit, product),
             "moneda": None if currency is None else currency.codigo_iso,
             "monto_desembolsado": _money(Decimal(credit.monto_aprobado)),
             "saldo_pendiente": _money(Decimal(credit.saldo_pendiente)),
@@ -539,10 +541,129 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
         (Decimal(str(row.monto_seguro or 0)) for row in schedule), Decimal("0.00")
     )
     return {"credito": {"id": credit.id, "numero_credito": credit.numero_credito,
+            "producto": None if product is None else product.nombre, **_tipo_credito(credit, product),
             "moneda": None if currency is None else currency.codigo_iso,
             "estado": credit.estado, "saldo_pendiente": _money(Decimal(credit.saldo_pendiente))},
         "total_seguro": _money(total_seguro),
         "cuotas": cuotas_out}
+
+
+def _tipo_credito(credit, product) -> dict:
+    """ASFI credit type and amortization system shown to the socio for each credit."""
+    return {"tipo_credito": None if product is None else product.tipo_credito_asfi,
+            "tipo_amortizacion": credit.tipo_amortizacion or (None if product is None else product.tipo_amortizacion)}
+
+
+def _extracto_credito(db: Session, socio: Socio, credito_id: int, desde: date | None, hasta: date | None) -> dict:
+    from app.models.models import PagoCuota
+    end = hasta or date.today()
+    start = desde or end - timedelta(days=365)
+    if start > end:
+        raise HTTPException(status_code=422, detail="desde no puede ser posterior a hasta")
+    exists = db.execute(select(Credito.id).where(Credito.id == credito_id, Credito.socio_id == socio.id)).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(status_code=404, detail="Crédito no encontrado")
+    schedule = cronograma_credito_socio(credito_id, socio, db)
+    credit = db.get(Credito, credito_id)
+    product = credit.producto or (credit.solicitud.producto if credit.solicitud else None)
+    payments = db.execute(
+        select(PagoCuota).options(joinedload(PagoCuota.cuota))
+        .where(PagoCuota.credito_id == credit.id, PagoCuota.fecha >= start, PagoCuota.fecha < end + timedelta(days=1))
+        .order_by(PagoCuota.fecha, PagoCuota.id)
+    ).unique().scalars().all()
+    totals = {key: Decimal("0.00") for key in ("capital", "interes", "seguro", "mora")}
+    rows = []
+    for payment in payments:
+        parts = {"capital": Decimal(str(payment.monto_capital or 0)),
+                 "interes": Decimal(str(payment.monto_interes_pagado or 0)),
+                 "seguro": Decimal(str(payment.monto_seguro or 0)),
+                 "mora": Decimal(str(payment.monto_mora or 0))}
+        for key, value in parts.items():
+            totals[key] += value
+        rows.append({"id": payment.id, "fecha": payment.fecha.isoformat() if payment.fecha else None,
+                     "numero_recibo": payment.numero_recibo, "numero_cuota": payment.cuota.numero_cuota,
+                     "modalidad": payment.modalidad, "dias_atraso": payment.dias_atraso,
+                     **{key: _money(value) for key, value in parts.items()},
+                     "total": _money(sum(parts.values(), Decimal("0.00")))})
+    cuotas = schedule["cuotas"]
+    return {
+        "credito": {**schedule["credito"],
+                    "monto_desembolsado": _money(Decimal(credit.monto_aprobado)),
+                    "plazo_meses": credit.plazo_meses,
+                    "tasa_interes_anual": None if credit.tasa_interes is None else _money(Decimal(str(credit.tasa_interes))),
+                    "tasa_seguro_desgravamen": None if product is None else str(product.tasa_seguro_desgravamen),
+                    "fecha_desembolso": credit.fecha_desembolso.isoformat() if credit.fecha_desembolso else None},
+        "desde": start.isoformat(), "hasta": end.isoformat(),
+        "pagos": rows,
+        "totales": {**{key: _money(value) for key, value in totals.items()},
+                    "total": _money(sum(totals.values(), Decimal("0.00"))), "pagos": len(rows)},
+        "resumen": {"cuotas_total": len(cuotas),
+                    "cuotas_pagadas": sum(1 for row in cuotas if row["estado"] == "PAGADA"),
+                    "cuotas_vencidas": sum(1 for row in cuotas if row["estado"] == "VENCIDA"),
+                    "cuotas_pendientes": sum(1 for row in cuotas if row["estado"] == "PENDIENTE"),
+                    "seguro_programado": schedule["total_seguro"]},
+        "cuotas": cuotas,
+    }
+
+
+@router.get("/creditos/{credito_id}/extracto")
+def extracto_credito_socio(credito_id: int, desde: date | None = Query(None), hasta: date | None = Query(None),
+                           socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    """Credit payment statement: payments in the range split into capital, interest, insurance and arrears."""
+    return _extracto_credito(db, socio, credito_id, desde, hasta)
+
+
+@router.get("/creditos/{credito_id}/extracto/export")
+def exportar_extracto_credito_socio(credito_id: int, desde: date | None = Query(None), hasta: date | None = Query(None),
+                                    formato: str = Query("pdf", pattern=EXPORT_FORMAT_PATTERN),
+                                    socio: Socio = Depends(get_current_socio), db: Session = Depends(get_db)):
+    body = _extracto_credito(db, socio, credito_id, desde, hasta)
+    info = body["credito"]
+    filename = f"extracto-credito-{info['numero_credito'] or credito_id}-{body['hasta']}"
+    header = [["Crédito", info["numero_credito"]], ["Producto", info["producto"]],
+              ["Tipo de crédito", info["tipo_credito"] or "Sin clasificar"],
+              ["Sistema de amortización", info["tipo_amortizacion"]],
+              ["Monto desembolsado", info["monto_desembolsado"]], ["Saldo pendiente", info["saldo_pendiente"]],
+              ["Tasa de interés anual (%)", info["tasa_interes_anual"]],
+              ["Tasa de seguro de desgravamen (%)", info["tasa_seguro_desgravamen"]], ["Estado", info["estado"]]]
+    payment_headers = ["Fecha", "Recibo", "Cuota", "Capital", "Interés", "Seguro", "Mora", "Total"]
+    payments = [[row["fecha"][:10] if row["fecha"] else "", row["numero_recibo"], row["numero_cuota"], row["capital"],
+                 row["interes"], row["seguro"], row["mora"], row["total"]] for row in body["pagos"]]
+    totals = body["totales"]
+    schedule_headers = ["Cuota", "Vencimiento", "Capital", "Interés", "Seguro", "Cuota total", "Saldo capital", "Estado"]
+    schedule = [[row["numero"], row["fecha_vencimiento"], row["capital"], row["interes"], row["seguro"],
+                 row["monto_total"], row["saldo_capital"], row["estado"]] for row in body["cuotas"]]
+    if formato in DOCUMENT_FORMATS:
+        money = ["text", "text", "count", "amount", "amount", "amount", "amount", "amount"]
+        total_row = ["Total", "", totals["pagos"], totals["capital"], totals["interes"], totals["seguro"],
+                     totals["mora"], totals["total"]]
+        return report_response(formato, filename, title="Extracto de crédito",
+            period=f"Del {body['desde']} al {body['hasta']}",
+            sections=[{"title": "Datos del crédito", "headers": ["Concepto", "Valor"], "rows": header,
+                       "column_types": ["text", "text"]},
+                      {"title": "Pagos realizados", "headers": payment_headers, "rows": payments + [total_row],
+                       "column_types": money, "row_types": [money] * len(payments) + [money]},
+                      {"title": "Plan de pagos (amortización)", "headers": schedule_headers, "rows": schedule,
+                       "column_types": ["count", "text", "amount", "amount", "amount", "amount", "amount", "text"]}],
+            cooperative=db.execute(text("SELECT nombre FROM cooperativa WHERE id=:id"),
+                                   {"id": socio.cooperativa_id}).scalar_one_or_none(),
+            currency=info["moneda"], generated_by=f"{socio.nombre} {socio.apellido}", orientation="L")
+    import csv as _csv_module
+    import io
+    output = io.StringIO(newline="")
+    writer = _csv_module.writer(output)
+    writer.writerows([["Sección", "Concepto", "Valor"]] + [["Crédito", *row] for row in header])
+    writer.writerow([])
+    writer.writerow(payment_headers)
+    writer.writerows(payments)
+    writer.writerow(["Total", "", totals["pagos"], totals["capital"], totals["interes"], totals["seguro"],
+                     totals["mora"], totals["total"]])
+    writer.writerow([])
+    writer.writerow(schedule_headers)
+    writer.writerows(schedule)
+    from fastapi.responses import Response
+    return Response("\ufeff" + output.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}.csv"'})
 
 
 @router.get("/dpf/{dpf_id}")

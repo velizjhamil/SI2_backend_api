@@ -506,3 +506,99 @@ def test_mobile_recredit_rejects_expired_offer(socio_case):
     with TestClient(app) as client:
         discard = client.post(f"/api/v1/socio/recreditos/{discard_id}/descartar", headers=auth(socio_case))
     assert discard.status_code == 422
+
+
+def _statement_case(case):
+    """Add an ASFI type, a paid installment with insurance and two payments on different dates."""
+    credit_id = case["ids"]["credits"][0]
+    with SessionLocal() as db:
+        product = db.get(models.ProductoCredito, case["ids"]["products"][0])
+        product.tipo_credito_asfi = "CONSUMO"
+        first = db.get(models.TablaAmortizacion, case["ids"]["installments"][0])
+        first.monto_seguro = Decimal("5.00")
+        first.monto_cuota_total = Decimal("515.00")
+        second = models.TablaAmortizacion(numero_cuota=2, fecha_vencimiento=date.today() + timedelta(days=29),
+              monto_capital=Decimal("500"), monto_interes=Decimal("5"), monto_seguro=Decimal("2.50"),
+              monto_cuota_total=Decimal("507.50"), estado_pago="PENDIENTE", credito_id=credit_id,
+              saldo_inicial=Decimal("500"), saldo_final=Decimal("0"), monto_pagado=Decimal("0"))
+        db.add(second); db.flush(); case["ids"]["installments"].append(second.id)
+        old = datetime.combine(date.today() - timedelta(days=40), datetime.min.time())
+        recent = datetime.combine(date.today() - timedelta(days=5), datetime.min.time())
+        for when, capital, interest, insurance, arrears, receipt in (
+            (old, "200.00", "6.00", "3.00", "0.00", "R-OLD"),
+            (recent, "300.00", "4.00", "2.00", "1.50", "R-NEW"),
+        ):
+            db.add(models.PagoCuota(tabla_amortizacion_id=first.id, credito_id=credit_id,
+                                    cooperativa_id=case["ids"]["coop"], monto_capital=Decimal(capital),
+                                    monto_interes_pagado=Decimal(interest), monto_seguro=Decimal(insurance),
+                                    monto_mora=Decimal(arrears), fecha=when, numero_recibo=receipt,
+                                    modalidad="EFECTIVO", dias_atraso=0, usuario_id=case["ids"]["user"]))
+        db.commit()
+    return credit_id
+
+
+def test_socio_credit_list_and_schedule_identify_credit_type(socio_case):
+    credit_id = _statement_case(socio_case)
+    with TestClient(app) as client:
+        listed = client.get("/api/v1/socio/creditos", headers=auth(socio_case)).json()[0]
+        schedule = client.get(f"/api/v1/socio/creditos/{credit_id}/cronograma", headers=auth(socio_case)).json()
+    assert listed["tipo_credito"] == "CONSUMO" and listed["tipo_amortizacion"] == "FRANCES"
+    assert schedule["credito"]["tipo_credito"] == "CONSUMO"
+    assert schedule["credito"]["tipo_amortizacion"] == "FRANCES"
+    assert schedule["credito"]["producto"] == "Mobile Loan"
+
+
+def test_socio_credit_statement_filters_payments_by_date_and_totals_components(socio_case):
+    credit_id = _statement_case(socio_case)
+    with TestClient(app) as client:
+        full = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto",
+                          params={"desde": (date.today() - timedelta(days=60)).isoformat()},
+                          headers=auth(socio_case))
+        recent = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto",
+                            params={"desde": (date.today() - timedelta(days=10)).isoformat()},
+                            headers=auth(socio_case))
+    assert full.status_code == 200, full.text
+    body = full.json()
+    assert body["credito"]["tipo_credito"] == "CONSUMO"
+    assert body["credito"]["tipo_amortizacion"] == "FRANCES"
+    assert body["credito"]["monto_desembolsado"] == "1000.00"
+    assert [row["numero_recibo"] for row in body["pagos"]] == ["R-OLD", "R-NEW"]
+    assert body["pagos"][1] == {**body["pagos"][1], "numero_cuota": 1, "capital": "300.00", "interes": "4.00",
+                                "seguro": "2.00", "mora": "1.50", "total": "307.50"}
+    assert body["totales"] == {"capital": "500.00", "interes": "10.00", "seguro": "5.00", "mora": "1.50",
+                               "total": "516.50", "pagos": 2}
+    assert body["resumen"]["cuotas_total"] == 2
+    assert body["resumen"]["seguro_programado"] == "7.50"
+    assert len(body["cuotas"]) == 2 and body["cuotas"][1]["seguro"] == "2.50"
+
+    assert recent.status_code == 200
+    assert [row["numero_recibo"] for row in recent.json()["pagos"]] == ["R-NEW"]
+    assert recent.json()["totales"]["total"] == "307.50"
+
+
+def test_socio_credit_statement_exports_pdf_and_csv(socio_case):
+    credit_id = _statement_case(socio_case)
+    since = (date.today() - timedelta(days=60)).isoformat()
+    with TestClient(app) as client:
+        pdf = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto/export",
+                         params={"desde": since, "formato": "pdf"}, headers=auth(socio_case))
+        csv_file = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto/export",
+                              params={"desde": since, "formato": "csv"}, headers=auth(socio_case))
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.headers["content-type"] == "application/pdf" and pdf.content.startswith(b"%PDF")
+    assert csv_file.status_code == 200
+    assert "R-NEW" in csv_file.text and "307.50" in csv_file.text and "CONSUMO" in csv_file.text
+
+
+def test_socio_credit_statement_rejects_foreign_credit_and_reversed_dates(socio_case):
+    credit_id = _statement_case(socio_case)
+    with TestClient(app) as client:
+        reversed_range = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto",
+                                    params={"desde": date.today().isoformat(),
+                                            "hasta": (date.today() - timedelta(days=1)).isoformat()},
+                                    headers=auth(socio_case))
+        foreign = client.get(f"/api/v1/socio/creditos/{credit_id}/extracto", headers=staff_auth(socio_case))
+        missing = client.get("/api/v1/socio/creditos/999999999/extracto", headers=auth(socio_case))
+    assert reversed_range.status_code == 422
+    assert foreign.status_code == 403
+    assert missing.status_code == 404
