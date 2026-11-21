@@ -1301,3 +1301,30 @@ class NotificacionDestinatario(Base):
 
     notificacion: Mapped["Notificacion"] = relationship(back_populates="destinatarios")
     socio: Mapped["Socio"] = relationship()
+
+
+class EncuestaSatisfaccion(Base):
+    """Calificación de un servicio hecha por un socio (CRM de feedback)."""
+
+    __tablename__ = "encuesta_satisfaccion"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    servicio: Mapped[str] = mapped_column(String(20), nullable=False)
+    calificacion: Mapped[int] = mapped_column(Integer, nullable=False)
+    recomendaria: Mapped[int | None] = mapped_column(Integer)
+    comentario: Mapped[str | None] = mapped_column(Text)
+    canal: Mapped[str] = mapped_column(String(10), nullable=False)
+    fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("servicio IN ('CREDITO','AHORRO','CAJA','ATENCION','APP_MOVIL','OTRO')",
+                        name="chk_encuesta_servicio"),
+        CheckConstraint("calificacion BETWEEN 1 AND 5", name="chk_encuesta_calificacion"),
+        CheckConstraint("recomendaria IS NULL OR recomendaria BETWEEN 0 AND 10", name="chk_encuesta_recomendaria"),
+        CheckConstraint("canal IN ('WEB','MOVIL')", name="chk_encuesta_canal"),
+        Index("ix_encuesta_cooperativa_fecha", "cooperativa_id", "fecha_creacion"),
+    )
+
+    socio: Mapped["Socio"] = relationship()
