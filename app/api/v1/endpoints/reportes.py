@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.v1.deps import get_current_user, get_db, require_feature
 from app.api.v1.endpoints.creditos import _configuracion_mora
 from app.api.v1.endpoints.estados_financieros import _balance_data, _income_data
-from app.models.models import Credito, SolicitudCredito, Usuario
+from app.models.models import Credito, ProductoCredito, Rol, SolicitudCredito, Usuario
 from app.services.report_exports import DOCUMENT_FORMATS, EXPORT_FORMAT_PATTERN, report_response
 from app.services.cobro_cuotas import resumir_morosidad
 from app.services.comando_voz_reportes import interpretar_comando
@@ -24,6 +24,23 @@ ROLES = {"ADMINISTRADOR", "CONTADOR", "OFICIAL_CREDITO"}
 CENT = Decimal("0.01")
 CREDIT_EFFECTIVE_DATE_SQL = "COALESCE(c.fecha_desembolso, s.fecha_resolucion_comite::date, s.fecha_solicitud::date, c.fecha_creacion::date)"
 CREDIT_EFFECTIVE_CURRENCY_SQL = "COALESCE(c.moneda_id, s.moneda_id)"
+
+
+TIPOS_CREDITO = ("MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO", "VIVIENDA_HIPOTECARIA",
+                 "VIVIENDA_SIN_GARANTIA")
+ESTADOS_MORA = ("AL_DIA", "EN_MORA")
+
+
+def cartera_filtros(
+    producto_id: int | None = Query(None, ge=1),
+    tipo_credito: str | None = Query(None, pattern="^(" + "|".join(TIPOS_CREDITO) + ")$"),
+    oficial_id: int | None = Query(None, ge=1),
+    desde: date | None = Query(None, description="Colocación desde (fecha efectiva del crédito)"),
+    estado_mora: str | None = Query(None, pattern="^(" + "|".join(ESTADOS_MORA) + ")$"),
+) -> dict:
+    """Optional portfolio filters shared by the portfolio report and its exports."""
+    return {"producto_id": producto_id, "tipo_credito": tipo_credito, "oficial_id": oficial_id,
+            "desde": desde, "estado_mora": estado_mora}
 
 
 def _credit_effective_date():
@@ -85,35 +102,62 @@ def _unclassified_credit_warnings(db: Session, tenant: int, cutoff: date):
              "mensaje": "Hay créditos vigentes sin moneda identificable; se excluyen de los totales por moneda."}]
 
 
-def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_meta=None):
+def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_meta=None, filtros=None):
+    filtros = filtros or cartera_filtros(None, None, None, None, None)
     params = _filters(db, cutoff, currency_id, tenant, pdf_meta)
+    if filtros["desde"] and filtros["desde"] > cutoff:
+        raise HTTPException(422, "desde no puede ser posterior a la fecha de corte")
     warnings = _unclassified_credit_warnings(db, tenant, cutoff)
+    scope = [Credito.cooperativa_id == tenant, _credit_effective_currency() == currency_id,
+             Credito.estado == "VIGENTE", _credit_effective_date() <= cutoff]
+    placement_sql, placement_params = "", {}
+    if filtros["producto_id"]:
+        scope.append(Credito.producto_credito_id == filtros["producto_id"])
+        placement_sql += " AND c.producto_credito_id=:f_producto"
+        placement_params["f_producto"] = filtros["producto_id"]
+    if filtros["tipo_credito"]:
+        scope.append(Credito.producto_credito_id.in_(
+            select(ProductoCredito.id).where(ProductoCredito.tipo_credito_asfi == filtros["tipo_credito"])))
+        placement_sql += " AND c.producto_credito_id IN (SELECT id FROM producto_credito WHERE tipo_credito_asfi=:f_tipo)"
+        placement_params["f_tipo"] = filtros["tipo_credito"]
+    if filtros["oficial_id"]:
+        scope.append(SolicitudCredito.usuario_id == filtros["oficial_id"])
+        placement_sql += " AND s.usuario_id=:f_oficial"
+        placement_params["f_oficial"] = filtros["oficial_id"]
+    if filtros["desde"]:
+        scope.append(_credit_effective_date() >= filtros["desde"])
+        placement_sql += f" AND {CREDIT_EFFECTIVE_DATE_SQL}>=:f_desde"
+        placement_params["f_desde"] = filtros["desde"]
     credits = db.execute(select(Credito).join(SolicitudCredito, SolicitudCredito.id == Credito.solicitud_credito_id).options(
         joinedload(Credito.producto), joinedload(Credito.solicitud).joinedload(SolicitudCredito.producto),
         selectinload(Credito.cronograma)
-    ).where(Credito.cooperativa_id == tenant, _credit_effective_currency() == currency_id,
-            Credito.estado == "VIGENTE", _credit_effective_date() <= cutoff)).unique().scalars().all()
+    ).where(*scope)).unique().scalars().all()
     arrears = {}
     for credit in credits:
         rate, grace = _configuracion_mora(credit)
         summary = resumir_morosidad(cuotas=credit.cronograma, fecha=cutoff,
                                     tasa_mora_anual=rate, dias_gracia_mora=grace)
         arrears[credit.id] = summary["dias_de_retaso"] if summary["estado"] == "EN_MORA" else 0
+    if filtros["estado_mora"] == "EN_MORA":
+        arrears = {credit_id: days for credit_id, days in arrears.items() if days > 0}
+    elif filtros["estado_mora"] == "AL_DIA":
+        arrears = {credit_id: days for credit_id, days in arrears.items() if days == 0}
     ids = list(arrears)
+    params["scope_ids"] = ids
     mora_ids = [credit_id for credit_id, days in arrears.items() if days > 0]
     totals = db.execute(text("""
         SELECT COALESCE(SUM(c.saldo_pendiente),0) AS gross, COUNT(*) AS credits,
                COALESCE(SUM(c.saldo_pendiente) FILTER (WHERE c.id=ANY(:mora_ids)),0) AS overdue
         FROM credito c JOIN solicitud_credito s ON s.id=c.solicitud_credito_id
         WHERE c.cooperativa_id=:tenant AND {CREDIT_EFFECTIVE_CURRENCY_SQL}=:currency AND c.estado='VIGENTE'
-          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff
+          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff AND c.id=ANY(:scope_ids)
     """.format(CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL,
                CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL)), {**params, "cutoff": cutoff, "mora_ids": mora_ids}).mappings().one()
     state_rows = db.execute(text("""
         SELECT c.estado AS key, COUNT(*) AS count, COALESCE(SUM(c.saldo_pendiente),0) AS amount
         FROM credito c JOIN solicitud_credito s ON s.id=c.solicitud_credito_id
         WHERE c.cooperativa_id=:tenant AND {CREDIT_EFFECTIVE_CURRENCY_SQL}=:currency AND c.estado='VIGENTE'
-          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff GROUP BY c.estado ORDER BY c.estado
+          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff AND c.id=ANY(:scope_ids) GROUP BY c.estado ORDER BY c.estado
     """.format(CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL,
                CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL)), {**params, "cutoff": cutoff}).mappings().all()
     product_rows = db.execute(text("""
@@ -122,7 +166,7 @@ def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_met
         FROM credito c JOIN solicitud_credito s ON s.id=c.solicitud_credito_id
         LEFT JOIN producto_credito p ON p.id=c.producto_credito_id
         WHERE c.cooperativa_id=:tenant AND {CREDIT_EFFECTIVE_CURRENCY_SQL}=:currency AND c.estado='VIGENTE'
-          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff GROUP BY p.nombre ORDER BY p.nombre
+          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff AND c.id=ANY(:scope_ids) GROUP BY p.nombre ORDER BY p.nombre
     """.format(CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL,
                CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL)), {**params, "cutoff": cutoff}).mappings().all()
     destination_rows = db.execute(text("""
@@ -130,7 +174,7 @@ def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_met
                COUNT(*) AS count, COALESCE(SUM(c.saldo_pendiente),0) AS amount
         FROM credito c JOIN solicitud_credito s ON s.id=c.solicitud_credito_id
         WHERE c.cooperativa_id=:tenant AND {CREDIT_EFFECTIVE_CURRENCY_SQL}=:currency AND c.estado='VIGENTE'
-          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff GROUP BY key ORDER BY key
+          AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff AND c.id=ANY(:scope_ids) GROUP BY key ORDER BY key
     """.format(CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL,
                CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL)), {**params, "cutoff": cutoff}).mappings().all()
     ranges = [("0",0,0),("1-30",1,30),("31-90",31,90),("91-180",91,180),(">180",181,None)]
@@ -154,15 +198,17 @@ def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_met
                COALESCE(SUM(c.monto_aprobado),0) AS amount
         FROM credito c JOIN solicitud_credito s ON s.id=c.solicitud_credito_id
         WHERE c.cooperativa_id=:tenant AND {CREDIT_EFFECTIVE_CURRENCY_SQL}=:currency
-          AND {CREDIT_EFFECTIVE_DATE_SQL}>=:start AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff
+          AND {CREDIT_EFFECTIVE_DATE_SQL}>=:start AND {CREDIT_EFFECTIVE_DATE_SQL}<=:cutoff{PLACEMENT}
         GROUP BY 1 ORDER BY 1
-    """.format(CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL,
-               CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL)), {**params, "cutoff": cutoff, "start": month_start}).mappings().all()
+    """.format(CREDIT_EFFECTIVE_DATE_SQL=CREDIT_EFFECTIVE_DATE_SQL, PLACEMENT=placement_sql,
+               CREDIT_EFFECTIVE_CURRENCY_SQL=CREDIT_EFFECTIVE_CURRENCY_SQL)),
+        {**params, **placement_params, "cutoff": cutoff, "start": month_start}).mappings().all()
     gross = Decimal(str(totals["gross"] or 0))
     overdue = Decimal(str(totals["overdue"] or 0))
     return {"definicion": "Cartera bruta: suma del saldo pendiente de créditos VIGENTE; mora: criterio de cuotas impagas y días de gracia de CU-W28 evaluado a fecha_corte.",
         "advertencias": warnings,
         "fecha_corte": cutoff.isoformat(), "moneda_id": currency_id,
+        "filtros": {**filtros, "desde": filtros["desde"].isoformat() if filtros["desde"] else None},
         "totales": {"cartera_bruta": _money(gross), "cartera_en_mora": _money(overdue),
                     "indice_mora": _money(overdue/gross*100) if gross else None,
                     **({"motivo_indice_mora": "La cartera bruta es cero para la fecha de corte."} if not gross else {}),
@@ -176,15 +222,33 @@ def _portfolio(db: Session, tenant: int, cutoff: date, currency_id: int, pdf_met
 
 @router.get("/cartera")
 def cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
+            filtros: dict = Depends(cartera_filtros),
             user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    return _portfolio(db, _tenant(user), fecha_corte, moneda_id)
+    return _portfolio(db, _tenant(user), fecha_corte, moneda_id, filtros=filtros)
+
+
+@router.get("/filtros")
+def opciones_filtros(user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Options for the portfolio report filters of the user's cooperative."""
+    tenant = _tenant(user)
+    products = db.execute(select(ProductoCredito.id, ProductoCredito.nombre, ProductoCredito.tipo_credito_asfi)
+                          .where(ProductoCredito.cooperativa_id == tenant)
+                          .order_by(ProductoCredito.nombre)).all()
+    officers = db.execute(select(Usuario.id, Usuario.nombre).join(Rol, Rol.id == Usuario.rol_id)
+                          .where(Usuario.cooperativa_id == tenant,
+                                 Rol.nombre.in_(("OFICIAL_CREDITO", "ASESOR_CREDITO")))
+                          .order_by(Usuario.nombre)).all()
+    return {"productos": [{"id": r.id, "nombre": r.nombre, "tipo_credito": r.tipo_credito_asfi} for r in products],
+            "oficiales": [{"id": r.id, "nombre": r.nombre} for r in officers],
+            "tipos_credito": list(TIPOS_CREDITO), "estados_mora": list(ESTADOS_MORA)}
 
 
 @router.get("/cartera/export")
 def export_cartera(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                   formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN), user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+                   formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN), filtros: dict = Depends(cartera_filtros),
+                   user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     pdf_meta = {}
-    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
+    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta, filtros=filtros)
     rows = [["Total", key, value] for key, value in body["totales"].items()]
     rows += [["Advertencia", item["codigo"], item["creditos"], item["saldo"], item["mensaje"]]
              for item in body["advertencias"]]
@@ -210,11 +274,11 @@ def export_cartera(fecha_corte: date = Query(default_factory=date.today), moneda
 
 @router.get("/mora/export")
 def export_mora(fecha_corte: date = Query(default_factory=date.today), moneda_id: int = Query(1, ge=1),
-                formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN),
+                formato: str = Query("csv", pattern=EXPORT_FORMAT_PATTERN), filtros: dict = Depends(cartera_filtros),
                 user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     """Reporte de morosidad: resumen y distribución de la cartera vencida."""
     pdf_meta = {}
-    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta)
+    body = _portfolio(db, _tenant(user), fecha_corte, moneda_id, pdf_meta, filtros=filtros)
     totals = body["totales"]
     filename = f"morosidad-{fecha_corte.isoformat()}"
     summary = [
