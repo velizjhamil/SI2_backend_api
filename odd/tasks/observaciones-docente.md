@@ -22,12 +22,12 @@ Branch: `feat/observaciones-docente` in SI2_backend_api, SI2_frontend_web, SI2_m
 ## Tasks
 
 - [x] T1 S5.1-S5.6 backend feedback CRM — route: inline (codex not running in Herdr); `tests/test_feedback.py` RED then 12 passed
-- [ ] T2 S5.7 web + mobile feedback UI — route: delegated to agy (team split)
+- [x] T2 S5.7 web + mobile feedback UI — route: delegated to agy (team split); web e81d05a, mobile 347b75a; agy: lint 0 errors, build OK, web tests 50 pass, flutter analyze clean, 227 mobile tests pass (1 live-API test needs a server); parent spot check: build OK, analyze clean
 - [x] T3 S2 backend report filters — route: inline; `tests/test_reportes_filtros.py` RED then 12 passed; report suites 126 passed, 1 pre-existing failure (`test_mora_export_pdf_and_unchanged_csv`, fails on base too)
 - [x] T4 S3-S4 backend credit statement + credit type — route: inline; 4 new tests in `tests/test_mobile_socio.py` RED then pass (30 passed); 2 `test_cobro_cuotas` debt-route failures pre-exist on base
 - [ ] T5 S2-S4 web + mobile UI — route: delegated to agy
 - [x] T6 S6 one-year SQL seed — route: inline; `scripts/seed_historial_1_anio.sql` dry-run on test DB in a rolled-back transaction: 36 socios, 36 credits over 15 months (31 VIGENTE, 5 CANCELADO), 192 payments (48 late), 14 overdue unpaid, 90 feedback rows over 13 months, balances consistent
-- [ ] T7 S1 dashboard — route: TBD after T1-T6 (dashboard consumes their data)
+- [ ] T7 S1 dashboard — backend inline DONE (62870e7, `tests/test_dashboard.py` RED then 4 passed: `/api/v1/dashboard/resumen` staff, `/api/v1/dashboard/socio`); web+mobile UI delegated to agy together with T5
 
 ## Log
 
@@ -35,3 +35,4 @@ Branch: `feat/observaciones-docente` in SI2_backend_api, SI2_frontend_web, SI2_m
 - L2 (2026-11-20, user): "ok, vamos con eso" — accepted order: professor observations first, then banking features (deferral, prepayment, claims, reprogramming).
 - L3: `feat/seguro-desgravamen` fast-forwarded into local `main` (not pushed). Baseline: 134 backend tests fail on a fresh test DB with `NoResultFound` (missing reference seed), also failing on pre-merge `origin/main`.
 - L4: T1-T4 backend contracts: `/api/v1/feedback` (POST, /mias, list, /estadisticas); `/api/v1/reportes/cartera|cartera/export|mora/export` accept `producto_id, tipo_credito, oficial_id, desde, estado_mora` and echo `filtros`; `/api/v1/reportes/filtros` lists options; `/api/v1/socio/creditos` and `/cronograma` add `tipo_credito`, `tipo_amortizacion`, `producto`; new `/api/v1/socio/creditos/{id}/extracto` and `/extracto/export?formato=pdf|csv|html`.
+- L5: Finding for S1: role dashboards for socio/cajero/oficial/contador/asesor only showed user info (`shared/components/DashboardContent.jsx`), and `AdminDashboard.jsx` had 4 counters plus hardcoded fake activity ('Comité de Crédito #48', 'Auditoría Tenant R.L.').
