@@ -37,9 +37,9 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 
 - [x] T1 S1-S3 backend types + VIS + TEA/TEAC — route: inline (parent); commit ccce9c2; RED 28 → GREEN 33
 - [x] T2 S4 backend claims — route: inline (parent); commit 820bd1f; 12 tests GREEN
-- [ ] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state); RED (collection error) → 7 GREEN; full-suite comparison running
-- [ ] T4 S6 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`), from the contracts above; in progress
-- [ ] T5 S7 mobile — route: delegated to agy, after T4
+- [x] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state); commit 472c559; RED (collection error) → 7 GREEN; independent verifier running
+- [x] T4 S6 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); web commit d805112; build OK, oxlint exit 0 (21 pre-existing warnings)
+- [ ] T5 S7 mobile — route: delegated to agy, after T4; in progress
 
 ## Log
 
@@ -50,3 +50,5 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 - L5: T1 updated two existing tests whose expectation the request changes: `EMPRESARIAL` was asserted invalid (now `LEASING`), and the plan preview key set now includes `tea`, `teac`.
 - L6: T2 tests were written before the endpoints, but the model was added before the first run, so RED was not observed separately for T2.
 - L7: `REPROGRAMADA` is closed through `CUOTAS_CERRADAS` (`app/services/cobro_cuotas.py`) in payments, debt, arrears, alerts, notifications, socio views; chatbot arrears queries exclude it too (kept their existing `!= "PAGADO"` semantics otherwise). Money in the new rescheduling endpoints is serialized as two-decimal strings.
+- L8: Full suite branch vs main: only new failure caused by the change was `test_w34_mora_ignora_gracia_interna_en_previews_y_snapshot_payloads` (duck-typed credit without `numero_reprogramaciones`), fixed with getattr. `test_chat_socio_consulta_creditos_muestra_resumen_personal` failed once in the full run but passes alone and in its file (chatbot tests are order dependent; main has 17 chatbot failures).
+- L9: Web review fix: agy had duplicated UFV/rate VIS rules as blocking client checks with UFV hardcoded at 2.60; removed the blocking checks (backend validates), kept the preview labeled as referential.
