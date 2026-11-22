@@ -1329,3 +1329,41 @@ class EncuestaSatisfaccion(Base):
     )
 
     socio: Mapped["Socio"] = relationship()
+
+
+class Reclamo(Base):
+    """Customer claim at the Punto de Reclamo (Ley 393), escalable to ASFI."""
+
+    __tablename__ = "reclamo"
+    __table_args__ = (
+        UniqueConstraint("cooperativa_id", "numero_reclamo", name="uq_reclamo_cooperativa_numero"),
+        CheckConstraint("tipo IN ('CREDITO','AHORRO','CAJA','COBRO_INDEBIDO','ATENCION','OTRO')", name="chk_reclamo_tipo"),
+        CheckConstraint("canal IN ('MOVIL','VENTANILLA')", name="chk_reclamo_canal"),
+        CheckConstraint(
+            "estado IN ('REGISTRADO','EN_ATENCION','RESPONDIDO','CERRADO','ESCALADO_ASFI')", name="chk_reclamo_estado",
+        ),
+        Index("ix_reclamo_cooperativa_estado", "cooperativa_id", "estado"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    socio_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("socio.id"), nullable=False)
+    credito_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("credito.id"))
+    numero_reclamo: Mapped[str] = mapped_column(String(20), nullable=False)
+    tipo: Mapped[str] = mapped_column(String(20), nullable=False)
+    descripcion: Mapped[str] = mapped_column(Text, nullable=False)
+    canal: Mapped[str] = mapped_column(String(10), nullable=False)
+    estado: Mapped[str] = mapped_column(String(15), nullable=False, default="REGISTRADO", server_default="REGISTRADO")
+    fecha_registro = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_limite_respuesta = mapped_column(Date, nullable=False)
+    usuario_atencion_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    respuesta: Mapped[str | None] = mapped_column(Text)
+    procedente: Mapped[bool | None] = mapped_column(Boolean)
+    fecha_respuesta = mapped_column(TIMESTAMP(timezone=True))
+    conforme: Mapped[bool | None] = mapped_column(Boolean)
+    motivo_disconformidad: Mapped[str | None] = mapped_column(Text)
+    fecha_cierre = mapped_column(TIMESTAMP(timezone=True))
+    fecha_escalamiento = mapped_column(TIMESTAMP(timezone=True))
+
+    socio: Mapped["Socio"] = relationship()
+    usuario_atencion: Mapped["Usuario | None"] = relationship()

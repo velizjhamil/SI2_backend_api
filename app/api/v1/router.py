@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import admin, ahorros, auth, backups, caja, chatbot, cooperativas, creditos, dpf, socios_kyc, uif, socio, plan_cuentas, comprobantes, libros, estados_financieros, reportes, informes_asfi, verificacion_comprobantes, suscripciones, notificaciones, feedback, dashboard
+from app.api.v1.endpoints import admin, ahorros, auth, backups, caja, chatbot, cooperativas, creditos, dpf, socios_kyc, uif, socio, plan_cuentas, comprobantes, libros, estados_financieros, reportes, informes_asfi, verificacion_comprobantes, suscripciones, notificaciones, feedback, dashboard, reclamos
 
 api_router = APIRouter()
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -15,6 +15,8 @@ api_router.include_router(uif.router, prefix="/uif", tags=["uif"])
 api_router.include_router(dpf.router, prefix="/dpf", tags=["dpf"])
 api_router.include_router(creditos.router, prefix="/creditos", tags=["creditos"])
 api_router.include_router(socio.router, prefix="/socio", tags=["socio-autoservicio"])
+api_router.include_router(reclamos.socio_router, prefix="/socio", tags=["socio-autoservicio"])
+api_router.include_router(reclamos.router, prefix="/reclamos", tags=["reclamos"])
 api_router.include_router(plan_cuentas.router, prefix="/contabilidad", tags=["contabilidad-plan-cuentas"])
 api_router.include_router(comprobantes.router, prefix="/contabilidad", tags=["contabilidad-comprobantes"])
 api_router.include_router(libros.router, prefix="/contabilidad", tags=["contabilidad-libros"])
