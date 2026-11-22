@@ -18,6 +18,7 @@ router = APIRouter()
 SERVICIOS = ("CREDITO", "AHORRO", "CAJA", "ATENCION", "APP_MOVIL", "OTRO")
 ROLES_LECTURA = {"ADMINISTRADOR", "OFICIAL_CREDITO", "ASESOR_CREDITO", "CAJERO", "CONTADOR"}
 ULTIMOS_COMENTARIOS = 10
+Canal = Literal["WEB", "MOVIL"]
 
 
 class EncuestaIn(BaseModel):
@@ -25,7 +26,7 @@ class EncuestaIn(BaseModel):
     calificacion: int = Field(..., ge=1, le=5)
     recomendaria: int | None = Field(None, ge=0, le=10)
     comentario: str | None = Field(None, max_length=1000)
-    canal: Literal["WEB", "MOVIL"] = "WEB"
+    canal: Canal = "WEB"
 
     @field_validator("comentario")
     @classmethod
@@ -57,7 +58,7 @@ def _tenant_lectura(user: Usuario) -> int:
 
 
 def _filtrar(db: Session, tenant: int, servicio: str | None, calificacion: int | None,
-             desde: date | None, hasta: date | None) -> list[EncuestaSatisfaccion]:
+             desde: date | None, hasta: date | None, canal: str | None = None) -> list[EncuestaSatisfaccion]:
     if desde and hasta and desde > hasta:
         raise HTTPException(422, "desde no puede ser posterior a hasta")
     query = (select(EncuestaSatisfaccion).options(joinedload(EncuestaSatisfaccion.socio))
@@ -66,6 +67,8 @@ def _filtrar(db: Session, tenant: int, servicio: str | None, calificacion: int |
         query = query.where(EncuestaSatisfaccion.servicio == servicio)
     if calificacion:
         query = query.where(EncuestaSatisfaccion.calificacion == calificacion)
+    if canal:
+        query = query.where(EncuestaSatisfaccion.canal == canal)
     if desde:
         query = query.where(EncuestaSatisfaccion.fecha_creacion >= desde)
     if hasta:
@@ -116,17 +119,18 @@ def mis_calificaciones(socio: Socio = Depends(get_current_socio), db: Session = 
 
 @router.get("")
 def listar(servicio: str | None = ServicioQ, calificacion: int | None = Query(None, ge=1, le=5),
-           desde: date | None = None, hasta: date | None = None, limit: int = Query(200, ge=1, le=1000),
+           desde: date | None = None, hasta: date | None = None, canal: Canal | None = None,
+           limit: int = Query(200, ge=1, le=1000),
            user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = _filtrar(db, _tenant_lectura(user), servicio, calificacion, desde, hasta)
+    rows = _filtrar(db, _tenant_lectura(user), servicio, calificacion, desde, hasta, canal)
     return [_out(row, with_socio=True) for row in rows[:limit]]
 
 
 @router.get("/estadisticas")
 def estadisticas(servicio: str | None = ServicioQ, calificacion: int | None = Query(None, ge=1, le=5),
-                 desde: date | None = None, hasta: date | None = None,
+                 desde: date | None = None, hasta: date | None = None, canal: Canal | None = None,
                  user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = _filtrar(db, _tenant_lectura(user), servicio, calificacion, desde, hasta)
+    rows = _filtrar(db, _tenant_lectura(user), servicio, calificacion, desde, hasta, canal)
     ratings = [row.calificacion for row in rows]
     counts = Counter(ratings)
 

@@ -30,6 +30,18 @@ def test_response_deadline_is_five_business_days(inicio, esperado):
     assert sumar_dias_habiles(inicio, 5) == esperado
 
 
+@pytest.mark.parametrize("inicio,esperado", [
+    (date(2026, 10, 30), date(2026, 11, 9)),   # Fri; Mon Nov 2 (Todos Santos) skipped
+    (date(2026, 12, 21), date(2026, 12, 29)),  # Christmas Friday skipped
+    (date(2026, 2, 13), date(2026, 2, 24)),    # Carnival Monday/Tuesday (Feb 16-17) skipped
+    (date(2026, 4, 1), date(2026, 4, 9)),      # Good Friday (Apr 3) skipped
+    (date(2026, 6, 1), date(2026, 6, 9)),      # Corpus Christi (Thu Jun 4) skipped
+    (date(2026, 7, 31), date(2026, 8, 10)),    # Independence Day (Thu Aug 6) skipped
+])
+def test_business_days_skip_bolivian_national_holidays(inicio, esperado):
+    assert sumar_dias_habiles(inicio, 5) == esperado
+
+
 def _user(db, roles, coop_id, suffix, rol, label):
     user = models.Usuario(correo=f"rc-{label}-{suffix}@test.invalid", contrasena=hash_password("Password123"),
                           rol_id=roles[rol].id, cooperativa_id=coop_id, nombre=f"{label} {suffix}", estado="ACTIVO")

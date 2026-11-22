@@ -602,3 +602,29 @@ def test_socio_credit_statement_rejects_foreign_credit_and_reversed_dates(socio_
     assert reversed_range.status_code == 422
     assert foreign.status_code == 403
     assert missing.status_code == 404
+
+
+def test_credit_schedule_returns_credit_totals_without_rescheduled_installments(socio_case):
+    credit_id = socio_case["ids"]["credits"][0]
+    installment_id = socio_case["ids"]["installments"][0]
+    with SessionLocal() as db:
+        row = db.get(models.TablaAmortizacion, installment_id)
+        row.monto_capital, row.monto_interes = Decimal("400.00"), Decimal("100.00")
+        row.monto_seguro, row.monto_cuota_total = Decimal("7.25"), Decimal("507.25")
+        db.commit()
+
+    def totals():
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/socio/creditos/{credit_id}/cronograma", headers=auth(socio_case))
+        assert response.status_code == 200, response.text
+        body = response.json()
+        return {key: body[key] for key in ("total_capital", "total_interes", "total_seguro", "total_pagar")}
+
+    assert totals() == {"total_capital": "400.00", "total_interes": "100.00",
+                        "total_seguro": "7.25", "total_pagar": "507.25"}
+
+    with SessionLocal() as db:
+        db.get(models.TablaAmortizacion, installment_id).estado_pago = "REPROGRAMADA"
+        db.commit()
+    assert totals() == {"total_capital": "0.00", "total_interes": "0.00",
+                        "total_seguro": "0.00", "total_pagar": "0.00"}

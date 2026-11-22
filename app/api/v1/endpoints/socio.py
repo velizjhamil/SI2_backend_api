@@ -548,15 +548,18 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
             "estado": estado,
             "fecha_pago": fecha_pago_str,
         })
-    total_seguro = sum(
-        (Decimal(str(row.monto_seguro or 0)) for row in schedule if row.estado_pago != "REPROGRAMADA"),
-        Decimal("0.00"),
-    )
+    vigentes = [row for row in schedule if row.estado_pago != "REPROGRAMADA"]
+
+    def _total(field: str) -> Decimal:
+        return sum((Decimal(str(getattr(row, field) or 0)) for row in vigentes), Decimal("0.00"))
     return {"credito": {"id": credit.id, "numero_credito": credit.numero_credito,
             "producto": None if product is None else product.nombre, **_tipo_credito(credit, product),
             "moneda": None if currency is None else currency.codigo_iso,
             "estado": credit.estado, "saldo_pendiente": _money(Decimal(credit.saldo_pendiente))},
-        "total_seguro": _money(total_seguro),
+        "total_capital": _money(_total("monto_capital")),
+        "total_interes": _money(_total("monto_interes")),
+        "total_seguro": _money(_total("monto_seguro")),
+        "total_pagar": _money(_total("monto_cuota_total")),
         **_tasas_efectivas(credit, schedule),
         "cuotas": cuotas_out}
 

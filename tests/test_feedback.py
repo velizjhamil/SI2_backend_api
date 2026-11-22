@@ -163,3 +163,19 @@ def test_statistics_are_empty_without_feedback(client, case):
     assert data["total"] == 0 and data["promedio"] is None
     assert data["nps"]["score"] is None
     assert data["distribucion"] == {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+
+
+def test_staff_filters_feedback_and_statistics_by_channel(client, case):
+    _rate(client, case, "a", servicio="CREDITO", calificacion=5, canal="WEB")
+    _rate(client, case, "b", servicio="CAJA", calificacion=2, canal="MOVIL")
+
+    web = client.get("/api/v1/feedback", params={"canal": "WEB"}, headers=_h(case, "admin")).json()
+    assert [row["canal"] for row in web] == ["WEB"]
+    movil = client.get("/api/v1/feedback", params={"canal": "MOVIL"}, headers=_h(case, "admin")).json()
+    assert [row["canal"] for row in movil] == ["MOVIL"]
+
+    stats = client.get("/api/v1/feedback/estadisticas", params={"canal": "MOVIL"}, headers=_h(case, "admin")).json()
+    assert stats["total"] == 1 and float(stats["promedio"]) == 2.0
+
+    invalid = client.get("/api/v1/feedback", params={"canal": "FAX"}, headers=_h(case, "admin"))
+    assert invalid.status_code == 422
