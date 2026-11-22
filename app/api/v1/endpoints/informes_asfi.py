@@ -143,6 +143,8 @@ def calificacion_cartera(fecha_corte: date = Query(...), user: Usuario = Depends
             "porcentaje": _money(rate_pct), "base_prevision": _money(base),
             "prevision_especifica": _money(specific), "prevision_ciclica": _money(cyclic),
             "garantia_hipotecaria_aplicada": mortgage_applied,
+            "reprogramado": bool(getattr(credit, "numero_reprogramaciones", 0)),
+            "numero_reprogramaciones": getattr(credit, "numero_reprogramaciones", 0) or 0,
         })
         key = (category, currency_code)
         group = totals.setdefault(key, {"categoria": category, "moneda": currency_code,
@@ -242,6 +244,8 @@ def _debtors_data(db: Session, tenant: int, cutoff: date):
             "dias_mora": days,
             "categoria": category,
             "prevision": reserve,
+            "reprogramado": bool(getattr(credit, "numero_reprogramaciones", 0)),
+            "numero_reprogramaciones": getattr(credit, "numero_reprogramaciones", 0) or 0,
         })
     return {"fecha_corte": cutoff.isoformat(),
             "etiqueta": "Base para reporte a la CIC — formato interno; el layout oficial SCIP/CIC no está publicado en fuente verificable",

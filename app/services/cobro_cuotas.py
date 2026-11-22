@@ -7,6 +7,8 @@ from decimal import Decimal, ROUND_HALF_UP
 CENTAVO = Decimal("0.01")
 CIEN = Decimal("100")
 DIAS_ANIO = Decimal("360")
+# Installment states that no longer accrue debt: paid, or replaced by a rescheduled plan.
+CUOTAS_CERRADAS = frozenset({"PAGADA", "PAGADO", "REPROGRAMADA"})
 
 
 def calcular_mora(
@@ -42,7 +44,7 @@ def resumir_morosidad(
     """Summarize unpaid installments that have exceeded their grace period."""
     vencidas = []
     for cuota in cuotas:
-        if (cuota.estado_pago or "PENDIENTE") in {"PAGADA", "PAGADO"}:
+        if (cuota.estado_pago or "PENDIENTE") in CUOTAS_CERRADAS:
             continue
         calculo = calcular_mora(
             capital_cuota=cuota.monto_capital,

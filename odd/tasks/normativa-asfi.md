@@ -35,10 +35,10 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 
 ## Tasks
 
-- [ ] T1 S1-S3 backend types + VIS + TEA/TEAC — route: inline (parent)
-- [ ] T2 S4 backend claims — route: inline (parent)
-- [ ] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state)
-- [ ] T4 S6 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`), from the contracts above
+- [x] T1 S1-S3 backend types + VIS + TEA/TEAC — route: inline (parent); commit ccce9c2; RED 28 → GREEN 33
+- [x] T2 S4 backend claims — route: inline (parent); commit 820bd1f; 12 tests GREEN
+- [ ] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state); RED (collection error) → 7 GREEN; full-suite comparison running
+- [ ] T4 S6 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`), from the contracts above; in progress
 - [ ] T5 S7 mobile — route: delegated to agy, after T4
 
 ## Log
@@ -46,3 +46,7 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 - L1 (2026-11-21, user): "evaluemos lo siguiente, me dijeron que vea en el contexto boliviano: * hay reprogramacion de creditos o no * apelaciones del cliente * algun procedimiento con viviendas sociales * me dijeron que muestre cuanto paga en seguro, capital e interes * tipos de creditos" … "si, tengo que implementar todas" … "quiero que sepas que como ayudante tienes a agy, via herdrcli, entonces arranquemos y haz lo que debas"
 - L2: Payments close a whole installment (`creditos.py` cobrar_cuota sets PAGADA and lowers `saldo_pendiente` by its capital), so `saldo_pendiente` is the unpaid capital and unpaid installments have no payments; rescheduling marks them REPROGRAMADA instead of deleting (alertas reference installment ids).
 - L3: Codex is not running in Herdr this session; backend is written inline by the parent, web/mobile go to agy.
+- L4: Baseline on main (isolated test DB): `test_cobro_cuotas` debt-route 2 tests and `test_desembolso_credito` seed/attribution 2 tests already fail on main (environment data); not caused by this feature.
+- L5: T1 updated two existing tests whose expectation the request changes: `EMPRESARIAL` was asserted invalid (now `LEASING`), and the plan preview key set now includes `tea`, `teac`.
+- L6: T2 tests were written before the endpoints, but the model was added before the first run, so RED was not observed separately for T2.
+- L7: `REPROGRAMADA` is closed through `CUOTAS_CERRADAS` (`app/services/cobro_cuotas.py`) in payments, debt, arrears, alerts, notifications, socio views; chatbot arrears queries exclude it too (kept their existing `!= "PAGADO"` semantics otherwise). Money in the new rescheduling endpoints is serialized as two-decimal strings.

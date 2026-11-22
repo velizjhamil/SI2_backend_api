@@ -124,7 +124,7 @@ def contexto_cooperativa(db: Session, usuario: Usuario) -> dict:
         .join(Credito, Credito.id == TablaAmortizacion.credito_id)
         .where(
             TablaAmortizacion.fecha_vencimiento < hoy,
-            TablaAmortizacion.estado_pago != "PAGADO",
+            TablaAmortizacion.estado_pago.notin_(("PAGADO", "REPROGRAMADA")),
         )
     )
     if coop_id is not None:
@@ -136,7 +136,7 @@ def contexto_cooperativa(db: Session, usuario: Usuario) -> dict:
         .join(TablaAmortizacion, TablaAmortizacion.credito_id == Credito.id)
         .where(
             TablaAmortizacion.fecha_vencimiento < hoy,
-            TablaAmortizacion.estado_pago != "PAGADO",
+            TablaAmortizacion.estado_pago.notin_(("PAGADO", "REPROGRAMADA")),
         )
     )
     if coop_id is not None:
@@ -228,7 +228,7 @@ def contexto_socio(db: Session, usuario: Usuario) -> dict:
         .where(
             Credito.socio_id == socio.id,
             TablaAmortizacion.fecha_vencimiento < hoy,
-            TablaAmortizacion.estado_pago != "PAGADO",
+            TablaAmortizacion.estado_pago.notin_(("PAGADO", "REPROGRAMADA")),
         )
     )
     n_mora, monto_mora = db.execute(cuotas_mora).one()
@@ -238,7 +238,7 @@ def contexto_socio(db: Session, usuario: Usuario) -> dict:
         .join(Credito, Credito.id == TablaAmortizacion.credito_id)
         .where(
             Credito.socio_id == socio.id,
-            TablaAmortizacion.estado_pago != "PAGADO",
+            TablaAmortizacion.estado_pago.notin_(("PAGADO", "REPROGRAMADA")),
             TablaAmortizacion.fecha_vencimiento >= hoy,
         )
         .order_by(TablaAmortizacion.fecha_vencimiento.asc())

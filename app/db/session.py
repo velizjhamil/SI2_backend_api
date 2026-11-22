@@ -147,6 +147,11 @@ def init_db() -> None:
             "ALTER TABLE pago_cuota ADD COLUMN IF NOT EXISTS monto_seguro NUMERIC(12,2) NOT NULL DEFAULT 0.00"
         ))
 
+        # --- credit rescheduling counter (migration 039) ---
+        conn.execute(text(
+            "ALTER TABLE credito ADD COLUMN IF NOT EXISTS numero_reprogramaciones INT NOT NULL DEFAULT 0"
+        ))
+
         # --- ASFI credit types (migration 037): widen the check only once ---
         conn.execute(text("""
             DO $$

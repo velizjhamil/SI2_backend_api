@@ -25,7 +25,7 @@ _PROXIMA_CUOTA = """
     FROM tabla_amortizacion ta
     JOIN credito c ON c.id = ta.credito_id
     WHERE c.cooperativa_id = :tenant AND c.estado = 'VIGENTE'
-      AND COALESCE(ta.estado_pago, 'PENDIENTE') NOT IN ('PAGADO', 'PAGADA')
+      AND COALESCE(ta.estado_pago, 'PENDIENTE') NOT IN ('PAGADO', 'PAGADA', 'REPROGRAMADA')
     ORDER BY c.socio_id, ta.fecha_vencimiento, ta.numero_cuota
 """
 

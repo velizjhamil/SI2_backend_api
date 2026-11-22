@@ -610,6 +610,7 @@ class Credito(Base):
     # Database FK is installed by migration 017; no Transaccion ORM exists in this project.
     transaccion_desembolso_id: Mapped[int | None] = mapped_column(Integer)
     usuario_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    numero_reprogramaciones: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     fecha_creacion = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     solicitud: Mapped["SolicitudCredito"] = relationship()
@@ -1367,3 +1368,36 @@ class Reclamo(Base):
 
     socio: Mapped["Socio"] = relationship()
     usuario_atencion: Mapped["Usuario | None"] = relationship()
+
+
+class ReprogramacionCredito(Base):
+    """Rescheduling request of a disbursed credit (ASFI reprogramación) and its outcome."""
+
+    __tablename__ = "reprogramacion_credito"
+    __table_args__ = (
+        CheckConstraint("estado IN ('SOLICITADA','APROBADA','RECHAZADA')", name="chk_reprogramacion_estado"),
+        CheckConstraint("canal IN ('MOVIL','VENTANILLA')", name="chk_reprogramacion_canal"),
+        CheckConstraint("nuevo_plazo_meses > 0", name="chk_reprogramacion_plazo"),
+        Index("ix_reprogramacion_cooperativa_estado", "cooperativa_id", "estado"),
+        Index("ix_reprogramacion_credito", "credito_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    cooperativa_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("cooperativa.id"), nullable=False)
+    credito_id: Mapped[int] = mapped_column(Integer, ForeignKey("credito.id"), nullable=False)
+    estado: Mapped[str] = mapped_column(String(12), nullable=False, default="SOLICITADA", server_default="SOLICITADA")
+    canal: Mapped[str] = mapped_column(String(10), nullable=False)
+    motivo: Mapped[str] = mapped_column(Text, nullable=False)
+    nuevo_plazo_meses: Mapped[int] = mapped_column(Integer, nullable=False)
+    saldo_capital = mapped_column(Numeric(14, 2))
+    interes_diferido = mapped_column(Numeric(14, 2))
+    mora_condonada = mapped_column(Numeric(14, 2))
+    plazo_anterior: Mapped[int | None] = mapped_column(Integer)
+    cuotas_reprogramadas: Mapped[int | None] = mapped_column(Integer)
+    motivo_rechazo: Mapped[str | None] = mapped_column(Text)
+    usuario_solicitud_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    usuario_resolucion_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("usuario.id"))
+    fecha_solicitud = mapped_column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
+    fecha_resolucion = mapped_column(TIMESTAMP(timezone=True))
+
+    credito: Mapped["Credito"] = relationship()

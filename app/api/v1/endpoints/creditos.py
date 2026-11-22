@@ -33,7 +33,7 @@ from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secue
 from app.core.bitacora import registrar_accion
 from app.core.config import settings
 from app.services.amortizacion import calcular_cuota_inicial, calcular_tea, calcular_teac, generar_plan_pagos
-from app.services.cobro_cuotas import calcular_mora, resumir_morosidad
+from app.services.cobro_cuotas import CUOTAS_CERRADAS, calcular_mora, resumir_morosidad
 from app.services.scoring import score_application
 from app.services.credit_request_rules import (
     ESTADOS_SOLICITUD_EN_CURSO,
@@ -2169,7 +2169,8 @@ def _credito_detalle_out(credito: Credito) -> dict:
         },
         "proxima_cuota": None if pendiente is None else _cuota_credito_out(pendiente),
         "cuotas_pagadas": sum(row.estado_pago == "PAGADA" for row in cuotas),
-        "cuotas_totales": len(cuotas),
+        "cuotas_totales": sum(row.estado_pago != "REPROGRAMADA" for row in cuotas),
+        "numero_reprogramaciones": credito.numero_reprogramaciones or 0,
         "estado_mora": None if credito.mora is None else credito.mora.estado,
         "dias_de_retaso": None if credito.mora is None else credito.mora.dias_de_retaso,
         "cronograma": [_cuota_credito_out(row) for row in cuotas],
@@ -2205,7 +2206,7 @@ def _credito_lista_out(credito: Credito) -> dict:
         "monto_aprobado", "saldo_pendiente", "tasa_interes", "plazo_meses",
         "tipo_amortizacion", "fecha_desembolso", "modalidad_desembolso",
         "cuenta_desembolso", "solicitud", "proxima_cuota", "cuotas_pagadas",
-        "cuotas_totales", "estado_mora", "dias_de_retaso",
+        "cuotas_totales", "estado_mora", "dias_de_retaso", "numero_reprogramaciones",
     )}
 
 
@@ -2406,7 +2407,7 @@ def _deuda_cuota_out(credito: Credito, fecha: date | None = None) -> dict:
     cuota = next(
         (
             row for row in sorted(credito.cronograma, key=lambda row: row.numero_cuota)
-            if (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+            if (row.estado_pago or "PENDIENTE") not in CUOTAS_CERRADAS
         ),
         None,
     )
@@ -2576,7 +2577,7 @@ def cobrar_cuota(
     cuota = next(
         (
             row for row in sorted(credito.cronograma, key=lambda row: row.numero_cuota)
-            if (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+            if (row.estado_pago or "PENDIENTE") not in CUOTAS_CERRADAS
         ),
         None,
     )
@@ -2670,7 +2671,7 @@ def cobrar_cuota(
     credito.saldo_pendiente = max(credito.saldo_pendiente - cuota.monto_capital, Decimal("0.00"))
     restantes = [
         row for row in credito.cronograma
-        if row.id != cuota.id and (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}
+        if row.id != cuota.id and (row.estado_pago or "PENDIENTE") not in CUOTAS_CERRADAS
     ]
     if not restantes:
         credito.estado = "CANCELADO"

@@ -867,6 +867,7 @@ class CreditoOut(BaseModel):
     cuotas_totales: int
     estado_mora: Literal["AL_DIA", "EN_MORA"] | None = None
     dias_de_retaso: int | None = None
+    numero_reprogramaciones: int = 0
 
 
 class CreditoDetalleOut(CreditoOut):

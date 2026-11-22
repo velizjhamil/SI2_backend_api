@@ -11,6 +11,7 @@ from app.api.v1.deps import get_current_socio, get_db, require_feature
 from app.core.config import settings
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
+from app.services.cobro_cuotas import CUOTAS_CERRADAS
 from app.services.amortizacion import calcular_tea, calcular_teac, generar_plan_pagos
 from app.services.credit_request_rules import (
     cancel_credit_request,
@@ -315,7 +316,7 @@ def listar_creditos_socio(socio: Socio = Depends(get_current_socio), db: Session
     output = []
     for credit in rows:
         schedule = sorted(credit.cronograma, key=lambda row: row.numero_cuota)
-        next_due = next((row for row in schedule if (row.estado_pago or "PENDIENTE") not in {"PAGADA", "PAGADO"}), None)
+        next_due = next((row for row in schedule if (row.estado_pago or "PENDIENTE") not in CUOTAS_CERRADAS), None)
         product = credit.producto or credit.solicitud.producto
         currency = credit.moneda or credit.solicitud.moneda
         output.append({
@@ -516,6 +517,8 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
         mora_val = Decimal("0.00")
         if is_paid:
             estado = "PAGADA"
+        elif row.estado_pago == "REPROGRAMADA":
+            estado = "REPROGRAMADA"
         elif row.fecha_vencimiento < today:
             estado = "VENCIDA"
             mora_res = calcular_mora(

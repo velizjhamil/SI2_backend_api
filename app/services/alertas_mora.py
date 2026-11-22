@@ -3,12 +3,14 @@
 from datetime import date
 from decimal import Decimal
 
+from app.services.cobro_cuotas import CUOTAS_CERRADAS
+
 
 def construir_candidatos_alerta(cuotas, fecha: date, *, dias_gracia_mora: int, en_mora: bool):
     """Return one active-condition candidate per unpaid installment and risk signal."""
     candidatos = []
     for cuota in cuotas:
-        if (cuota.estado_pago or "PENDIENTE") in {"PAGADA", "PAGADO"}:
+        if (cuota.estado_pago or "PENDIENTE") in CUOTAS_CERRADAS:
             continue
         diferencia = (cuota.fecha_vencimiento - fecha).days
         if 0 <= diferencia <= 5:
