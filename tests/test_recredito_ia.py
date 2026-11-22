@@ -151,6 +151,7 @@ def recredito_case():
                 db.query(models.SolicitudCredito).filter(models.SolicitudCredito.id.in_(ids["requests"])).delete(synchronize_session=False)
             if ids.get("credit_evals"): db.query(models.EvaluacionCrediticia).filter(models.EvaluacionCrediticia.id.in_(ids["credit_evals"])).delete(synchronize_session=False)
             if ids["evals"]: db.query(models.EvaluacionCampo).filter(models.EvaluacionCampo.id.in_(ids["evals"])).delete(synchronize_session=False)
+            if ids["coops"]: db.query(models.Notificacion).filter(models.Notificacion.cooperativa_id.in_(ids["coops"])).delete(synchronize_session=False)
             if ids["socios"]: db.query(models.Socio).filter(models.Socio.id.in_(ids["socios"])).delete(synchronize_session=False)
             if ids["product"]: db.query(models.ProductoCredito).filter(models.ProductoCredito.id==ids["product"]).delete(synchronize_session=False)
             audit_scope = []
@@ -404,3 +405,45 @@ def test_current_arrears_on_another_credit_excludes_candidate_recredit(recredito
         db.add(models.Morosidad(credito_id=sibling.id,dias_de_retaso=6,monto_penalizado=Decimal("1"),estado="EN_MORA"));db.commit()
     result=case["client"].post("/api/v1/creditos/recreditos/generar",headers=_auth(case["tokens"][("main","OFICIAL_CREDITO")]))
     assert result.status_code==200 and result.json()["generadas"]==0
+
+
+def _link_member_account(case, member_row):
+    with SessionLocal() as db:
+        rol = db.query(models.Rol).filter_by(nombre="SOCIO").one()
+        user = models.Usuario(correo=f"rec-socio-{uuid4().hex[:8]}@test.invalid", contrasena=hash_password("Password123"),
+                              rol_id=rol.id, cooperativa_id=member_row["coop"], nombre="Socio App", estado="ACTIVO")
+        db.add(user); db.flush(); case["ids"]["users"].append(user.id)
+        db.get(models.Socio, member_row["socio"]).usuario_id = user.id
+        db.commit()
+        return user.id
+
+
+def test_high_risk_prediction_excludes_member_from_recredit_offers(recredito_case, monkeypatch):
+    import app.api.v1.endpoints.creditos as creditos_module
+    case = recredito_case; member = case["member"](); case["credit"](member)
+    monkeypatch.setattr(creditos_module, "predecir_mora",
+                        lambda features: {"probabilidad_mora": Decimal("0.60"), "nivel_riesgo": "ALTO", "version_modelo": "test"})
+    response = case["client"].post("/api/v1/creditos/recreditos/generar", headers=_auth(case["tokens"][("main", "OFICIAL_CREDITO")]))
+    assert response.status_code == 200, response.text
+    assert response.json()["generadas"] == 0 and response.json()["omitidas"] >= 1
+    with SessionLocal() as db:
+        assert db.query(models.OfertaRecredito).filter_by(socio_id=member["socio"]).count() == 0
+
+
+def test_new_recredit_offer_notifies_member_inbox(recredito_case):
+    case = recredito_case; member = case["member"](); case["credit"](member)
+    user_id = _link_member_account(case, member)
+    response = case["client"].post("/api/v1/creditos/recreditos/generar", headers=_auth(case["tokens"][("main", "OFICIAL_CREDITO")]))
+    assert response.status_code == 200 and response.json()["generadas"] == 1, response.text
+    offer = response.json()["ofertas"][0]; case["ids"]["offers"].append(offer["id"])
+
+    token, _ = create_access_token(str(user_id), "SOCIO", member["coop"])
+    inbox = case["client"].get("/api/v1/notificaciones/mias", headers=_auth(token))
+    assert inbox.status_code == 200, inbox.text
+    rows = inbox.json()
+    items = rows if isinstance(rows, list) else rows.get("items", rows.get("notificaciones", []))
+    assert len(items) == 1
+    item = items[0]
+    text_blob = " ".join(str(v) for v in item.values())
+    assert "re-crédito" in text_blob.lower()
+    assert "1500" in text_blob.replace(",", "").replace(".00", "")
