@@ -166,7 +166,8 @@ def test_preview_returns_new_plan_without_changing_anything(client, case):
 @needs_db
 def test_request_validations(client, case):
     assert _solicitar(client, case, plazo=37).status_code == 400
-    assert _solicitar(client, case, plazo=0).status_code == 422
+    zero = _solicitar(client, case, plazo=0)
+    assert zero.status_code == 400 and zero.json()["detail"] == "El nuevo plazo debe ser de al menos 1 mes"
     assert _solicitar(client, case, who="cajero").status_code == 403
     assert _solicitar(client, case, who="other_admin").status_code == 404
     created = _solicitar(client, case)
@@ -177,6 +178,9 @@ def test_request_validations(client, case):
 
 @needs_db
 def test_approval_reschedules_unpaid_installments(client, case):
+    assert client.post("/api/v1/creditos/mora/actualizar", headers=_h(case, "admin")).status_code == 200
+    with SessionLocal() as db:
+        assert db.query(models.Morosidad).filter_by(credito_id=case["credito_id"]).one().estado == "EN_MORA"
     request_id = _solicitar(client, case).json()["id"]
     pending = client.get("/api/v1/creditos/reprogramaciones?estado=SOLICITADA", headers=_h(case, "admin"))
     assert [row["id"] for row in pending.json()] == [request_id]
@@ -204,6 +208,17 @@ def test_approval_reschedules_unpaid_installments(client, case):
     detail = client.get(f"/api/v1/creditos/creditos/{case['credito_id']}", headers=_h(case, "admin")).json()
     assert detail["numero_reprogramaciones"] == 1 and detail["cuotas_totales"] == 19
     assert detail["proxima_cuota"]["numero"] == 13
+    assert detail["estado_mora"] == "AL_DIA" and detail["dias_de_retaso"] == 0
+    with SessionLocal() as db:
+        seguro_vigente = db.execute(text("""SELECT sum(monto_seguro) FROM tabla_amortizacion
+                                            WHERE credito_id = :c AND estado_pago <> 'REPROGRAMADA'"""),
+                                    {"c": case["credito_id"]}).scalar_one()
+    assert Decimal(str(detail["total_seguro"])) == seguro_vigente
+    socio_schedule = client.get(f"/api/v1/socio/creditos/{case['credito_id']}/cronograma", headers=_h(case, "socio"))
+    assert socio_schedule.status_code == 200, socio_schedule.text
+    assert Decimal(socio_schedule.json()["total_seguro"]) == seguro_vigente
+    estados = [row["estado"] for row in socio_schedule.json()["cuotas"]]
+    assert estados.count("REPROGRAMADA") == 11
     debt = client.get(f"/api/v1/creditos/creditos/{case['credito_id']}/deuda", headers=_h(case, "admin"))
     assert debt.status_code == 200 and debt.json()["cuota"]["numero"] == 13
     history = client.get(_url(case), headers=_h(case, "oficial")).json()

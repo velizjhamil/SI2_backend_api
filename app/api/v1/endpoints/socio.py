@@ -549,7 +549,8 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
             "fecha_pago": fecha_pago_str,
         })
     total_seguro = sum(
-        (Decimal(str(row.monto_seguro or 0)) for row in schedule), Decimal("0.00")
+        (Decimal(str(row.monto_seguro or 0)) for row in schedule if row.estado_pago != "REPROGRAMADA"),
+        Decimal("0.00"),
     )
     return {"credito": {"id": credit.id, "numero_credito": credit.numero_credito,
             "producto": None if product is None else product.nombre, **_tipo_credito(credit, product),
@@ -621,7 +622,7 @@ def _extracto_credito(db: Session, socio: Socio, credito_id: int, desde: date | 
         "pagos": rows,
         "totales": {**{key: _money(value) for key, value in totals.items()},
                     "total": _money(sum(totals.values(), Decimal("0.00"))), "pagos": len(rows)},
-        "resumen": {"cuotas_total": len(cuotas),
+        "resumen": {"cuotas_total": sum(1 for row in cuotas if row["estado"] != "REPROGRAMADA"),
                     "cuotas_pagadas": sum(1 for row in cuotas if row["estado"] == "PAGADA"),
                     "cuotas_vencidas": sum(1 for row in cuotas if row["estado"] == "VENCIDA"),
                     "cuotas_pendientes": sum(1 for row in cuotas if row["estado"] == "PENDIENTE"),

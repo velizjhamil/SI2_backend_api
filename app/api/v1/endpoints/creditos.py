@@ -2175,7 +2175,8 @@ def _credito_detalle_out(credito: Credito) -> dict:
         "dias_de_retaso": None if credito.mora is None else credito.mora.dias_de_retaso,
         "cronograma": [_cuota_credito_out(row) for row in cuotas],
         "total_seguro": sum(
-            (Decimal(str(row.monto_seguro or 0)) for row in cuotas), Decimal("0.00")
+            (Decimal(str(row.monto_seguro or 0)) for row in cuotas if row.estado_pago != "REPROGRAMADA"),
+            Decimal("0.00"),
         ),
         **_tasas_efectivas_credito(credito, cuotas),
         "transaccion_desembolso_id": credito.transaccion_desembolso_id,

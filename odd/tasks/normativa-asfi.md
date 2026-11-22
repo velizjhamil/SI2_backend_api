@@ -37,7 +37,7 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 
 - [x] T1 S1-S3 backend types + VIS + TEA/TEAC — route: inline (parent); commit ccce9c2; RED 28 → GREEN 33
 - [x] T2 S4 backend claims — route: inline (parent); commit 820bd1f; 12 tests GREEN
-- [x] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state); commit 472c559; RED (collection error) → 7 GREEN; independent verifier running
+- [x] T3 S5 backend rescheduling — route: inline (parent); Risk item 1 (changes stored installment state); commits 472c559 + verifier fixes; RED (collection error) → 7 GREEN; verifier B1 fixed
 - [x] T4 S6 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); web commit d805112; build OK, oxlint exit 0 (21 pre-existing warnings)
 - [ ] T5 S7 mobile — route: delegated to agy, after T4; in progress
 
@@ -52,3 +52,5 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 - L7: `REPROGRAMADA` is closed through `CUOTAS_CERRADAS` (`app/services/cobro_cuotas.py`) in payments, debt, arrears, alerts, notifications, socio views; chatbot arrears queries exclude it too (kept their existing `!= "PAGADO"` semantics otherwise). Money in the new rescheduling endpoints is serialized as two-decimal strings.
 - L8: Full suite branch vs main: only new failure caused by the change was `test_w34_mora_ignora_gracia_interna_en_previews_y_snapshot_payloads` (duck-typed credit without `numero_reprogramaciones`), fixed with getattr. `test_chat_socio_consulta_creditos_muestra_resumen_personal` failed once in the full run but passes alone and in its file (chatbot tests are order dependent; main has 17 chatbot failures).
 - L9: Web review fix: agy had duplicated UFV/rate VIS rules as blocking client checks with UFV hardcoded at 2.60; removed the blocking checks (backend validates), kept the preview labeled as referential.
+- L10: Independent verifier on S1-S5: S1-S4 PASS, S5 PARTIAL with blocker B1 (approval left the cached `Morosidad` record EN_MORA). One correction batch: approval refreshes arrears via `_actualizar_morosidad_credito`; `total_seguro` (staff detail, socio schedule) and socio `cuotas_total` exclude REPROGRAMADA (insurance was counted twice); `nuevo_plazo_meses < 1` answers 400 "El nuevo plazo debe ser de al menos 1 mes" per S5. RED observed for all three, then GREEN; affected suites: 235 passed, only the 4 known main-baseline failures.
+- L11: Open business notes from the verifier (not changed, need user confirmation): insurance of overdue rescheduled installments is not deferred (forgiven); interest between the last due date and the approval date is not charged (new plan starts today); credit-detail TEAC after rescheduling is an approximation.

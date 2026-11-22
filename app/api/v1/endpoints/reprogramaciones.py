@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app.api.v1.deps import get_current_socio, get_current_user, get_db
 from app.core.bitacora import registrar_accion
 from app.models.models import Credito, ReprogramacionCredito, SolicitudCredito, Socio, TablaAmortizacion, Usuario
+from app.api.v1.endpoints.creditos import _actualizar_morosidad_credito
 from app.schemas.schemas import MonedaOut
 from app.services.cobro_cuotas import CUOTAS_CERRADAS
 from app.services.reprogramacion import plan_reprogramacion
@@ -29,7 +30,7 @@ def _texto_obligatorio(value: str, mensaje: str) -> str:
 
 
 class PlazoIn(BaseModel):
-    nuevo_plazo_meses: int = Field(gt=0)
+    nuevo_plazo_meses: int
 
 
 class ReprogramacionIn(PlazoIn):
@@ -114,6 +115,8 @@ def _validar_reprogramable(credito: Credito, nuevo_plazo_meses: int) -> None:
     producto = _producto(credito)
     if producto is None:
         raise HTTPException(409, "El crédito no tiene producto crediticio")
+    if nuevo_plazo_meses < 1:
+        raise HTTPException(400, "El nuevo plazo debe ser de al menos 1 mes")
     if nuevo_plazo_meses > producto.plazo_max_meses:
         raise HTTPException(400, f"El nuevo plazo no puede superar {producto.plazo_max_meses} meses")
 
@@ -243,6 +246,10 @@ def aprobar_reprogramacion(reprogramacion_id: int, request: Request, usuario: Us
     conservadas = sum(cuota.estado_pago != "REPROGRAMADA" for cuota in credito.cronograma)
     credito.plazo_meses = conservadas + row.nuevo_plazo_meses
     credito.numero_reprogramaciones = (credito.numero_reprogramaciones or 0) + 1
+    # Refresh the cached arrears record: the overdue installments are now closed.
+    db.flush()
+    db.expire(credito, ["cronograma"])
+    _actualizar_morosidad_credito(db, credito, date.today())
 
     row.estado = "APROBADA"
     row.saldo_capital = result["saldo_capital"]
