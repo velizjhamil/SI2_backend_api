@@ -39,8 +39,8 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 - [x] T1 S1-S3 backend types + VIS + TEA/TEAC — route: inline (parent); commit ccce9c2; RED 28 → GREEN 33
 - [x] T2 S4 backend claims (reopened L12: deadline extension) — route: inline (parent); commits 820bd1f + L12; RED 3 → 15 GREEN
 - [x] T3 S5 backend rescheduling (reopened L12: accrued interest + deferred insurance; RED 4 → 8 GREEN) — route: inline (parent); Risk item 1 (changes stored installment state); commits 472c559 + verifier fixes; RED (collection error) → 7 GREEN; verifier B1 fixed
-- [ ] T4 S6 web (reopened L12: extension action, new preview fields) — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); web commit d805112; build OK, oxlint exit 0 (21 pre-existing warnings)
-- [ ] T5 S7 mobile — route: delegated to agy, after T4; in progress
+- [x] T4 S6 web (reopened L12: extension action, new preview fields; done) — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); web commit d805112; build OK, oxlint exit 0 (21 pre-existing warnings)
+- [x] T5 S7 mobile — route: delegated to agy; commits f878595 + L12 follow-up; flutter analyze clean, flutter test 249 passed, 1 live-API test needs a running server
 
 ## Log
 
@@ -57,3 +57,4 @@ Migrations are `.sql` files in `migrations/` (run in Supabase) and are mirrored 
 - L11: Open business notes from the verifier (not changed, need user confirmation): insurance of overdue rescheduled installments is not deferred (forgiven); interest between the last due date and the approval date is not charged (new plan starts today); credit-detail TEAC after rescheduling is an approximation.
 - L12 (2026-11-22, user): "ok, hazlo asi" — accepting: charge the interest accrued until the approval date, defer the overdue installments' insurance into the first new installment, and add the claim-deadline extension of RNSF Libro 4° Art. 3 (verified text: 5 business days, extendable to 10 with notice to the client, then up to 2 more extensions of 5 business days with notice to ASFI). Reopens T2, T3, T4.
 - L13: L12 backend done: affected suites 239 passed, only the 4 known main-baseline failures. Migration 040 adds the claim-extension and rescheduling-accrual columns.
+- L14: L12 web and mobile done by agy, checked by the parent: web build OK, oxlint exit 0; mobile analyze clean, full flutter test 249 passed (only chatbot_api_real_test, which needs a live server, fails). Feature complete on the three branches; push/PR/merge are the user's decision.
