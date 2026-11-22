@@ -48,6 +48,40 @@ def calcular_cuota_inicial(
         return _redondear_monto(cuota)
 
 
+def calcular_tea(tasa_anual: Decimal) -> Decimal:
+    """Effective annual rate (%) of a nominal annual rate compounded monthly."""
+    with localcontext() as context:
+        context.prec = 32
+        tea = ((Decimal(1) + _tasa_mensual(Decimal(tasa_anual))) ** 12 - Decimal(1)) * _CIEN
+        return _redondear_monto(tea)
+
+
+def calcular_teac(monto: Decimal, cuotas: list[Decimal]) -> Decimal:
+    """Annualized internal rate of return (%) the client pays, insurance included."""
+    with localcontext() as context:
+        context.prec = 32
+        monto = Decimal(monto)
+
+        def valor_presente(tasa: Decimal) -> Decimal:
+            factor = Decimal(1) + tasa
+            return sum(
+                (Decimal(cuota) / factor ** (numero + 1) for numero, cuota in enumerate(cuotas)),
+                Decimal(0),
+            ) - monto
+
+        if valor_presente(Decimal(0)) <= 0:
+            return Decimal("0.00")
+        bajo, alto = Decimal(0), Decimal(1)
+        for _ in range(120):
+            medio = (bajo + alto) / 2
+            if valor_presente(medio) > 0:
+                bajo = medio
+            else:
+                alto = medio
+        teac = ((Decimal(1) + bajo) ** 12 - Decimal(1)) * _CIEN
+        return _redondear_monto(teac)
+
+
 def _sumar_meses(fecha: date, meses: int, dia_ancla: int) -> date:
     total_meses = fecha.year * 12 + (fecha.month - 1) + meses
     year, month_index = divmod(total_meses, 12)
@@ -134,4 +168,6 @@ def generar_plan_pagos(
         "total_interes": total_interes,
         "total_seguro": total_seguro,
         "total_pagar": total_pagar,
+        "tea": calcular_tea(tasa_anual),
+        "teac": calcular_teac(monto, [row["cuota"] for row in cuotas]),
     }

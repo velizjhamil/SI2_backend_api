@@ -11,8 +11,10 @@ MORA_LIMITS = {
     "MICROCREDITO": (5, 30, 55, 75, 90),
     "MICROCREDITO_AGROPECUARIO": (40, 60, 105, 155, 180),
 }
-VIVIENDA_TYPES = {"VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA"}
-MICRO_TYPES = {"MICROCREDITO", "MICROCREDITO_AGROPECUARIO"}
+VIVIENDA_TYPES = {"VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA", "VIVIENDA_SOCIAL"}
+# Business and SME credits classified by days in arrears share the microcredit
+# schedule and reserve columns: an explicit interpretation of the RNSF tables.
+MICRO_TYPES = {"MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "EMPRESARIAL", "PYME"}
 
 # RNSF Libro 3 Título II Capítulo IV Sección 3 Art. 1, Circular ASFI/954/26
 # (06/2026). Values are percentages, keyed by category/currency/product column.
@@ -47,7 +49,7 @@ def categoria_por_mora(tipo_credito_asfi: str | None, dias_mora: int) -> str:
         schedule = MORA_LIMITS["VIVIENDA"]
     elif tipo_credito_asfi == "MICROCREDITO_AGROPECUARIO":
         schedule = MORA_LIMITS["MICROCREDITO_AGROPECUARIO"]
-    elif tipo_credito_asfi in {"MICROCREDITO", "CONSUMO"}:
+    elif tipo_credito_asfi in {"MICROCREDITO", "EMPRESARIAL", "PYME", "CONSUMO"}:
         # Consumption uses the Art. 8.1 microcredit schedule: an explicit interpretation.
         schedule = MORA_LIMITS["MICROCREDITO"]
     else:
@@ -72,7 +74,8 @@ def porcentaje_prevision_especifica(categoria: str, tipo_credito_asfi: str,
     if tipo_credito_asfi in MICRO_TYPES:
         column = ("MICRO_PRODUCTIVO" if sector_productivo else "MICRO_NO_PRODUCTIVO") if currency_group == "MN" else "MICRO"
     elif tipo_credito_asfi in VIVIENDA_TYPES:
-        column = tipo_credito_asfi
+        # Social housing (VIS) is mortgage housing credit for the reserve table.
+        column = "VIVIENDA_HIPOTECARIA" if tipo_credito_asfi == "VIVIENDA_SOCIAL" else tipo_credito_asfi
     elif tipo_credito_asfi == "CONSUMO":
         column = "CONSUMO"
     else:

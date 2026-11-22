@@ -147,6 +147,24 @@ def init_db() -> None:
             "ALTER TABLE pago_cuota ADD COLUMN IF NOT EXISTS monto_seguro NUMERIC(12,2) NOT NULL DEFAULT 0.00"
         ))
 
+        # --- ASFI credit types (migration 037): widen the check only once ---
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'chk_producto_credito_tipo_asfi'
+                      AND pg_get_constraintdef(oid) LIKE '%VIVIENDA_SOCIAL%'
+                ) THEN
+                    ALTER TABLE producto_credito DROP CONSTRAINT IF EXISTS chk_producto_credito_tipo_asfi;
+                    ALTER TABLE producto_credito ADD CONSTRAINT chk_producto_credito_tipo_asfi CHECK (
+                        tipo_credito_asfi IS NULL OR tipo_credito_asfi IN (
+                            'EMPRESARIAL','PYME','MICROCREDITO','MICROCREDITO_AGROPECUARIO','CONSUMO',
+                            'VIVIENDA_HIPOTECARIA','VIVIENDA_SIN_GARANTIA','VIVIENDA_SOCIAL'));
+                END IF;
+            END $$
+        """))
+
         # --- solicitud_credito: comité y canal de origen móvil ---
         conn.execute(text(
             "ALTER TABLE solicitud_credito ADD COLUMN IF NOT EXISTS ronda_comite INT NOT NULL DEFAULT 0"

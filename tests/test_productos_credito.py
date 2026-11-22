@@ -243,7 +243,7 @@ def test_product_create_normalizes_code_validates_and_audits(client):
         assert product["tipo_credito_asfi"] == "CONSUMO"
         assert product["sector_productivo"] is False
 
-        invalid_classification = dict(body, codigo="INVALID-ASFI", tipo_credito_asfi="EMPRESARIAL")
+        invalid_classification = dict(body, codigo="INVALID-ASFI", tipo_credito_asfi="LEASING")
         invalid_response = client.post(
             "/api/v1/creditos/productos", json=invalid_classification,
             headers=_auth(admin["token"]),
@@ -326,7 +326,7 @@ def test_product_partial_update_state_and_audit(client):
         assert classified.json()["sector_productivo"] is True
         invalid_classification = client.put(
             f"/api/v1/creditos/productos/{product_id}",
-            json={"tipo_credito_asfi": "EMPRESARIAL"},
+            json={"tipo_credito_asfi": "LEASING"},
             headers=_auth(admin["token"]),
         )
         assert invalid_classification.status_code == 422

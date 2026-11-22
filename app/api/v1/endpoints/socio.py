@@ -11,16 +11,17 @@ from app.api.v1.deps import get_current_socio, get_db, require_feature
 from app.core.config import settings
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
-from app.services.amortizacion import generar_plan_pagos
+from app.services.amortizacion import calcular_tea, calcular_teac, generar_plan_pagos
 from app.services.credit_request_rules import (
     cancel_credit_request,
     has_in_progress_request,
     requires_field_evaluation,
     validate_base_credit_request,
+    validate_vivienda_social,
 )
 from app.models.models import CuentaAhorro, Credito, DepositoPlazoFijo, DPFCronograma, Moneda, OfertaRecredito, ProductoCredito, Socio, SolicitudCredito, TablaAmortizacion, Usuario
 from app.models.models import ComprobanteTransaccion
-from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut
+from app.schemas.schemas import DeudaCuotaOut, PagoCuotaIn, PagoOut, ViviendaSocialIn
 from app.services.report_exports import DOCUMENT_FORMATS, EXPORT_FORMAT_PATTERN, report_response
 
 router = APIRouter()
@@ -48,6 +49,7 @@ class SolicitudMovilCreate(BaseModel):
     destino: str
     destino_detalle: str | None = None
     datos_declarados: DatosDeclarados
+    vivienda_social: ViviendaSocialIn | None = None
 
 
 class SolicitudMovilCancel(BaseModel):
@@ -67,6 +69,10 @@ def crear_solicitud_movil(
         raise HTTPException(status_code=404, detail="Producto crediticio no encontrado")
     validate_base_credit_request(product, monto=body.monto, plazo_meses=body.plazo_meses,
         destino=body.destino, destino_detalle=body.destino_detalle)
+    vivienda_social = validate_vivienda_social(product, body.vivienda_social, product.tasa_interes_anual)
+    declarados = body.datos_declarados.model_dump(mode="json")
+    if vivienda_social is not None:
+        declarados["vivienda_social"] = vivienda_social
     if has_in_progress_request(db, socio.id):
         raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
     number = _siguiente_secuencia(db, socio.cooperativa_id, "SOLICITUD_CREDITO")
@@ -76,7 +82,7 @@ def crear_solicitud_movil(
         numero_solicitud=f"SOL-{number:06d}", destino=body.destino,
         destino_detalle=(body.destino_detalle or "").strip() or None,
         cooperativa_id=socio.cooperativa_id, canal_origen="MOVIL",
-        datos_declarados=body.datos_declarados.model_dump(mode="json"))
+        datos_declarados=declarados)
     db.add(row); db.flush()
     registrar_accion(db, accion="REGISTRAR_SOLICITUD", modulo="CREDITOS",
         usuario_id=socio.usuario_id, cooperativa_id=socio.cooperativa_id,
@@ -183,6 +189,8 @@ def simular_credito_socio(
         "total_intereses": _money(plan["total_interes"]),
         "total_seguro": _money(plan["total_seguro"]),
         "total_a_pagar": _money(plan["total_pagar"]),
+        "tea": _money(plan["tea"]),
+        "teac": _money(plan["teac"]),
         "cronograma": [{"numero": row["numero"], "capital": _money(row["capital"]),
             "interes": _money(row["interes"]), "seguro": _money(row["seguro"]),
             "cuota": _money(row["cuota"]),
@@ -545,7 +553,20 @@ def cronograma_credito_socio(credito_id: int, socio: Socio = Depends(get_current
             "moneda": None if currency is None else currency.codigo_iso,
             "estado": credit.estado, "saldo_pendiente": _money(Decimal(credit.saldo_pendiente))},
         "total_seguro": _money(total_seguro),
+        **_tasas_efectivas(credit, schedule),
         "cuotas": cuotas_out}
+
+
+def _tasas_efectivas(credit, schedule) -> dict:
+    """TEA and TEAC of a disbursed credit, ignoring rescheduled installments."""
+    if credit.tasa_interes is None:
+        return {"tea": None, "teac": None}
+    vigentes = [row for row in schedule if row.estado_pago != "REPROGRAMADA"]
+    teac = None
+    if vigentes and credit.monto_aprobado is not None:
+        teac = _money(calcular_teac(Decimal(credit.monto_aprobado),
+                                    [Decimal(row.monto_cuota_total) for row in vigentes]))
+    return {"tea": _money(calcular_tea(Decimal(credit.tasa_interes))), "teac": teac}
 
 
 def _tipo_credito(credit, product) -> dict:

@@ -365,7 +365,8 @@ class ProductoCredito(Base):
         CheckConstraint("dias_gracia_mora >= 0", name="chk_producto_credito_gracia"),
         CheckConstraint(
             "tipo_credito_asfi IS NULL OR tipo_credito_asfi IN "
-            "('MICROCREDITO','MICROCREDITO_AGROPECUARIO','CONSUMO','VIVIENDA_HIPOTECARIA','VIVIENDA_SIN_GARANTIA')",
+            "('EMPRESARIAL','PYME','MICROCREDITO','MICROCREDITO_AGROPECUARIO','CONSUMO',"
+            "'VIVIENDA_HIPOTECARIA','VIVIENDA_SIN_GARANTIA','VIVIENDA_SOCIAL')",
             name="chk_producto_credito_tipo_asfi",
         ),
     )

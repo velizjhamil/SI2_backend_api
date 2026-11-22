@@ -279,6 +279,12 @@ class TipoCambioUpdate(BaseModel):
     fuente: str | None = Field(default=None, min_length=1, max_length=30)
 
 
+TipoCreditoAsfi = Literal[
+    "EMPRESARIAL", "PYME", "MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO",
+    "VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA", "VIVIENDA_SOCIAL",
+]
+
+
 class ProductoCreditoCreate(BaseModel):
     codigo: str
     nombre: str
@@ -297,10 +303,7 @@ class ProductoCreditoCreate(BaseModel):
     requiere_garantia: bool = False
     cobertura_minima_garantia: Decimal = Field(default=Decimal("100.00"), ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal = Field(default=Decimal("0.00"), ge=0)
-    tipo_credito_asfi: Literal[
-        "MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO",
-        "VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA",
-    ] | None = None
+    tipo_credito_asfi: TipoCreditoAsfi | None = None
     sector_productivo: bool = False
 
 
@@ -321,10 +324,7 @@ class ProductoCreditoUpdate(BaseModel):
     requiere_garantia: bool | None = None
     cobertura_minima_garantia: Decimal | None = Field(None, ge=0, le=Decimal("9999.99"))
     monto_aprobacion_directa: Decimal | None = Field(None, ge=0)
-    tipo_credito_asfi: Literal[
-        "MICROCREDITO", "MICROCREDITO_AGROPECUARIO", "CONSUMO",
-        "VIVIENDA_HIPOTECARIA", "VIVIENDA_SIN_GARANTIA",
-    ] | None = None
+    tipo_credito_asfi: TipoCreditoAsfi | None = None
     sector_productivo: bool | None = None
 
 
@@ -460,6 +460,20 @@ class EvaluacionOut(BaseModel):
     fecha: date
 
 
+class ViviendaSocialIn(BaseModel):
+    valor_vivienda: Decimal = Field(gt=0)
+    tipo_inmueble: Literal["CASA", "DEPARTAMENTO"]
+    unica_vivienda: bool
+
+
+class ViviendaSocialOut(BaseModel):
+    valor_vivienda: Decimal
+    tipo_inmueble: str
+    unica_vivienda: bool
+    valor_ufv: Decimal
+    tasa_maxima: Decimal
+
+
 class SolicitudCreditoCreate(BaseModel):
     socio_id: int
     producto_id: int
@@ -469,6 +483,7 @@ class SolicitudCreditoCreate(BaseModel):
     destino_detalle: str | None = None
     observaciones: str | None = None
     evaluacion: EvaluacionCreditoCreate
+    vivienda_social: ViviendaSocialIn | None = None
 
 
 class SolicitudCreditoUpdate(BaseModel):
@@ -479,6 +494,7 @@ class SolicitudCreditoUpdate(BaseModel):
     destino_detalle: str | None = None
     observaciones: str | None = None
     evaluacion: EvaluacionCreditoUpdate | None = None
+    vivienda_social: ViviendaSocialIn | None = None
 
 
 class SolicitudAnulacionIn(BaseModel):
@@ -660,6 +676,7 @@ class SolicitudOut(BaseModel):
     cobertura: CoberturaOut | None = None
     canal_origen: str = "VENTANILLA"
     requiere_evaluacion: bool = False
+    vivienda_social: ViviendaSocialOut | None = None
 
 
 class VotoComiteIn(BaseModel):
@@ -733,6 +750,8 @@ class SolicitudSimulacionOut(BaseModel):
     cuota_estimada: Decimal
     total_intereses_estimado: Decimal
     total_seguro: Decimal
+    tea: Decimal | None = None
+    teac: Decimal | None = None
     capacidad_pago: Decimal | None
     relacion_cuota_ingreso: Decimal | None
     relacion_maxima: Decimal
@@ -796,6 +815,8 @@ class PlanPagosOut(BaseModel):
     total_interes: Decimal
     total_seguro: Decimal
     total_pagar: Decimal
+    tea: Decimal
+    teac: Decimal
 
 
 class CreditoSocioOut(BaseModel):
@@ -851,6 +872,8 @@ class CreditoOut(BaseModel):
 class CreditoDetalleOut(CreditoOut):
     cronograma: list[CuotaOut]
     total_seguro: Decimal
+    tea: Decimal | None = None
+    teac: Decimal | None = None
     transaccion_desembolso_id: int | None
     usuario: UsuarioDesembolsoOut | None
 

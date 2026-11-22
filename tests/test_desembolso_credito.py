@@ -322,7 +322,7 @@ def test_plan_pagos_preview_returns_complete_schedule(client, credit_fixture):
     assert set(body) == {
         "tipo_amortizacion", "monto", "tasa_interes", "plazo_meses", "moneda",
         "fecha_desembolso", "fecha_primer_vencimiento", "cuotas", "total_capital",
-        "total_interes", "total_seguro", "total_pagar",
+        "total_interes", "total_seguro", "total_pagar", "tea", "teac",
     }
     assert body["tipo_amortizacion"] == "FRANCES"
     assert body["fecha_primer_vencimiento"] == "2026-01-31"

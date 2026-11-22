@@ -32,7 +32,7 @@ from app.api.v1.deps import get_current_user, get_db, require_admin, require_fea
 from app.api.v1.endpoints.ahorros import MONTO_MINIMO_APERTURA, _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.core.config import settings
-from app.services.amortizacion import calcular_cuota_inicial, generar_plan_pagos
+from app.services.amortizacion import calcular_cuota_inicial, calcular_tea, calcular_teac, generar_plan_pagos
 from app.services.cobro_cuotas import calcular_mora, resumir_morosidad
 from app.services.scoring import score_application
 from app.services.credit_request_rules import (
@@ -42,6 +42,8 @@ from app.services.credit_request_rules import (
     requires_field_evaluation,
     requires_field_evaluation_clause,
     validate_base_credit_request,
+    validate_vis_product_rate,
+    validate_vivienda_social,
 )
 from app.services.backups import SupabaseStorage
 from app.models.models import (
@@ -297,6 +299,7 @@ def _validar_datos_producto(db: Session, datos: dict) -> None:
                          (ratio, "La relación cuota-ingreso")):
         if value != value.quantize(Decimal("0.01")):
             raise HTTPException(status_code=400, detail=f"{label} admite hasta dos decimales")
+    validate_vis_product_rate(datos.get("tipo_credito_asfi"), datos["tasa_interes_anual"])
 
 
 def _a_centavos(value: Decimal) -> Decimal:
@@ -366,6 +369,7 @@ def _solicitud_out(solicitud: SolicitudCredito) -> dict:
         "resultado_comite": solicitud.resultado_comite,
         "canal_origen": solicitud.canal_origen or "VENTANILLA",
         "requiere_evaluacion": requires_field_evaluation(solicitud),
+        "vivienda_social": (solicitud.datos_declarados or {}).get("vivienda_social"),
         "socio": {
             "id": socio.id,
             "nombre_completo": f"{socio.nombre} {socio.apellido}",
@@ -510,6 +514,8 @@ def simular_solicitud_credito(
         "cuota_estimada": cuota,
         "total_intereses_estimado": plan["total_interes"],
         "total_seguro": plan["total_seguro"],
+        "tea": plan["tea"],
+        "teac": plan["teac"],
         "capacidad_pago": capacidad_pago,
         "relacion_cuota_ingreso": relacion,
         "relacion_maxima": producto.relacion_cuota_ingreso_max,
@@ -758,6 +764,7 @@ def crear_solicitud_credito(
     datos = body.model_dump()
     datos["evaluacion"] = body.evaluacion.model_dump()
     _validar_datos_solicitud(producto, datos)
+    vivienda_social = validate_vivienda_social(producto, body.vivienda_social, producto.tasa_interes_anual)
     if has_in_progress_request(db, socio.id):
         raise HTTPException(status_code=409, detail="El socio ya tiene una solicitud en curso")
 
@@ -802,6 +809,7 @@ def crear_solicitud_credito(
         destino_detalle=body.destino_detalle.strip() if body.destino_detalle else None,
         observaciones=body.observaciones,
         cooperativa_id=cooperativa_id,
+        datos_declarados=None if vivienda_social is None else {"vivienda_social": vivienda_social},
     )
     db.add(solicitud)
     db.flush()
@@ -1632,6 +1640,15 @@ def actualizar_solicitud_credito(
     _validar_datos_solicitud(producto, merged)
     if not eval_values:
         raise HTTPException(status_code=400, detail="Debe proporcionar la evaluación socioeconómica")
+    declarados = dict(solicitud.datos_declarados or {})
+    vivienda_social = validate_vivienda_social(
+        producto, cambios.get("vivienda_social") or declarados.get("vivienda_social"),
+        producto.tasa_interes_anual,
+    )
+    declarados.pop("vivienda_social", None)
+    if vivienda_social is not None:
+        declarados["vivienda_social"] = vivienda_social
+    solicitud.datos_declarados = declarados or None
 
     for field in ("monto", "plazo_meses", "destino", "destino_detalle", "observaciones"):
         if field in cambios:
@@ -2159,11 +2176,25 @@ def _credito_detalle_out(credito: Credito) -> dict:
         "total_seguro": sum(
             (Decimal(str(row.monto_seguro or 0)) for row in cuotas), Decimal("0.00")
         ),
+        **_tasas_efectivas_credito(credito, cuotas),
         "transaccion_desembolso_id": credito.transaccion_desembolso_id,
         "usuario": None if credito.usuario is None else {
             "id": credito.usuario.id,
             "nombre": credito.usuario.nombre,
         },
+    }
+
+
+def _tasas_efectivas_credito(credito: Credito, cuotas: list[TablaAmortizacion]) -> dict:
+    """TEA from the credit rate and TEAC from the installments the client still owes or paid."""
+    if credito.tasa_interes is None:
+        return {"tea": None, "teac": None}
+    vigentes = [row for row in cuotas if row.estado_pago != "REPROGRAMADA"]
+    if not vigentes or credito.monto_aprobado is None:
+        return {"tea": calcular_tea(Decimal(credito.tasa_interes)), "teac": None}
+    return {
+        "tea": calcular_tea(Decimal(credito.tasa_interes)),
+        "teac": calcular_teac(Decimal(credito.monto_aprobado), [Decimal(row.monto_cuota_total) for row in vigentes]),
     }
 
 

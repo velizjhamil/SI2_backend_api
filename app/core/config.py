@@ -1,3 +1,4 @@
+from decimal import Decimal
 import os
 import logging
 from pathlib import Path
@@ -41,6 +42,8 @@ class Settings(BaseSettings):
     PG_MAJOR: int = 17
 
     COMPROBANTE_SIGNING_KEY: str = "development-only-receipt-key-change-before-production"
+    # Bolivianos per UFV, used by the social-housing (VIS) value limits. Update it to the BCB value.
+    UFV_BOB: Decimal = Decimal("2.60")
     PUBLIC_API_URL: str = "http://localhost:8000/api/v1"
 
     # ── Envío de correo (Brevo, API HTTPS) ──

@@ -1,10 +1,13 @@
 """Shared business rules for staff and mobile credit-request workflows."""
 
+from decimal import Decimal, ROUND_HALF_UP
+
 from fastapi import HTTPException
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app.core.bitacora import registrar_accion
+from app.core.config import settings
 from app.models.models import SolicitudCredito
 
 DESTINOS_SOLICITUD = {
@@ -76,3 +79,51 @@ def cancel_credit_request(
     )
     registrar_accion(db, accion="ANULAR_SOLICITUD", modulo="CREDITOS", usuario_id=user_id,
         cooperativa_id=cooperativa_id, descripcion=description, request=request)
+
+
+# Social housing (vivienda de interés social, DS 1842): value limits in UFV and
+# maximum annual rate by value bracket.
+VIS_TIPO = "VIVIENDA_SOCIAL"
+VIS_TASA_MAXIMA_PRODUCTO = Decimal("6.50")
+VIS_LIMITE_UFV = {"CASA": Decimal("460000"), "DEPARTAMENTO": Decimal("400000")}
+VIS_TRAMOS_TASA = ((Decimal("255000"), Decimal("5.50")), (Decimal("380000"), Decimal("6.00")))
+_CENT = Decimal("0.01")
+
+
+def validate_vis_product_rate(tipo_credito_asfi, tasa_interes_anual) -> None:
+    if tipo_credito_asfi == VIS_TIPO and Decimal(tasa_interes_anual) > VIS_TASA_MAXIMA_PRODUCTO:
+        raise HTTPException(
+            status_code=400,
+            detail="La tasa de un producto de vivienda de interés social no puede superar 6.50% anual",
+        )
+
+
+def validate_vivienda_social(product, vivienda_social, tasa_interes) -> dict | None:
+    """Validate a VIS request and return the housing data to store, or None for other products."""
+    if product.tipo_credito_asfi != VIS_TIPO:
+        return None
+    if not vivienda_social:
+        raise HTTPException(
+            status_code=400,
+            detail="La solicitud de vivienda de interés social requiere los datos de la vivienda",
+        )
+    data = vivienda_social if isinstance(vivienda_social, dict) else vivienda_social.model_dump()
+    if not data.get("unica_vivienda"):
+        raise HTTPException(status_code=400, detail="La vivienda de interés social debe ser la única vivienda del socio")
+    valor = Decimal(str(data["valor_vivienda"])).quantize(_CENT, rounding=ROUND_HALF_UP)
+    valor_ufv = (valor / Decimal(str(settings.UFV_BOB))).quantize(_CENT, rounding=ROUND_HALF_UP)
+    if valor_ufv > VIS_LIMITE_UFV[data["tipo_inmueble"]]:
+        raise HTTPException(status_code=400, detail="El valor de la vivienda supera el límite de vivienda de interés social")
+    tasa_maxima = next((tasa for limite, tasa in VIS_TRAMOS_TASA if valor_ufv <= limite), VIS_TASA_MAXIMA_PRODUCTO)
+    if Decimal(tasa_interes) > tasa_maxima:
+        raise HTTPException(
+            status_code=400,
+            detail=f"La tasa del producto supera la tasa máxima de vivienda de interés social ({tasa_maxima}% anual)",
+        )
+    return {
+        "valor_vivienda": str(valor),
+        "tipo_inmueble": data["tipo_inmueble"],
+        "unica_vivienda": True,
+        "valor_ufv": str(valor_ufv),
+        "tasa_maxima": str(tasa_maxima),
+    }
