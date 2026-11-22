@@ -47,6 +47,8 @@ from app.services.credit_request_rules import (
 )
 from app.services.backups import SupabaseStorage
 from app.models.models import (
+    Notificacion,
+    NotificacionDestinatario,
     Credito,
     CuentaAhorro,
     EvaluacionCampo,
@@ -3314,6 +3316,21 @@ def _oferta_out(db, offer):
     return {"id":offer.id,"socio":{"id":socio.id,"nombre_completo":f"{socio.nombre} {socio.apellido}","ci":socio.ci},"credito_origen":{"id":credit.id,"numero_credito":credit.numero_credito,"estado":credit.estado},"producto":{"id":product.id,"codigo":product.codigo,"nombre":product.nombre},"moneda":currency.codigo_iso if currency else None,"monto_sugerido":offer.monto_sugerido,"plazo_meses":offer.plazo_meses,"tasa_interes":offer.tasa_interes,"cuota_estimada":offer.cuota_estimada,"probabilidad_mora":offer.probabilidad_mora,"nivel_riesgo":offer.nivel_riesgo,"motivos":offer.motivos,"estado":offer.estado,"fecha_generacion":offer.fecha_generacion,"fecha_vencimiento":offer.fecha_vencimiento,"solicitud_generada":None if request is None else {"id":request.id,"numero_solicitud":request.numero_solicitud}}
 
 
+def _notificar_oferta_recredito(db, offer, socio, sender):
+    """Drop a new pre-approved offer in the member's app inbox; members without an account are skipped."""
+    if socio.usuario_id is None:
+        return
+    mensaje = (f"Tienes una oferta de re-crédito preaprobada por {offer.monto_sugerido:.2f} a {offer.plazo_meses} meses, "
+               f"con una tasa de {offer.tasa_interes}% anual y una cuota estimada de {offer.cuota_estimada:.2f}. "
+               f"Vigente hasta el {offer.fecha_vencimiento.strftime('%d/%m/%Y')}.")
+    notificacion = Notificacion(cooperativa_id=offer.cooperativa_id, tipo="PROMOCION",
+                                titulo="Nueva oferta de re-crédito preaprobada", mensaje=mensaje,
+                                destino="SOCIO", usuario_id=sender.id, total_destinatarios=1)
+    notificacion.destinatarios = [NotificacionDestinatario(socio_id=socio.id, usuario_id=socio.usuario_id,
+                                                           mensaje=mensaje)]
+    db.add(notificacion)
+
+
 @router.post("/recreditos/generar", response_model=GeneracionRecreditosOut)
 def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_current_user), db: Session=Depends(get_db), _feature: Usuario=Depends(require_feature("recredito_ia"))):
     coop_id=_validar_escritor_solicitud(usuario)
@@ -3344,9 +3361,11 @@ def generar_ofertas_recredito(request: Request, usuario: Usuario=Depends(get_cur
         arrears_count=db.execute(text("SELECT count(*) FROM pago_cuota p JOIN tabla_amortizacion t ON t.id=p.tabla_amortizacion_id WHERE p.credito_id=:cid AND p.dias_atraso > :grace"),{"cid":credit.id,"grace":product.dias_gracia_mora}).scalar_one()
         member_months=max(0,(date.today().year-socio.fecha_registro.year)*12+date.today().month-socio.fecha_registro.month)
         result=predecir_mora({"ratio_cuota_ingreso":installment/evaluation.ingreso_mensual*100,"asfi":evaluation.calificacion_asfi or "A","antiguedad_laboral_meses":evaluation.antiguedad_laboral_meses or 0,"endeudamiento":evaluation.cuota_deudas_mensual/evaluation.ingreso_mensual*100,"antiguedad_socio_meses":member_months,"ahorro_ratio":Decimal(str(active_savings))/amount*100 if amount else Decimal("0"),"atrasos_previos":int(arrears_count)})
+        if result["nivel_riesgo"]=="ALTO": omitted+=1; continue
         motivo=f"Crédito {credit.numero_credito} {('cancelado' if credit.estado=='CANCELADO' else 'vigente con al menos 70% del principal pagado')} sin atrasos"
         offer=OfertaRecredito(cooperativa_id=coop_id,socio_id=socio.id,credito_origen_id=credit.id,producto_credito_id=product.id,monto_sugerido=amount,plazo_meses=term,tasa_interes=product.tasa_interes_anual,cuota_estimada=installment,probabilidad_mora=result["probabilidad_mora"],nivel_riesgo=result["nivel_riesgo"],motivos=[motivo],fecha_vencimiento=date.today()+timedelta(days=30),usuario_id=usuario.id)
         db.add(offer); db.flush(); generated.append(_oferta_out(db,offer))
+        _notificar_oferta_recredito(db, offer, socio, usuario)
     registrar_accion(db,accion="GENERAR_RECREDITOS",modulo="CREDITOS",usuario_id=usuario.id,cooperativa_id=coop_id,descripcion=f"Generadas {len(generated)} ofertas de re-crédito",request=request); db.commit()
     return {"generadas":len(generated),"omitidas":omitted,"ofertas":generated}
 
