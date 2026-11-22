@@ -14,7 +14,7 @@ Branch: `feat/mirar-w36-m15` in SI2_backend_api and SI2_frontend_web. Delivery: 
 ## Tasks
 
 - [x] T1 S1, S2, S4 backend — route: inline (codex not running in Herdr); RED 8 failed → GREEN; suites reclamos/feedback/mobile_socio/reprogramacion/dashboard 77 passed
-- [ ] T2 S1, S2, S3, S5 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); in progress
+- [x] T2 S1, S2, S3, S5 web — route: delegated to agy (team split, memory `si2-delegate-to-codex-and-agy`); web bafc9c7; agy: lint 0 errors, build OK, 50 tests pass; parent spot check: diff reviewed against backend contracts, lint 0, build OK, tests OK
 
 ## Log
 
@@ -22,3 +22,4 @@ Branch: `feat/mirar-w36-m15` in SI2_backend_api and SI2_frontend_web. Delivery: 
 - L2 (2026-11-22, user): "vamos con los de W36 para adelante"
 - L3: Bolivian national holidays (assumption, departmental holidays excluded): Jan 1, Jan 22, Carnival Monday and Tuesday (Easter -48/-47), Good Friday (Easter -2), May 1, Corpus Christi (Easter +60), Jun 21, Aug 6, Nov 2, Dec 25.
 - L4: T1 contracts: `/socio/creditos/{id}/cronograma` adds `total_capital`, `total_interes`, `total_pagar` (plus existing `total_seguro`), all excluding REPROGRAMADA; `/feedback` and `/feedback/estadisticas` accept `canal=WEB|MOVIL` (422 otherwise); `sumar_dias_habiles` skips national holidays (only used by reclamos deadline and extensions).
+- L5: T2 notes: reprogramaciones list response has no socio name, so the read-only page shows credit number only; socio web claims page has no registration form (assumption in S5). Next: W32-W35 and M13 gaps remain from the audit.
