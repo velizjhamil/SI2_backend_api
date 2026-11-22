@@ -1365,6 +1365,9 @@ class Reclamo(Base):
     motivo_disconformidad: Mapped[str | None] = mapped_column(Text)
     fecha_cierre = mapped_column(TIMESTAMP(timezone=True))
     fecha_escalamiento = mapped_column(TIMESTAMP(timezone=True))
+    ampliaciones: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    motivo_ampliacion: Mapped[str | None] = mapped_column(Text)
+    notificado_asfi: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     socio: Mapped["Socio"] = relationship()
     usuario_atencion: Mapped["Usuario | None"] = relationship()
@@ -1391,6 +1394,8 @@ class ReprogramacionCredito(Base):
     nuevo_plazo_meses: Mapped[int] = mapped_column(Integer, nullable=False)
     saldo_capital = mapped_column(Numeric(14, 2))
     interes_diferido = mapped_column(Numeric(14, 2))
+    interes_corrido = mapped_column(Numeric(14, 2))
+    seguro_diferido = mapped_column(Numeric(14, 2))
     mora_condonada = mapped_column(Numeric(14, 2))
     plazo_anterior: Mapped[int | None] = mapped_column(Integer)
     cuotas_reprogramadas: Mapped[int | None] = mapped_column(Integer)

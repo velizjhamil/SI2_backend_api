@@ -26,35 +26,56 @@ HOY = date.today()
 
 
 class _Cuota:
-    def __init__(self, numero, vencimiento, capital, interes, estado="PENDIENTE"):
+    def __init__(self, numero, vencimiento, capital, interes, estado="PENDIENTE", seguro="0"):
         self.numero_cuota, self.fecha_vencimiento = numero, vencimiento
         self.monto_capital, self.monto_interes, self.estado_pago = Decimal(capital), Decimal(interes), estado
-        self.monto_cuota_total = Decimal(capital) + Decimal(interes)
+        self.monto_seguro = Decimal(seguro)
+        self.monto_cuota_total = Decimal(capital) + Decimal(interes) + Decimal(seguro)
 
 
 def test_plan_carries_overdue_interest_without_capitalizing_it():
+    ultimo_vencimiento = HOY - relativedelta(months=1)
     cuotas = [
-        _Cuota(1, HOY - relativedelta(months=2), "300", "30", "PAGADA"),
-        _Cuota(2, HOY - relativedelta(months=1), "310", "20.50"),
-        _Cuota(3, HOY + relativedelta(days=5), "320", "10"),
+        _Cuota(1, HOY - relativedelta(months=2), "300", "30", "PAGADA", seguro="1.50"),
+        _Cuota(2, ultimo_vencimiento, "310", "20.50", seguro="1.20"),
+        _Cuota(3, HOY + relativedelta(days=5), "320", "10", seguro="0.90"),
     ]
     result = plan_reprogramacion(
         cuotas=cuotas, saldo_capital=Decimal("630.00"), tasa_anual=Decimal("12.00"),
         tipo_amortizacion="FRANCES", tasa_seguro_desgravamen=Decimal("0.00"), nuevo_plazo_meses=6,
-        hoy=HOY, tasa_mora_anual=Decimal("36.00"), dias_gracia_mora=0,
+        hoy=HOY, tasa_mora_anual=Decimal("36.00"), dias_gracia_mora=0, fecha_desembolso=HOY - relativedelta(months=3),
     )
     base = generar_plan_pagos(monto=Decimal("630.00"), tasa_anual=Decimal("12.00"), plazo_meses=6,
                               tipo_amortizacion="FRANCES", fecha_desembolso=HOY)
+    dias = (HOY - ultimo_vencimiento).days
+    corrido = (Decimal("630.00") * Decimal("12.00") / 100 / 360 * dias).quantize(Decimal("0.01"))
     assert result["interes_diferido"] == Decimal("20.50")
+    assert result["interes_corrido"] == corrido and corrido > 0
+    assert result["seguro_diferido"] == Decimal("1.20")
     assert result["cuotas_reprogramadas"] == 2
     assert result["mora_condonada"] > 0
     plan = result["plan"]
+    extra_interes = Decimal("20.50") + corrido
     assert plan["total_capital"] == Decimal("630.00")
-    assert plan["cuotas"][0]["interes"] == base["cuotas"][0]["interes"] + Decimal("20.50")
-    assert plan["cuotas"][0]["cuota"] == base["cuotas"][0]["cuota"] + Decimal("20.50")
+    assert plan["cuotas"][0]["interes"] == base["cuotas"][0]["interes"] + extra_interes
+    assert plan["cuotas"][0]["seguro"] == base["cuotas"][0]["seguro"] + Decimal("1.20")
+    assert plan["cuotas"][0]["cuota"] == base["cuotas"][0]["cuota"] + extra_interes + Decimal("1.20")
     assert plan["cuotas"][1:] == base["cuotas"][1:]
-    assert plan["total_interes"] == base["total_interes"] + Decimal("20.50")
-    assert plan["total_pagar"] == base["total_pagar"] + Decimal("20.50")
+    assert plan["total_interes"] == base["total_interes"] + extra_interes
+    assert plan["total_seguro"] == base["total_seguro"] + Decimal("1.20")
+    assert plan["total_pagar"] == base["total_pagar"] + extra_interes + Decimal("1.20")
+
+
+def test_accrued_interest_starts_at_disbursement_when_nothing_is_due_yet():
+    desembolso = HOY - relativedelta(days=10)
+    cuotas = [_Cuota(1, HOY + relativedelta(days=20), "300", "10")]
+    result = plan_reprogramacion(
+        cuotas=cuotas, saldo_capital=Decimal("1000.00"), tasa_anual=Decimal("18.00"),
+        tipo_amortizacion="FRANCES", tasa_seguro_desgravamen=Decimal("0.00"), nuevo_plazo_meses=3,
+        hoy=HOY, tasa_mora_anual=Decimal("0"), dias_gracia_mora=0, fecha_desembolso=desembolso,
+    )
+    assert result["interes_corrido"] == Decimal("5.00")  # 1000 * 18% / 360 * 10
+    assert result["interes_diferido"] == Decimal("0.00") and result["seguro_diferido"] == Decimal("0.00")
 
 
 def _user(db, roles, coop_id, suffix, rol, label):
@@ -122,7 +143,8 @@ def case():
             ("other_admin", other_admin, "ADMINISTRADOR"), ("socio", socio_user, "SOCIO"),
             ("intruso", intruso_user, "SOCIO"))}
         data = {"tokens": tokens, "coop_id": coop.id, "other_id": other.id, "credito_id": credito.id,
-                "saldo": plan["cuotas"][1]["saldo_inicial"], "interes_vencido": plan["cuotas"][1]["interes"]}
+                "saldo": plan["cuotas"][1]["saldo_inicial"], "interes_vencido": plan["cuotas"][1]["interes"],
+                "seguro_vencido": plan["cuotas"][1]["seguro"]}
         db.commit()
     yield data
     with SessionLocal() as db:
@@ -155,8 +177,13 @@ def test_preview_returns_new_plan_without_changing_anything(client, case):
     body = response.json()
     assert Decimal(body["saldo_capital"]) == case["saldo"]
     assert Decimal(body["interes_diferido"]) == case["interes_vencido"]
+    assert Decimal(body["seguro_diferido"]) == case["seguro_vencido"]
+    assert Decimal(body["interes_corrido"]) > 0
     assert len(body["cuotas"]) == 18 and Decimal(body["total_capital"]) == case["saldo"]
     assert {"tea", "teac", "total_seguro", "mora_condonada"} <= body.keys()
+    primera = body["cuotas"][0]
+    seguro_base = (case["saldo"] * Decimal("0.05") / 100).quantize(Decimal("0.01"))
+    assert Decimal(primera["seguro"]) == seguro_base + case["seguro_vencido"]
     with SessionLocal() as db:
         estados = db.execute(text("SELECT estado_pago FROM tabla_amortizacion WHERE credito_id = :c"),
                              {"c": case["credito_id"]}).scalars().all()
@@ -190,6 +217,7 @@ def test_approval_reschedules_unpaid_installments(client, case):
     body = approved.json()
     assert body["estado"] == "APROBADA" and body["cuotas_reprogramadas"] == 11
     assert Decimal(body["interes_diferido"]) == case["interes_vencido"] and body["plazo_anterior"] == 12
+    assert Decimal(body["seguro_diferido"]) == case["seguro_vencido"] and Decimal(body["interes_corrido"]) > 0
     assert client.post(f"/api/v1/creditos/reprogramaciones/{request_id}/aprobar",
                        headers=_h(case, "admin")).status_code == 409
 

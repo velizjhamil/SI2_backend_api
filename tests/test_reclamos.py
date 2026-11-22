@@ -187,3 +187,68 @@ def test_staff_registers_counter_claim_and_socio_cannot_use_staff_routes(client,
     assert client.get("/api/v1/reclamos", headers=_h(case, "ana")).status_code == 403
     assert client.post(f"/api/v1/socio/reclamos/{created.json()['id']}/conformidad",
                        json={"conforme": True}, headers=_h(case, "ana")).status_code == 404
+
+
+def _set_registro(claim_id, registro, limite):
+    with SessionLocal() as db:
+        db.execute(text("UPDATE reclamo SET fecha_registro = :r, fecha_limite_respuesta = :l WHERE id = :i"),
+                   {"r": registro, "l": limite, "i": claim_id})
+        db.commit()
+
+
+def _ampliar(client, case, claim_id, nueva_fecha, motivo="Requiere revisar movimientos del sistema"):
+    return client.post(f"/api/v1/reclamos/{claim_id}/ampliar", headers=_h(case, "admin"),
+                       json={"nueva_fecha": nueva_fecha.isoformat(), "motivo": motivo})
+
+
+@needs_db
+def test_first_extension_is_capped_at_ten_business_days(client, case):
+    claim = _create(client, case).json()
+    registro = date.today()
+    limite10 = sumar_dias_habiles(registro, 10)
+    too_far = _ampliar(client, case, claim["id"], limite10 + timedelta(days=1))
+    assert too_far.status_code == 400
+    assert too_far.json()["detail"] == "La primera ampliación no puede superar los 10 días hábiles desde la recepción del reclamo"
+    not_later = _ampliar(client, case, claim["id"], date.today())
+    assert not_later.status_code == 400
+    no_reason = client.post(f"/api/v1/reclamos/{claim['id']}/ampliar", headers=_h(case, "admin"),
+                            json={"nueva_fecha": limite10.isoformat(), "motivo": " "})
+    assert no_reason.status_code == 422
+
+    extended = _ampliar(client, case, claim["id"], limite10)
+    assert extended.status_code == 200, extended.text
+    body = extended.json()
+    assert body["fecha_limite_respuesta"] == limite10.isoformat()
+    assert body["ampliaciones"] == 1 and body["notificado_asfi"] is False
+    assert body["motivo_ampliacion"] == "Requiere revisar movimientos del sistema"
+
+
+@needs_db
+def test_additional_extensions_notify_asfi_and_are_limited_to_two(client, case):
+    claim = _create(client, case).json()
+    limite = sumar_dias_habiles(date.today(), 10)
+    assert _ampliar(client, case, claim["id"], limite).status_code == 200
+    over = _ampliar(client, case, claim["id"], sumar_dias_habiles(limite, 5) + timedelta(days=1))
+    assert over.status_code == 400 and over.json()["detail"] == "Cada ampliación adicional no puede superar 5 días hábiles"
+    for numero in (2, 3):
+        limite = sumar_dias_habiles(limite, 5)
+        response = _ampliar(client, case, claim["id"], limite)
+        assert response.status_code == 200, response.text
+        assert response.json()["ampliaciones"] == numero and response.json()["notificado_asfi"] is True
+    fourth = _ampliar(client, case, claim["id"], sumar_dias_habiles(limite, 1))
+    assert fourth.status_code == 409 and fourth.json()["detail"] == "Ya se usaron las dos ampliaciones adicionales permitidas"
+
+
+@needs_db
+def test_extension_requires_open_claim_within_current_deadline(client, case):
+    claim = _create(client, case).json()
+    _set_registro(claim["id"], date.today() - timedelta(days=14), date.today() - timedelta(days=1))
+    late = _ampliar(client, case, claim["id"], date.today() + timedelta(days=1))
+    assert late.status_code == 409
+    other = _create(client, case).json()
+    client.post(f"/api/v1/reclamos/{other['id']}/responder", headers=_h(case, "admin"),
+                json={"respuesta": "Resuelto", "procedente": True})
+    answered = _ampliar(client, case, other["id"], sumar_dias_habiles(date.today(), 6))
+    assert answered.status_code == 409
+    assert client.post(f"/api/v1/reclamos/{other['id']}/ampliar", headers=_h(case, "ana"),
+                       json={"nueva_fecha": date.today().isoformat(), "motivo": "x"}).status_code == 403

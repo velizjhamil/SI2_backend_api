@@ -12,7 +12,13 @@ from app.api.v1.deps import get_current_socio, get_current_user, get_db
 from app.api.v1.endpoints.ahorros import _siguiente_secuencia
 from app.core.bitacora import registrar_accion
 from app.models.models import Credito, Reclamo, Socio, Usuario
-from app.services.reclamos import PLAZO_RESPUESTA_DIAS_HABILES, sumar_dias_habiles
+from app.services.reclamos import (
+    AMPLIACIONES_ADICIONALES,
+    DIAS_POR_AMPLIACION_ADICIONAL,
+    PLAZO_MAXIMO_PRIMERA_AMPLIACION,
+    PLAZO_RESPUESTA_DIAS_HABILES,
+    sumar_dias_habiles,
+)
 
 router = APIRouter()
 socio_router = APIRouter()
@@ -58,6 +64,19 @@ class RespuestaIn(BaseModel):
         return value
 
 
+class AmpliacionIn(BaseModel):
+    nueva_fecha: date
+    motivo: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("motivo")
+    @classmethod
+    def _motivo(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("El motivo de la ampliación es obligatorio")
+        return value
+
+
 class ConformidadIn(BaseModel):
     conforme: bool
     motivo: str | None = Field(None, max_length=2000)
@@ -88,6 +107,8 @@ def _out(row: Reclamo) -> dict:
         "respuesta": row.respuesta, "procedente": row.procedente, "fecha_respuesta": _iso(row.fecha_respuesta),
         "conforme": row.conforme, "motivo_disconformidad": row.motivo_disconformidad,
         "fecha_cierre": _iso(row.fecha_cierre), "fecha_escalamiento": _iso(row.fecha_escalamiento),
+        "ampliaciones": row.ampliaciones or 0, "motivo_ampliacion": row.motivo_ampliacion,
+        "notificado_asfi": bool(row.notificado_asfi),
     }
 
 
@@ -232,5 +253,39 @@ def responder_reclamo(reclamo_id: int, body: RespuestaIn, request: Request,
     row.usuario_atencion_id = row.usuario_atencion_id or usuario.id
     registrar_accion(db, accion="RESPONDER_RECLAMO", modulo="RECLAMOS", usuario_id=usuario.id, cooperativa_id=tenant,
                      descripcion=f"Reclamo respondido: {row.numero_reclamo}", request=request)
+    db.commit()
+    return _out(_obtener(db, tenant, reclamo_id))
+
+
+@router.post("/{reclamo_id}/ampliar")
+def ampliar_plazo_reclamo(reclamo_id: int, body: AmpliacionIn, request: Request,
+                          usuario: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Extend the response deadline as RNSF Libro 4°, Título I, Capítulo I, Sección 4, Art. 3 allows."""
+    tenant = _tenant_personal(usuario)
+    row = _obtener(db, tenant, reclamo_id, lock=True)
+    if row.estado not in {"REGISTRADO", "EN_ATENCION"}:
+        raise HTTPException(409, "Solo se puede ampliar el plazo de un reclamo pendiente de respuesta")
+    if date.today() > row.fecha_limite_respuesta:
+        raise HTTPException(409, "El plazo de respuesta ya venció; la ampliación debe comunicarse antes del vencimiento")
+    if (row.ampliaciones or 0) >= 1 + AMPLIACIONES_ADICIONALES:
+        raise HTTPException(409, "Ya se usaron las dos ampliaciones adicionales permitidas")
+    if body.nueva_fecha <= row.fecha_limite_respuesta:
+        raise HTTPException(400, "La nueva fecha debe ser posterior a la fecha límite actual")
+    if not row.ampliaciones:
+        recepcion = row.fecha_registro.astimezone().date()
+        if body.nueva_fecha > sumar_dias_habiles(recepcion, PLAZO_MAXIMO_PRIMERA_AMPLIACION):
+            raise HTTPException(400, "La primera ampliación no puede superar los 10 días hábiles desde la recepción del reclamo")
+    else:
+        if body.nueva_fecha > sumar_dias_habiles(row.fecha_limite_respuesta, DIAS_POR_AMPLIACION_ADICIONAL):
+            raise HTTPException(400, "Cada ampliación adicional no puede superar 5 días hábiles")
+        row.notificado_asfi = True
+    row.ampliaciones = (row.ampliaciones or 0) + 1
+    row.fecha_limite_respuesta = body.nueva_fecha
+    row.motivo_ampliacion = body.motivo
+    registrar_accion(db, accion="AMPLIAR_PLAZO_RECLAMO", modulo="RECLAMOS", usuario_id=usuario.id,
+                     cooperativa_id=tenant,
+                     descripcion=(f"Plazo del reclamo {row.numero_reclamo} ampliado al {body.nueva_fecha.isoformat()}"
+                                  + (" (comunicado a ASFI)" if row.notificado_asfi else "")),
+                     request=request)
     db.commit()
     return _out(_obtener(db, tenant, reclamo_id))

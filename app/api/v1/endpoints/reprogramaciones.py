@@ -71,7 +71,8 @@ def _out(row: ReprogramacionCredito) -> dict:
         "numero_credito": row.credito.numero_credito if row.credito else None,
         "estado": row.estado, "canal": row.canal, "motivo": row.motivo,
         "nuevo_plazo_meses": row.nuevo_plazo_meses, "saldo_capital": row.saldo_capital,
-        "interes_diferido": row.interes_diferido, "mora_condonada": row.mora_condonada,
+        "interes_diferido": row.interes_diferido, "interes_corrido": row.interes_corrido,
+        "seguro_diferido": row.seguro_diferido, "mora_condonada": row.mora_condonada,
         "plazo_anterior": row.plazo_anterior, "cuotas_reprogramadas": row.cuotas_reprogramadas,
         "motivo_rechazo": row.motivo_rechazo, "usuario_solicitud_id": row.usuario_solicitud_id,
         "usuario_resolucion_id": row.usuario_resolucion_id,
@@ -129,6 +130,7 @@ def _calcular(credito: Credito, nuevo_plazo_meses: int) -> dict:
         tipo_amortizacion=credito.tipo_amortizacion or producto.tipo_amortizacion,
         tasa_seguro_desgravamen=producto.tasa_seguro_desgravamen, nuevo_plazo_meses=nuevo_plazo_meses,
         hoy=date.today(), tasa_mora_anual=producto.tasa_mora_anual, dias_gracia_mora=producto.dias_gracia_mora,
+        fecha_desembolso=credito.fecha_desembolso,
     )
 
 
@@ -188,6 +190,7 @@ def simular_reprogramacion(credito_id: int, body: PlazoIn, usuario: Usuario = De
         **result["plan"],
         "moneda": None if moneda is None else MonedaOut.model_validate(moneda).model_dump(mode="json"),
         "saldo_capital": result["saldo_capital"], "interes_diferido": result["interes_diferido"],
+        "interes_corrido": result["interes_corrido"], "seguro_diferido": result["seguro_diferido"],
         "mora_condonada": result["mora_condonada"], "cuotas_reprogramadas": result["cuotas_reprogramadas"],
     })
 
@@ -254,6 +257,8 @@ def aprobar_reprogramacion(reprogramacion_id: int, request: Request, usuario: Us
     row.estado = "APROBADA"
     row.saldo_capital = result["saldo_capital"]
     row.interes_diferido = result["interes_diferido"]
+    row.interes_corrido = result["interes_corrido"]
+    row.seguro_diferido = result["seguro_diferido"]
     row.mora_condonada = result["mora_condonada"]
     row.plazo_anterior = row.plazo_anterior or len(credito.cronograma)
     row.cuotas_reprogramadas = reprogramadas

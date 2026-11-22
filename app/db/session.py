@@ -147,6 +147,18 @@ def init_db() -> None:
             "ALTER TABLE pago_cuota ADD COLUMN IF NOT EXISTS monto_seguro NUMERIC(12,2) NOT NULL DEFAULT 0.00"
         ))
 
+        # --- claim extensions and rescheduling accruals (migration 040) ---
+        # create_all() creates these tables on a new database; on an existing one
+        # it does not add columns, so add them only when the table already exists.
+        for statement in (
+            "ALTER TABLE IF EXISTS reclamo ADD COLUMN IF NOT EXISTS ampliaciones INT NOT NULL DEFAULT 0",
+            "ALTER TABLE IF EXISTS reclamo ADD COLUMN IF NOT EXISTS motivo_ampliacion TEXT",
+            "ALTER TABLE IF EXISTS reclamo ADD COLUMN IF NOT EXISTS notificado_asfi BOOLEAN NOT NULL DEFAULT false",
+            "ALTER TABLE IF EXISTS reprogramacion_credito ADD COLUMN IF NOT EXISTS interes_corrido NUMERIC(14,2)",
+            "ALTER TABLE IF EXISTS reprogramacion_credito ADD COLUMN IF NOT EXISTS seguro_diferido NUMERIC(14,2)",
+        ):
+            conn.execute(text(statement))
+
         # --- credit rescheduling counter (migration 039) ---
         conn.execute(text(
             "ALTER TABLE credito ADD COLUMN IF NOT EXISTS numero_reprogramaciones INT NOT NULL DEFAULT 0"
